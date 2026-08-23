@@ -123,10 +123,12 @@ jobs:
             echo "  ops 저장소에서 수동으로 이 태그를 배포하거나, 토큰을 넣고 다시 실행할 것." >&2
             exit 1
           fi
-          gh api -X POST "repos/${{ vars.OPS_REPO }}/dispatches" \
-            -f event_type=deploy \
-            -F "client_payload[tag]=${{ steps.tag.outputs.tag }}" \
-            -F "client_payload[sha]=${GITHUB_SHA}"
+          # ★페이로드를 jq로 만들어 --input으로 넣는다. `-f a[b]=c` 같은 중첩 필드 문법에
+          # 기대지 않는 이유는, 그게 조용히 평평한 객체로 들어가면 ops 쪽이 태그를 못 읽고
+          # "신호는 갔는데 배포는 엉뚱한 것"이 되기 때문이다.
+          jq -n --arg tag "${{ steps.tag.outputs.tag }}" --arg sha "${GITHUB_SHA}" \
+            '{event_type:"deploy", client_payload:{tag:$tag, sha:$sha}}' \
+            | gh api -X POST "repos/${{ vars.OPS_REPO }}/dispatches" --input -
           echo "배포 신호를 보냈다 — 진행 상황은 ops 저장소의 Actions에서 본다."
 
       - name: 배포를 건너뛴 경우 안내
