@@ -41,6 +41,21 @@ export function emailFromAutodiscoverBody(body: string | undefined): string | nu
   return m ? m[1]! : null;
 }
 
+/**
+ * 후행 슬래시 제거 — **정규식을 쓰지 않는다.**
+ *
+ * ★왜: `path.replace(/\/+$/, "")`가 폴리노미얼 ReDoS였다(CodeQL js/polynomial-redos).
+ * `\/+$`는 끝에 고정돼 있지만 엔진은 **모든 시작 위치에서** 시도하므로, 슬래시가 길게
+ * 이어지는 입력에서 O(n²)가 된다. 실측: 슬래시 2000개 2.2ms · 8000개 44ms · 16000개 **205ms**.
+ * `req.path`는 공개 HTTP 리스너가 받는 **공격자 입력**이라 요청 하나가 그만큼 CPU를 잡는다.
+ * 뒤에서부터 세면 O(n)이고 하는 일은 같다.
+ */
+function trimTrailingSlashes(path: string): string {
+  let end = path.length;
+  while (end > 0 && path.charCodeAt(end - 1) === 0x2f) end -= 1;
+  return path.slice(0, end);
+}
+
 function domainOf(email: string): string | null {
   const at = email.lastIndexOf("@");
   return at > 0 && at < email.length - 1 ? email.slice(at + 1).toLowerCase() : null;
@@ -48,7 +63,7 @@ function domainOf(email: string): string | null {
 
 export function handleAutoconfig(req: AutoconfigRequest, settings: AutoconfigSettings): AutoconfigResponse | null {
   const method = req.method.toUpperCase();
-  const path = req.path.replace(/\/+$/, "") || "/"; // 후행 슬래시 정규화
+  const path = trimTrailingSlashes(req.path) || "/"; // 후행 슬래시 정규화
   const lower = path.toLowerCase();
 
   // ── Thunderbird ──────────────────────────────────────────────────

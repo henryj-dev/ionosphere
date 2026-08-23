@@ -45,6 +45,21 @@ describe("applyLegacyEnvAliases", () => {
     expect(message.includes("old") || message.includes("new")).toBe(false);
   });
 
+  test("DB URL도 값을 남기지 않는다 — 접속 문자열에 비밀번호가 박혀 있다", () => {
+    const env: Record<string, string | undefined> = {
+      MAILER_DB_URL: "postgres://u:oldpw@h/db",
+      IONOSPHERE_DB_URL: "postgres://u:newpw@h/db",
+    };
+    let message = "";
+    try {
+      applyLegacyEnvAliases(env);
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message.includes("DB_URL")).toBe(true);
+    expect(message.includes("oldpw") || message.includes("newpw")).toBe(false);
+  });
+
   test("값이 undefined인 항목은 넘기지 않는다", () => {
     const env: Record<string, string | undefined> = { MAILER_DB: undefined };
     expect(applyLegacyEnvAliases(env)).toEqual([]);

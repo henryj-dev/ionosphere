@@ -23,9 +23,16 @@ const PREFIX = "IONOSPHERE_";
 
 export class LegacyEnvConflictError extends Error {}
 
-/** 저널에 값을 남기면 안 되는 이름 — 마스터키·토큰·비밀번호 계열. */
+/**
+ * 저널에 값을 남기면 안 되는 이름 — 마스터키·토큰·비밀번호, 그리고 자격증명이 박히는 DB URL.
+ *
+ * ★두 규칙을 한 정규식에 합치지 않는다. `/KEY|SECRET|TOKEN|PASSWORD|_URL$/`로 쓰면 `$`가
+ * **마지막 갈래에만** 붙는데 읽는 사람은 전체에 걸린다고 읽는다(CodeQL
+ * `js/regex/missing-regexp-anchor`가 지적한 자리다). 의도는 "이 낱말을 **포함**하거나,
+ * `_URL`로 **끝나거나**"이므로 그렇게 나눠 적는다.
+ */
 function secret(key: string): boolean {
-  return /KEY|SECRET|TOKEN|PASSWORD|_URL$/.test(key);
+  return /KEY|SECRET|TOKEN|PASSWORD/.test(key) || key.endsWith("_URL");
 }
 
 /**

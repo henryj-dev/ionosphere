@@ -174,3 +174,24 @@ describe("라이브 HTTP 왕복", () => {
     }
   });
 });
+
+describe("경로 정규화", () => {
+  /**
+   * 후행 슬래시가 길게 이어져도 같은 라우트로 간다. 이 검사가 지키는 것은 라우팅 동작이지만,
+   * 같은 자리에서 고친 진짜 문제는 **ReDoS**였다 — `path.replace(/\\/+$/, "")`가 슬래시가
+   * 이어지는 입력에서 O(n²)였다(2000개 2.2ms · 8000개 44ms · 16000개 205ms).
+   * `req.path`는 공개 리스너가 받는 공격자 입력이라 요청 하나가 그만큼 CPU를 잡는다.
+   * 정규식으로 되돌리면 CodeQL js/polynomial-redos가 다시 잡는다.
+   */
+  test("후행 슬래시가 몇 개든 같은 라우트로 간다", () => {
+    const one = handleAutoconfig(req("GET", "/mail/config-v1.1.xml/", { query: "emailaddress=u@ionosphere.test" }), settings);
+    const many = handleAutoconfig(req("GET", "/mail/config-v1.1.xml" + "/".repeat(500), { query: "emailaddress=u@ionosphere.test" }), settings);
+    expect(one?.status).toBe(200);
+    expect(many?.status).toBe(one?.status);
+    expect(many?.body).toBe(one?.body);
+  });
+
+  test("슬래시만 있는 경로는 루트로 떨어진다(빈 문자열이 되지 않는다)", () => {
+    expect(handleAutoconfig(req("GET", "/".repeat(100)), settings)).toBeNull();
+  });
+});

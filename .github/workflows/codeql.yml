@@ -40,6 +40,8 @@ jobs:
       - uses: github/codeql-action/init@v3
         with:
           languages: javascript-typescript
+          # 테스트 경로 제외 — 이유는 그 파일 안에 적었다.
+          config-file: ./.github/codeql/codeql-config.yml
           # security-extended: 기본 질의 묶음보다 넓다. 오탐이 조금 늘지만, 이 저장소는
           # 신뢰할 수 없는 입력을 직접 파싱하는 코드가 대부분이라 넓은 쪽이 맞다.
           queries: security-extended
