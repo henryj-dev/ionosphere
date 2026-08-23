@@ -453,7 +453,7 @@ describe("HttpsFrontServer — request smuggling 방어", () => {
   /**
    * ★위 테스트만으로는 방어가 고정되지 않는다(뮤테이션으로 확인): bun은 Content-Length 초과분을
    * 조용히 잘라서 res 'error' 자체가 안 난다. 이 결함은 **node에서만** 재현되고 라이브가 node라
-   * (`deploy/systemd/ionosphere.service`) node 하위 프로세스로 실제 실행해 고정한다.
+   * (운영 저장소의 systemd 유닛) node 하위 프로세스로 실제 실행해 고정한다.
    * 방어를 빼면 unhandled 'error' → node 기본 종료로 exit 1이 된다(실측).
    */
   test("[node] upstream 과다 전송이 프로세스를 죽이지 않는다", () => {

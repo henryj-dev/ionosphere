@@ -3,7 +3,7 @@
  *
  * 왜 별도 프로세스인가: 이 결함은 node에서만 재현된다(bun은 Content-Length 초과분을 조용히
  * 자른다). 테스트 러너는 bun이라 같은 프로세스 안에서는 고정할 수 없다. 라이브가 node이므로
- * (`deploy/systemd/ionosphere.service`의 ExecStart) node에서 반드시 잡혀 있어야 한다.
+ * (운영 저장소의 systemd 유닛의 ExecStart) node에서 반드시 잡혀 있어야 한다.
  *
  * upstream이 선언한 Content-Length보다 많이 보내면 `ur.pipe(res)`가 이미 끝난 res에 쓰면서
  * ERR_STREAM_WRITE_AFTER_END를 던진다. res에 'error' 리스너가 없으면 unhandled가 되고

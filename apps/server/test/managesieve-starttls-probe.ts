@@ -5,7 +5,7 @@
  * (oven-sh/bun#25044 — 실측: 핸드셰이크가 그대로 멈춘다). 테스트 러너는 bun이라 같은
  * 프로세스에서는 이 경로를 돌릴 수 없고, 조건부 skip으로 두면 **기본 `bun test`에서 통째로
  * 건너뛰어 회귀 방어가 되지 않는다.** 라이브 런타임이 node이므로
- * (`deploy/systemd/ionosphere.service`의 ExecStart) node에서 반드시 잡혀 있어야 한다.
+ * (운영 저장소의 systemd 유닛의 ExecStart) node에서 반드시 잡혀 있어야 한다.
  *
  * 고정하는 것(감사 L-5): 4190에서 STARTTLS 광고 → 업그레이드 → SASL PLAIN 인증 →
  * PUTSCRIPT → SETACTIVE 가 **끝까지** 동작한다. 이 경로가 죽으면 평문 AUTH는 fail closed라

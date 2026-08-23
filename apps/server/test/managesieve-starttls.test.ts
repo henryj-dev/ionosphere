@@ -197,7 +197,7 @@ describe("4190 STARTTLS 인증 경로", () => {
   /**
    * ★위 테스트만으로는 라이브 경로가 고정되지 않는다: 기본 러너인 bun 1.3.14는 서버측
    * 업그레이드를 못 해(oven-sh/bun#25044) 업그레이드 테스트가 조건부로 빠진다. 라이브는 node라
-   * (`deploy/systemd/ionosphere.service`) node 하위 프로세스로 실제 실행해 고정한다.
+   * (운영 저장소의 systemd 유닛) node 하위 프로세스로 실제 실행해 고정한다.
    * 프로브가 STARTTLS→인증→PUTSCRIPT→SETACTIVE를 끝까지 확인하고 어긋나면 exit 1.
    */
   test("[node] STARTTLS 인증 경로가 라이브 런타임에서 끝까지 동작한다", () => {

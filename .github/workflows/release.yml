@@ -1,0 +1,134 @@
+name: Release & deploy
+
+# 배포는 **요청할 때만** 일어난다. main에 푸시해도 배포되지 않는다 — 커밋은 쌓이고,
+# 여기서 한 번 실행하는 것이 "이제 내보낸다"는 신호다.
+#
+# ★왜 main 푸시로 자동 배포하지 않는가: 이 저장소는 메일 서버다. 배포는 수신·발송이 잠깐
+# 끊기는 일이고, 마이그레이션이 끼면 되돌릴 수 없다. "머지했으니 나간다"보다 "지금 내보낸다"를
+# 사람이 정하는 편이 맞다.
+#
+# ★왜 실제 SSH 배포를 여기서 하지 않는가: 이 저장소는 공개이고 **Actions 로그도 공개**다.
+# 배포는 내부 주소·호스트 지문을 다루는데, 로그에 한 줄이라도 찍히면 되돌릴 수 없다.
+# (시크릿으로 옮겨도 부족하다 — GitHub는 시크릿의 정확한 문자열만 가리므로 `${target##*@}`
+#  처럼 잘라낸 부분 문자열은 그대로 노출된다.) 그래서 여기서는 **태그와 릴리즈까지만** 만들고,
+# 실제 배포는 비공개 ops 저장소가 그 태그를 받아 수행한다. 사람이 보는 동작은 같다.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "릴리즈 태그 (예: v0.3.0). 비우면 날짜 기반으로 만든다"
+        required: false
+        type: string
+      deploy:
+        description: "라이브 배포까지 진행한다"
+        type: boolean
+        default: true
+
+# 태그와 릴리즈를 만든다.
+permissions:
+  contents: write
+
+# 릴리즈가 겹치면 태그 경합이 난다. 진행 중인 것을 끊지 않는다 — 배포 신호까지 보낸 뒤
+# 중간에 끊기면 "릴리즈는 있는데 배포는 안 된" 상태가 된다.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # fetch-depth: 0 — 릴리즈 노트 생성이 직전 태그를 찾아야 한다.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # ★main에서만 릴리즈한다. 브랜치에서 릴리즈하면 그 태그가 main에 없는 커밋을 가리키고,
+      # 라이브가 main보다 앞선 코드로 돌게 된다 — 이후의 모든 비교가 어긋난다.
+      - name: 브랜치 확인
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::main에서만 릴리즈한다 (현재: ${GITHUB_REF})" >&2
+            exit 1
+          fi
+
+      # ★검증되지 않은 커밋을 내보내지 않는다. CI를 여기서 다시 돌리는 대신 **이 커밋의**
+      # CI 결과를 확인한다 — 같은 커밋이므로 결과가 같고, 4~8분을 아낀다.
+      # 아직 안 돌았거나 실패했으면 세운다(fail closed). 검사 자체가 없는 상태를 통과로
+      # 읽으면 "게이트가 있다고 생각했는데 없는" 상태가 되는데 그게 제일 위험하다.
+      - name: CI 초록 확인
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          runs=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs" \
+                   --jq '[.check_runs[] | select(.name | startswith("verify"))]')
+          total=$(echo "$runs" | jq 'length')
+          if [ "$total" -eq 0 ]; then
+            echo "::error::이 커밋에서 CI(verify)가 돈 적이 없다 — 검증 없이 릴리즈하지 않는다" >&2
+            exit 1
+          fi
+          bad=$(echo "$runs" | jq -r '[.[] | select(.conclusion != "success")] | length')
+          echo "$runs" | jq -r '.[] | "  \(.name): \(.status)/\(.conclusion // "-")"'
+          if [ "$bad" -ne 0 ]; then
+            echo "::error::CI가 성공이 아니다 — ${bad}개 미통과" >&2
+            exit 1
+          fi
+          echo "CI ${total}개 전부 success"
+
+      - name: 태그 결정
+        id: tag
+        run: |
+          set -euo pipefail
+          want="${{ inputs.version }}"
+          if [ -z "$want" ]; then
+            # 날짜 기반 폴백. 같은 날 두 번이면 뒤에 순번을 붙인다.
+            base="v$(date -u +%Y.%m.%d)"
+            want="$base"
+            n=1
+            while git rev-parse -q --verify "refs/tags/$want" >/dev/null; do
+              n=$((n+1)); want="${base}-${n}"
+            done
+          fi
+          if git rev-parse -q --verify "refs/tags/$want" >/dev/null; then
+            echo "::error::태그 $want 가 이미 있다 — 같은 이름으로 다시 릴리즈하지 않는다" >&2
+            exit 1
+          fi
+          echo "tag=$want" >> "$GITHUB_OUTPUT"
+          echo "릴리즈 태그: $want"
+
+      - name: 릴리즈 생성
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.tag.outputs.tag }}" \
+            --target "${GITHUB_SHA}" \
+            --title "${{ steps.tag.outputs.tag }}" \
+            --generate-notes
+          echo "릴리즈: ${{ github.server_url }}/${GITHUB_REPOSITORY}/releases/tag/${{ steps.tag.outputs.tag }}"
+
+      # ★배포 신호만 보낸다. 대상·자격증명·로그는 전부 저쪽에 있다.
+      # 토큰이 없으면 **조용히 넘어가지 않고 세운다** — 릴리즈만 만들어 두고 배포됐다고
+      # 읽는 것이 이 워크플로에서 가장 위험한 오해다.
+      - name: 배포 신호 전송
+        if: ${{ inputs.deploy }}
+        env:
+          GH_TOKEN: ${{ secrets.OPS_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::secrets.OPS_DISPATCH_TOKEN 이 없다 — 릴리즈는 만들어졌지만 배포 신호를 못 보냈다." >&2
+            echo "  ops 저장소에서 수동으로 이 태그를 배포하거나, 토큰을 넣고 다시 실행할 것." >&2
+            exit 1
+          fi
+          gh api -X POST "repos/${{ vars.OPS_REPO }}/dispatches" \
+            -f event_type=deploy \
+            -F "client_payload[tag]=${{ steps.tag.outputs.tag }}" \
+            -F "client_payload[sha]=${GITHUB_SHA}"
+          echo "배포 신호를 보냈다 — 진행 상황은 ops 저장소의 Actions에서 본다."
+
+      - name: 배포를 건너뛴 경우 안내
+        if: ${{ !inputs.deploy }}
+        run: echo "릴리즈만 만들었다. 배포하려면 ops 저장소에서 이 태그로 Deploy를 실행할 것."

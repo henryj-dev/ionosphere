@@ -4,7 +4,7 @@
  * ★왜 node 하위 프로세스인가: 기본 러너 bun 1.3.14는 서버측 TLS 업그레이드를 못 하고
  * (oven-sh/bun#25044), 그때 조립층이 STARTTLS를 **자동으로 끈다**. bun에서 돌리면
  * "광고 안 됨"이 정상 동작이라 **기능 부재와 구분되지 않는다.** 라이브는 node이므로
- * (`deploy/systemd/ionosphere.service`) 거기서 끝까지 확인한다 — managesieve-starttls와 같은 규율.
+ * (운영 저장소의 systemd 유닛) 거기서 끝까지 확인한다 — managesieve-starttls와 같은 규율.
  *
  * ★무엇을 막는가: 이 포트들은 STARTTLS가 없으면 "연결은 되는데 로그인은 영원히 불가능한"
  * 상태가 된다. 오류가 아니라 **기능 없음**이라 아무도 소리치지 않고, 사용자는 "비밀번호가
