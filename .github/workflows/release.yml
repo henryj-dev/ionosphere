@@ -109,18 +109,46 @@ jobs:
             --generate-notes
           echo "릴리즈: ${{ github.server_url }}/${GITHUB_REPOSITORY}/releases/tag/${{ steps.tag.outputs.tag }}"
 
+      # ★운영 저장소의 **이름을 이 파일에 적지 않는다.** 이 저장소는 공개이고, 비공개
+      # 저장소의 존재·이름은 굳이 알릴 이유가 없다. 값은 `vars.OPS_REPO`에서 온다.
+      # (출력은 $GITHUB_OUTPUT으로만 흘러 로그에 찍히지 않는다.)
+      - name: 운영 저장소 이름 분리
+        if: ${{ inputs.deploy }}
+        id: ops
+        env:
+          OPS_REPO: ${{ vars.OPS_REPO }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OPS_REPO:-}" ]; then
+            echo "::error::vars.OPS_REPO 가 비어 있다 — 어디로 신호를 보낼지 모른다." >&2
+            exit 1
+          fi
+          echo "name=${OPS_REPO##*/}" >> "$GITHUB_OUTPUT"
+
+      # ★GitHub App으로 **실행할 때마다** 설치 토큰을 새로 받는다(유효기간 1시간).
+      #
+      # 왜 PAT가 아닌가: fine-grained PAT는 최대 1년이고, 만료되면 어느 날 **릴리즈는
+      # 만들어지는데 배포 신호만** 실패한다 — 이 저장소가 계속 경계해 온 "조용히 깨지는 것"의
+      # 전형이다. 게다가 개인에 묶여 있어 계정이 바뀌면 같이 죽는다. 앱은 만료가 없고 조직에
+      # 귀속되며, 권한(운영 저장소의 contents:write)이 앱 수준에 명시돼 언제든 회수된다.
+      - name: 배포 신호용 토큰 발급
+        if: ${{ inputs.deploy }}
+        id: ops_token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.OPS_APP_ID }}
+          private-key: ${{ secrets.OPS_APP_PRIVATE_KEY }}
+          repositories: ${{ steps.ops.outputs.name }}
+
       # ★배포 신호만 보낸다. 대상·자격증명·로그는 전부 저쪽에 있다.
-      # 토큰이 없으면 **조용히 넘어가지 않고 세운다** — 릴리즈만 만들어 두고 배포됐다고
-      # 읽는 것이 이 워크플로에서 가장 위험한 오해다.
       - name: 배포 신호 전송
         if: ${{ inputs.deploy }}
         env:
-          GH_TOKEN: ${{ secrets.OPS_DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ steps.ops_token.outputs.token }}
         run: |
           set -euo pipefail
           if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::secrets.OPS_DISPATCH_TOKEN 이 없다 — 릴리즈는 만들어졌지만 배포 신호를 못 보냈다." >&2
-            echo "  ops 저장소에서 수동으로 이 태그를 배포하거나, 토큰을 넣고 다시 실행할 것." >&2
+            echo "::error::설치 토큰을 받지 못했다 — 릴리즈는 만들어졌지만 배포 신호를 못 보냈다." >&2
             exit 1
           fi
           # ★페이로드를 jq로 만들어 --input으로 넣는다. `-f a[b]=c` 같은 중첩 필드 문법에
@@ -130,6 +158,14 @@ jobs:
             '{event_type:"deploy", client_payload:{tag:$tag, sha:$sha}}' \
             | gh api -X POST "repos/${{ vars.OPS_REPO }}/dispatches" --input -
           echo "배포 신호를 보냈다 — 진행 상황은 ops 저장소의 Actions에서 본다."
+
+      # 신호 단계가 어디서 깨졌든 **릴리즈는 이미 만들어져 있다.** 그 사실을 남기지 않으면
+      # 다음 사람이 같은 버전으로 릴리즈를 다시 만들려다 "태그가 이미 있다"에서 막힌다.
+      - name: 신호 실패 시 안내
+        if: ${{ failure() && inputs.deploy }}
+        run: |
+          echo "::warning::릴리즈 ${{ steps.tag.outputs.tag }} 는 만들어졌다. 배포 신호만 실패했다."
+          echo "  운영 저장소에서 Deploy 워크플로를 이 태그로 수동 실행하면 된다."
 
       - name: 배포를 건너뛴 경우 안내
         if: ${{ !inputs.deploy }}
