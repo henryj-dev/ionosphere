@@ -139,6 +139,12 @@ jobs:
           app-id: ${{ secrets.OPS_APP_ID }}
           private-key: ${{ secrets.OPS_APP_PRIVATE_KEY }}
           repositories: ${{ steps.ops.outputs.name }}
+          # ★권한을 **명시적으로 깎는다.** 이 앱은 다른 용도로도 쓰여 조직 전 저장소에
+          # `administration: write`를 갖고 있다(저장소 삭제까지 가능). 지정하지 않으면 토큰이
+          # 그 권한을 그대로 물고 나온다 — 이 워크플로가 필요한 것은 dispatch 하나뿐이다.
+          # 실측: 지정 없이 받으면 {administration:write, organization_self_hosted_runners:write,
+          # metadata:read}, 지정하면 {contents:write, metadata:read}.
+          permission-contents: write
 
       # ★배포 신호만 보낸다. 대상·자격증명·로그는 전부 저쪽에 있다.
       - name: 배포 신호 전송
