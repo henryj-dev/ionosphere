@@ -15,6 +15,9 @@ on:
   schedule:
     # 매주 월요일 03:17 UTC. 정각을 피하는 이유는 GitHub 쪽 스케줄 혼잡을 피하기 위해서다.
     - cron: "17 3 * * 1"
+  # 손으로 돌릴 수 있어야 한다 — 인프라 쪽 변화(러너 이미지·서비스 컨테이너)로
+  # 깨지는 것은 코드 변경 없이 일어나고, 그때 재현할 방법이 없으면 진단이 막힌다.
+  workflow_dispatch:
 
 permissions:
   contents: read

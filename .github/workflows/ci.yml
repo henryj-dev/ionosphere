@@ -13,6 +13,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # 손으로 돌릴 수 있어야 한다 — 인프라 쪽 변화(러너 이미지·서비스 컨테이너)로
+  # 깨지는 것은 코드 변경 없이 일어나고, 그때 재현할 방법이 없으면 진단이 막힌다.
+  workflow_dispatch:
 
 # ★`push`를 main으로 제한한 이유: 같은 저장소의 브랜치에 푸시하고 PR을 열면 push와
 # pull_request가 **둘 다** 걸려 같은 커밋을 두 번 검사한다. 공개 저장소에서 그 낭비는
