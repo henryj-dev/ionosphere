@@ -1,0 +1,14 @@
+[Unit]
+Description=ionosphere DB+blobs 백업 (VACUUM INTO 스냅샷 + blobs 타르볼)
+After=ionosphere.service
+Wants=ionosphere.service
+
+[Service]
+Type=oneshot
+User=linuxuser
+Group=linuxuser
+WorkingDirectory=/opt/ionosphere
+ExecStart=/opt/ionosphere/scripts/backup.sh
+# 실패해도 다음 타이머에 재시도(oneshot이라 자동 재시작 없음)
+Nice=10
+IOSchedulingClass=idle

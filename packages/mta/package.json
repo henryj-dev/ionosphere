@@ -1,0 +1,19 @@
+{
+  "name": "@ionosphere/mta",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@ionosphere/mta-sts": "*",
+    "@ionosphere/core": "*",
+    "@ionosphere/db": "*",
+    "@ionosphere/mail-auth": "*"
+  },
+  "devDependencies": {
+    "@ionosphere/proto-smtp": "*",
+    "@ionosphere/testkit": "*"
+  }
+}

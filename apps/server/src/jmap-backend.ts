@@ -1,0 +1,858 @@
+/**
+ * JMAP Mail capability 모듈 — 스토어 백엔드 (RFC 8621). 현재 Mailbox 타입(get/changes/query).
+ * Email/Thread/EmailSubmission은 후속 증분. proto-jmap의 표준 헬퍼에 스토어 소스를 주입한다.
+ */
+import { ADDRESS_FIELDS, RECIPIENT_KINDS, type DbDriver } from "@ionosphere/db";
+import { toAppendAddresses } from "./addresses.ts";
+import { lookupBlob, Store, type BlobStore, type JmapEmailFilter, type JmapEmailMeta, type MailboxRow } from "@ionosphere/store";
+import { extractJmapBody, parseMessage, type ParsedAddress, type ParsedMessage } from "@ionosphere/mime";
+import {
+  MethodError,
+  requireAccountId,
+  SetItemError,
+  standardChanges,
+  standardGet,
+  standardSet,
+  MAIL_CAPABILITY,
+  SUBMISSION_CAPABILITY,
+  type CapabilityModule,
+  type GetSource,
+  type JmapObject,
+  type MethodContext,
+  type SetSource,
+} from "@ionosphere/proto-jmap";
+import { StoreError, type AppendAddress } from "@ionosphere/store";
+import { DEFAULT_RATE_LIMIT, enqueueMessage, findUnsafeAddress, isSafeEnvelopeAddress, OutboundRejectedError, type OutboundPolicy } from "@ionosphere/mta";
+
+/** 단일 사용자 계정 — 소유자는 전권. JMAP Mailbox.myRights (RFC 8621 §2). */
+const OWNER_RIGHTS = {
+  mayReadItems: true,
+  mayAddItems: true,
+  mayRemoveItems: true,
+  maySetSeen: true,
+  maySetKeywords: true,
+  mayCreateChild: true,
+  mayRename: true,
+  mayDelete: true,
+  maySubmit: true,
+} as const;
+
+/**
+ * MailboxRow → JMAP Mailbox 객체 (RFC 8621 §2). name은 리프명(계층은 parentId), 루트는 parentId=null.
+ * ★편차: totalThreads/unreadThreads는 스레드 카운트를 메일함별로 물질화하지 않아 이메일 수로 근사
+ * (SCHEMA에 per-mailbox 스레드 카운터 없음). sortOrder는 현재 항상 0(createMailbox 기본값).
+ */
+function toJmapMailbox(row: MailboxRow): JmapObject {
+  return {
+    id: row.id,
+    name: row.name,
+    parentId: row.parentId === "" ? null : row.parentId,
+    role: row.role,
+    sortOrder: 0,
+    totalEmails: row.totalCount,
+    unreadEmails: row.unreadCount,
+    totalThreads: row.totalCount,
+    unreadThreads: row.unreadCount,
+    myRights: { ...OWNER_RIGHTS },
+    isSubscribed: row.subscribed,
+  };
+}
+
+/** message_addresses.kind → JMAP Email 주소 프로퍼티명. 인코딩은 @ionosphere/db 소유. */
+const ADDRESS_PROP = ADDRESS_FIELDS;
+
+/** 메타 전용(블롭 불필요) JMAP Email 프로퍼티 — 이 집합에 없으면 본문 파싱 필요. */
+const CHEAP_EMAIL_PROPS = new Set([
+  "id", "blobId", "threadId", "mailboxIds", "keywords", "size", "receivedAt", "sentAt", "subject", "preview", "hasAttachment",
+  "from", "to", "cc", "bcc", "replyTo", "sender",
+]);
+
+/** JmapEmailMeta → JMAP Email(메타 부분). 본문 프로퍼티는 addBodyProps가 채운다. */
+function toJmapEmailMeta(m: JmapEmailMeta): JmapObject {
+  const addr: Record<string, { name: string | null; email: string }[]> = {};
+  for (const a of m.addresses) {
+    const prop = ADDRESS_PROP[a.kind];
+    if (!prop) continue;
+    (addr[prop] ??= []).push({ name: a.name, email: a.email });
+  }
+  const keywords: Record<string, boolean> = {};
+  for (const k of m.keywords) keywords[k] = true;
+  const mailboxIds: Record<string, boolean> = {};
+  for (const id of m.mailboxIds) mailboxIds[id] = true;
+  return {
+    id: m.id,
+    blobId: m.blobId,
+    threadId: m.threadId,
+    mailboxIds,
+    keywords,
+    size: m.size,
+    receivedAt: new Date(m.receivedAt).toISOString().replace(/\.\d{3}Z$/, "Z"),
+    sentAt: m.sentAt === null ? null : new Date(m.sentAt).toISOString().replace(/\.\d{3}Z$/, "Z"),
+    subject: m.subject,
+    preview: m.preview ?? "",
+    hasAttachment: m.hasAttachment,
+    from: addr.from ?? null,
+    to: addr.to ?? null,
+    cc: addr.cc ?? null,
+    bcc: addr.bcc ?? null,
+    replyTo: addr.replyTo ?? null,
+    sender: addr.sender ?? null,
+  };
+}
+
+export function buildMailModule(db: DbDriver, store: Store, blobs: BlobStore): CapabilityModule {
+  const mailboxGetSource: GetSource = {
+    state: async (accountId) => (await store.jmapState(accountId)).mailbox,
+    get: async (accountId, ids) => {
+      const all = await store.listMailboxes(accountId);
+      if (ids === null) return { list: all.map(toJmapMailbox), notFound: [] };
+      const byId = new Map(all.map((m) => [m.id, m]));
+      const list: JmapObject[] = [];
+      const notFound: string[] = [];
+      for (const id of ids) {
+        const row = byId.get(id);
+        if (row) list.push(toJmapMailbox(row));
+        else notFound.push(id);
+      }
+      return { list, notFound };
+    },
+  };
+
+  const mailboxChangesSource = {
+    changes: (accountId: string, sinceState: string, maxChanges: number) => store.jmapChanges(accountId, "mailbox", sinceState, maxChanges),
+  };
+
+  const emailChangesSource = {
+    changes: (accountId: string, sinceState: string, maxChanges: number) => store.jmapChanges(accountId, "email", sinceState, maxChanges),
+  };
+
+  const mailboxSetSource = buildMailboxSetSource(store);
+
+  const threadGetSource: GetSource = {
+    state: async (accountId) => (await store.jmapState(accountId)).thread,
+    get: async (accountId, ids) => {
+      const threads = await store.getThreadsForJmap(accountId, ids);
+      const list: JmapObject[] = threads.map((t) => ({ id: t.id, emailIds: t.emailIds }));
+      const found = new Set(list.map((t) => t.id));
+      const notFound = ids === null ? [] : ids.filter((i) => !found.has(i));
+      return { list, notFound };
+    },
+  };
+  const threadChangesSource = {
+    changes: (accountId: string, sinceState: string, maxChanges: number) => store.jmapChanges(accountId, "thread", sinceState, maxChanges),
+  };
+
+  return {
+    capability: MAIL_CAPABILITY,
+    methods: {
+      "Mailbox/get": (args, ctx) => standardGet(args, ctx.accountId, mailboxGetSource),
+      "Mailbox/changes": (args, ctx) => standardChanges(args, ctx.accountId, mailboxChangesSource),
+      "Mailbox/query": (args, ctx) => mailboxQuery(args, ctx.accountId, store),
+      "Mailbox/set": (args, ctx) => standardSet(args, ctx.accountId, ctx, mailboxSetSource),
+      "Email/get": (args, ctx) => emailGet(args, ctx.accountId, store, blobs),
+      "Email/changes": (args, ctx) => standardChanges(args, ctx.accountId, emailChangesSource),
+      "Email/query": (args, ctx) => emailQuery(args, ctx.accountId, store),
+      "Email/set": (args, ctx) => standardSet(args, ctx.accountId, ctx, buildEmailSetSource(db, store, blobs)),
+      "Thread/get": (args, ctx) => standardGet(args, ctx.accountId, threadGetSource),
+      "Thread/changes": (args, ctx) => standardChanges(args, ctx.accountId, threadChangesSource),
+    },
+  };
+}
+
+/** JMAP Mailbox/set → store CRUD 매핑 (RFC 8621 §2.5). name/parentId/role/isSubscribed 지원. */
+function buildMailboxSetSource(store: Store): SetSource {
+  const resolveParent = (raw: unknown, createdIds: Record<string, string>): string => {
+    if (raw === null || raw === undefined) return ""; // 루트
+    if (typeof raw !== "string") throw new SetItemError("invalidProperties", { properties: ["parentId"] });
+    if (raw.startsWith("#")) {
+      const id = createdIds[raw.slice(1)];
+      if (!id) throw new SetItemError("invalidProperties", { description: "미해석 parentId creationId" });
+      return id;
+    }
+    return raw;
+  };
+  const mapStoreErr = (err: unknown): never => {
+    if (err instanceof StoreError) {
+      const m = err.message;
+      if (m.includes("already exists")) throw new SetItemError("invalidProperties", { description: m });
+      if (m.includes("not found")) throw new SetItemError("notFound", { description: m });
+      if (m.includes("children")) throw new SetItemError("mailboxHasChild");
+      if (m.includes("INBOX")) throw new SetItemError("forbidden", { description: m });
+      throw new SetItemError("invalidProperties", { description: m });
+    }
+    throw err;
+  };
+
+  return {
+    state: async (accountId) => (await store.jmapState(accountId)).mailbox,
+    create: async (accountId, props, ctx) => {
+      const name = props.name;
+      if (typeof name !== "string" || name.length === 0) throw new SetItemError("invalidProperties", { properties: ["name"] });
+      const parentId = resolveParent(props.parentId, ctx.createdIds);
+      const role = typeof props.role === "string" ? props.role : undefined;
+      let result: { mailboxId: string };
+      try {
+        result = await store.createMailbox({ accountId, name, ...(parentId !== "" ? { parentId } : {}), ...(role ? { role } : {}) });
+      } catch (err) {
+        mapStoreErr(err);
+      }
+      const id = result!.mailboxId;
+      // 구독 기본값은 true — 명시적 false면 반영
+      const subscribed = props.isSubscribed !== false;
+      if (!subscribed) await store.setSubscribed(accountId, id, false);
+      const serverProps: Record<string, unknown> = {
+        sortOrder: 0,
+        totalEmails: 0,
+        unreadEmails: 0,
+        totalThreads: 0,
+        unreadThreads: 0,
+        myRights: { ...OWNER_RIGHTS },
+        isSubscribed: subscribed,
+        role: role ?? null,
+      };
+      return { id, serverProps };
+    },
+    update: async (accountId, id, patch) => {
+      // 현재 상태 확보(name/parentId 부분 패치 병합용)
+      const all = await store.listMailboxes(accountId);
+      const cur = all.find((m) => m.id === id);
+      if (!cur) throw new SetItemError("notFound");
+      const keys = Object.keys(patch);
+      const unsupported = keys.filter((k) => !["name", "parentId", "isSubscribed", "role", "sortOrder"].includes(k));
+      if (unsupported.length > 0) throw new SetItemError("invalidProperties", { properties: unsupported });
+
+      if ("name" in patch || "parentId" in patch) {
+        const newName = "name" in patch ? patch.name : cur.name;
+        if (typeof newName !== "string" || newName.length === 0) throw new SetItemError("invalidProperties", { properties: ["name"] });
+        const newParentId = "parentId" in patch ? resolveParent(patch.parentId, {}) : cur.parentId;
+        try {
+          await store.renameMailbox({ accountId, mailboxId: id, newParentId, newName });
+        } catch (err) {
+          mapStoreErr(err);
+        }
+      }
+      if (typeof patch.isSubscribed === "boolean") {
+        await store.setSubscribed(accountId, id, patch.isSubscribed);
+      }
+      // role/sortOrder 변경은 v1 미지원 — 값이 왔으면 조용히 무시(에러 대신, 위 화이트리스트로 통과만)
+      return null; // 서버 재계산 프로퍼티 없음
+    },
+    destroy: async (accountId, id) => {
+      try {
+        await store.deleteMailbox({ accountId, mailboxId: id });
+      } catch (err) {
+        mapStoreErr(err);
+      }
+    },
+  };
+}
+
+/**
+ * JMAP Email/set → store 매핑 (RFC 8621 §4.6, v1). keywords 변경(읽음/플래그) 지원.
+ * ★v1 범위: keywords 패치만. mailboxIds(이동)·create(import)·destroy는 후속 증분
+ * (멤버십 제거/전체 파기 스토어 레시피 필요). 그 프로퍼티가 오면 invalidProperties로 명확히 거부.
+ */
+function buildEmailSetSource(db: DbDriver, store: Store, blobs: BlobStore): SetSource {
+  return {
+    state: async (accountId) => (await store.jmapState(accountId)).email,
+    create: async (accountId, props, ctx) => {
+      // Email/set create = import (RFC 8621 §4.8) — 업로드된 blobId의 원문을 파싱해 메일함에 배치
+      const blobId = props.blobId;
+      if (typeof blobId !== "string") throw new SetItemError("invalidProperties", { properties: ["blobId"] });
+      const mbxObj = props.mailboxIds;
+      if (typeof mbxObj !== "object" || mbxObj === null || Array.isArray(mbxObj)) throw new SetItemError("invalidProperties", { properties: ["mailboxIds"] });
+      const mailboxIds: string[] = [];
+      for (const [k, v] of Object.entries(mbxObj as Record<string, unknown>)) {
+        if (v !== true) throw new SetItemError("invalidProperties", { description: "mailboxId 값은 true" });
+        mailboxIds.push(k.startsWith("#") ? (ctx.createdIds[k.slice(1)] ?? k) : k);
+      }
+      if (mailboxIds.length === 0) throw new SetItemError("invalidProperties", { properties: ["mailboxIds"] });
+      const keywords: string[] = [];
+      if (props.keywords && typeof props.keywords === "object" && !Array.isArray(props.keywords)) {
+        for (const [k, v] of Object.entries(props.keywords as Record<string, unknown>)) if (v === true) keywords.push(k.toLowerCase());
+      }
+      // 업로드 블롭의 세대는 blobs 원장이 정본이다 — 0을 가정하면 GC가 부활시킨(gen+1) 블롭을 못 읽는다.
+      const uploaded = await lookupBlob(db, blobId);
+      if (!uploaded) throw new SetItemError("blobNotFound");
+      let raw: Uint8Array;
+      try {
+        raw = await blobs.get(blobId, uploaded.generation);
+      } catch {
+        throw new SetItemError("blobNotFound");
+      }
+      const parsed = parseMessage(raw);
+      const receivedAt = typeof props.receivedAt === "string" && !Number.isNaN(Date.parse(props.receivedAt)) ? Date.parse(props.receivedAt) : Date.now();
+      let result;
+      try {
+        result = await store.appendMessage({
+          accountId,
+          mailboxIds,
+          blobId,
+          blobGeneration: uploaded.generation,
+          sizeBytes: raw.length,
+          receivedAt,
+          envelope: toAppendEnvelope(parsed),
+          keywords,
+          searchText: toSearchText(parsed),
+        });
+      } catch (err) {
+        throw wrapStore(err);
+      }
+      return { id: result.messageId, serverProps: { blobId, threadId: result.threadId, size: raw.length } };
+    },
+    update: async (accountId, id, patch) => {
+      await applyEmailPatch(store, accountId, id, patch);
+      return null;
+    },
+    destroy: async (accountId, id) => {
+      try {
+        await store.destroyMessage(accountId, id);
+      } catch (err) {
+        if (err instanceof StoreError && err.message.includes("not found")) throw new SetItemError("notFound");
+        throw wrapStore(err);
+      }
+    },
+  };
+}
+
+/**
+ * Email 패치 적용 (RFC 8621 §4.6 PatchObject) — keywords·mailboxIds. Email/set update와
+ * EmailSubmission onSuccessUpdateEmail이 공용. SetItemError를 throw.
+ */
+async function applyEmailPatch(store: Store, accountId: string, id: string, patch: Record<string, unknown>): Promise<void> {
+  const fullKeywords = "keywords" in patch;
+  const kwPaths = Object.keys(patch).filter((k) => k.startsWith("keywords/"));
+  const fullMailboxIds = "mailboxIds" in patch;
+  const mbxPaths = Object.keys(patch).filter((k) => k.startsWith("mailboxIds/"));
+  const otherKeys = Object.keys(patch).filter(
+    (k) => k !== "keywords" && !k.startsWith("keywords/") && k !== "mailboxIds" && !k.startsWith("mailboxIds/"),
+  );
+  if (otherKeys.length > 0) throw new SetItemError("invalidProperties", { properties: otherKeys });
+  if (fullKeywords && kwPaths.length > 0) throw new SetItemError("invalidPatch", { description: "keywords 전체/patch 혼용 불가" });
+  if (fullMailboxIds && mbxPaths.length > 0) throw new SetItemError("invalidPatch", { description: "mailboxIds 전체/patch 혼용 불가" });
+
+  const metas = await store.getEmailsForJmap(accountId, [id]);
+  const meta = metas[0];
+  if (!meta) throw new SetItemError("notFound");
+
+  const curKw = new Set(meta.keywords);
+  const kwChange = keywordChange(patch, fullKeywords, kwPaths, curKw);
+  if (kwChange.add.length > 0 || kwChange.remove.length > 0) {
+    try {
+      await store.setKeywords({ accountId, messageId: id, add: kwChange.add, remove: kwChange.remove });
+    } catch (err) {
+      throw wrapStore(err);
+    }
+  }
+
+  if (fullMailboxIds || mbxPaths.length > 0) {
+    const current = new Set(meta.mailboxIds);
+    const desired = desiredMailboxIds(patch, fullMailboxIds, mbxPaths, current);
+    if (desired.size === 0) throw new SetItemError("invalidProperties", { properties: ["mailboxIds"], description: "이메일은 최소 1개 메일함에 있어야 함" });
+    const toAdd = [...desired].filter((m) => !current.has(m));
+    const toRemove = [...current].filter((m) => !desired.has(m));
+    try {
+      if (toAdd.length === 1 && toRemove.length === 1) {
+        await store.moveMessage({ accountId, messageId: id, fromMailboxId: toRemove[0]!, toMailboxId: toAdd[0]! });
+      } else {
+        for (const m of toAdd) await store.copyMessage({ accountId, messageId: id, toMailboxId: m });
+        for (const m of toRemove) await store.removeMessageFromMailbox(accountId, id, m);
+      }
+    } catch (err) {
+      throw wrapStore(err);
+    }
+  }
+}
+
+/** ParsedMessage → appendMessage envelope(주소 kind/pos 사전계산 — backend.ts와 대칭). */
+function toAppendEnvelope(parsed: ParsedMessage): {
+  subject: string | null;
+  subjectBase: string | null;
+  msgidHash: string | null;
+  sentAt: number | null;
+  preview: string | null;
+  hasAttachment: boolean;
+  addresses: AppendAddress[];
+  threadRefHashes: readonly string[];
+} {
+  // SMTP/IMAP 경로와 **동일한** 단일 변환(addresses.ts) — 예전엔 여기만 따로 구현돼 있었다.
+  const addresses: AppendAddress[] = toAppendAddresses(parsed);
+  return {
+    subject: parsed.subject,
+    subjectBase: parsed.subjectBase,
+    msgidHash: parsed.msgidHash,
+    sentAt: parsed.sentAt,
+    preview: parsed.preview,
+    hasAttachment: parsed.hasAttachment,
+    addresses,
+    threadRefHashes: parsed.threadRefHashes,
+  };
+}
+
+function toSearchText(parsed: ParsedMessage): { subject?: string; body?: string; from?: string; to?: string } {
+  return {
+    ...(parsed.subject ? { subject: parsed.subject } : {}),
+    ...(parsed.textBody ? { body: parsed.textBody } : {}),
+    ...(parsed.from[0] ? { from: `${parsed.from[0].name ?? ""} ${parsed.from[0].email}` } : {}),
+    ...(parsed.to.length > 0 ? { to: parsed.to.map((a) => a.email).join(" ") } : {}),
+  };
+}
+
+/** JMAP submission capability 모듈 — Identity(§6) + EmailSubmission(§7). */
+/**
+ * EmailSubmission 모듈. rateLimit은 SMTP submission(587/465)과 **동일한 설정**을 받아야 한다 —
+ * 미지정 시 DEFAULT_RATE_LIMIT으로 폴백하면 운영자가 건 한도를 JMAP만 우회하게 된다(과거 결함).
+ */
+export function buildSubmissionModule(db: DbDriver, store: Store, blobs: BlobStore, outbound?: OutboundPolicy): CapabilityModule {
+  const identityGet = async (args: Record<string, unknown>, accountId: string): Promise<Record<string, unknown>> => {
+    const acc = requireAccountId(args, accountId);
+    const ids = args.ids === null || args.ids === undefined ? null : args.ids;
+    if (ids !== null && (!Array.isArray(ids) || ids.some((x) => typeof x !== "string"))) throw new MethodError("invalidArguments", { description: "ids" });
+    const all = await store.getIdentities(acc);
+    const list = ids === null ? all : all.filter((i) => (ids as string[]).includes(i.id));
+    const found = new Set(list.map((i) => i.id));
+    const notFound = ids === null ? [] : (ids as string[]).filter((i) => !found.has(i));
+    return {
+      accountId: acc,
+      state: "0", // 신원 변경 추적 미구현 — 정적 state(신원은 거의 불변)
+      list: list.map((i) => ({ id: i.id, name: i.name, email: i.email, replyTo: i.replyTo, bcc: null, textSignature: i.textSignature, htmlSignature: i.htmlSignature, mayDelete: false })),
+      notFound,
+    };
+  };
+  const submissionChangesSource = {
+    changes: (accountId: string, sinceState: string, maxChanges: number) => store.jmapChanges(accountId, "submission", sinceState, maxChanges),
+  };
+  const submissionGetSource: GetSource = {
+    state: async (accountId) => (await store.jmapState(accountId)).submission,
+    get: async (accountId, ids) => {
+      const subs = await store.getSubmissions(accountId, ids);
+      const list: JmapObject[] = subs.map((s) => ({
+        id: s.id,
+        identityId: s.identityId,
+        emailId: s.emailId,
+        sendAt: new Date(s.sendAt).toISOString().replace(/\.\d{3}Z$/, "Z"),
+        undoStatus: s.undoStatus === 2 ? "canceled" : s.undoStatus === 1 ? "final" : "pending",
+      }));
+      const found = new Set(list.map((s) => s.id));
+      const notFound = ids === null ? [] : ids.filter((i) => !found.has(i));
+      return { list, notFound };
+    },
+  };
+
+  return {
+    capability: SUBMISSION_CAPABILITY,
+    methods: {
+      "Identity/get": (args, ctx) => identityGet(args, ctx.accountId),
+      "Identity/changes": async (args, ctx) => {
+        const acc = requireAccountId(args, ctx.accountId);
+        if (typeof args.sinceState !== "string") throw new MethodError("invalidArguments");
+        return { accountId: acc, oldState: args.sinceState, newState: "0", hasMoreChanges: false, created: [], updated: [], destroyed: [] };
+      },
+      "EmailSubmission/get": (args, ctx) => standardGet(args, ctx.accountId, submissionGetSource),
+      "EmailSubmission/changes": (args, ctx) => standardChanges(args, ctx.accountId, submissionChangesSource),
+      "EmailSubmission/set": (args, ctx) => emailSubmissionSet(args, ctx.accountId, ctx, db, store, blobs, outbound),
+    },
+  };
+}
+
+/**
+ * EmailSubmission/set (RFC 8621 §7.5) — create만(발송). 이메일 원문을 MTA 큐에 적재하고
+ * email_submissions 기록. onSuccessUpdateEmail(초안→보낸함 이동 등)을 부수효과로 적용.
+ * ★v1: 즉시 발송만(maxDelayedSend=0), undoStatus=final. update/destroy(취소)는 미지원.
+ * 외부 도메인 실배달은 MTA 워커·아웃바운드 정책에 의존(발신 도메인 미검증이면 게이트 거부).
+ */
+async function emailSubmissionSet(
+  args: Record<string, unknown>,
+  accountId: string,
+  ctx: MethodContext,
+  db: DbDriver,
+  store: Store,
+  blobs: BlobStore,
+  /** SMTP submission과 **동일해야 하는** 발송 정책(레이트리밋·내부 전용). 조립부가 한 값을 양쪽에 넘긴다. */
+  outbound?: OutboundPolicy,
+): Promise<Record<string, unknown>> {
+  const acc = requireAccountId(args, accountId);
+  const oldState = (await store.jmapState(acc)).submission;
+  if (args.ifInState !== undefined && args.ifInState !== null && args.ifInState !== oldState) throw new MethodError("stateMismatch");
+
+  const tenantId = await store.getAccountTenantId(acc);
+  if (!tenantId) throw new MethodError("accountNotFound");
+  const identities = await store.getIdentities(acc);
+  const identityIds = new Set(identities.map((i) => i.id));
+
+  const created: Record<string, Record<string, unknown>> = {};
+  const notCreated: Record<string, { type: string; [k: string]: unknown }> = {};
+  const createArg = asObjectLocal(args.create);
+  // creationId → 해당 submission이 참조한 emailId (onSuccessUpdateEmail 해석용)
+  const emailByCreation: Record<string, string> = {};
+
+  if (createArg) {
+    for (const [creationId, rawProps] of Object.entries(createArg)) {
+      const props = asObjectLocal(rawProps);
+      if (!props) {
+        notCreated[creationId] = { type: "invalidProperties" };
+        continue;
+      }
+      try {
+        const emailId = resolveRef(props.emailId, ctx.createdIds);
+        if (!emailId) throw new SetItemError("invalidProperties", { properties: ["emailId"] });
+        const identityId = typeof props.identityId === "string" ? props.identityId : "";
+        if (!identityIds.has(identityId)) throw new SetItemError("invalidProperties", { properties: ["identityId"] });
+
+        const metas = await store.getEmailsForJmap(acc, [emailId]);
+        const meta = metas[0];
+        if (!meta) throw new SetItemError("notFound", { description: "emailId" });
+
+        // envelope: 인자 우선, 없으면 이메일 헤더에서 유도(mailFrom=identity, rcptTo=to/cc/bcc)
+        const identity = identities.find((i) => i.id === identityId)!;
+        const env = asObjectLocal(props.envelope);
+        const envFrom = env ? String((asObjectLocal(env.mailFrom)?.email as string) ?? identity.email) : identity.email;
+        const rcpts = env
+          ? (Array.isArray(env.rcptTo) ? env.rcptTo.map((r) => String((r as Record<string, unknown>).email)) : [])
+          : meta.addresses.filter((a) => RECIPIENT_KINDS.includes(a.kind)).map((a) => a.email);
+        if (rcpts.length === 0) throw new SetItemError("noRecipients");
+
+        /**
+         * 봉투 안전성은 **행을 만들기 전에** 본다. 아래 `createSubmission`이 큐 적재보다 먼저
+         * 실행되는 이유는 행 id가 큐 입력에 필요해서인데(순서를 뒤집을 수 없다), 그 탓에 봉투가
+         * 거부되면 **CRLF 주입 페이로드가 담긴 행이 DB에 남았다**(감사 5차 §9-5 조사 중 발견).
+         * `EmailSubmission/get`이 그 행을 유령 제출로 보여 주기까지 한다.
+         *
+         * 정본 검사는 `enqueueMessage` 안에 그대로 있다 — 여기서 거르는 것은 조기 실패일 뿐,
+         * 이 호출을 빠뜨린 갈래가 생겨도 게이트가 막는다.
+         */
+        if (!isSafeEnvelopeAddress(envFrom)) {
+          throw new SetItemError("forbidden", { description: `unsafe envelope-from: ${JSON.stringify(envFrom)}` });
+        }
+        const unsafeRcpt = findUnsafeAddress(rcpts);
+        if (unsafeRcpt !== null) {
+          throw new SetItemError("forbidden", { description: `unsafe recipient: ${JSON.stringify(unsafeRcpt)}` });
+        }
+
+        // MTA 큐 적재(§8 게이트: 발신 도메인 미검증 → OutboundRejectedError)
+        const submissionId = await store.createSubmission(acc, {
+          identityId,
+          messageId: emailId,
+          blobId: meta.blobId,
+          envFrom,
+          sendAt: Date.now(),
+          undoStatus: 1, // final(즉시)
+        });
+        try {
+          await enqueueMessage(
+            db,
+            {
+              tenantId,
+              accountId: acc,
+              submissionId,
+              blobId: meta.blobId,
+              sizeBytes: meta.size,
+              blobGeneration: meta.blobGeneration,
+              envFrom,
+              rcpts,
+            },
+            { rateLimit: outbound?.rateLimit ?? DEFAULT_RATE_LIMIT, ...(outbound?.localOnly ? { localOnly: true } : {}) },
+          );
+        } catch (err) {
+          if (err instanceof OutboundRejectedError) {
+            // external-disabled/domain-unverified는 정책상 영구 실패 → forbidden(재시도해도 같다)
+            throw new SetItemError(err.reason === "rate-limited" ? "rateLimit" : "forbidden", { description: err.message });
+          }
+          throw err;
+        }
+        created[creationId] = { id: submissionId, sendAt: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"), undoStatus: "final" };
+        ctx.createdIds[creationId] = submissionId;
+        emailByCreation[creationId] = emailId;
+      } catch (err) {
+        notCreated[creationId] = err instanceof SetItemError ? err.setError : { type: "serverFail", description: err instanceof Error ? err.message : String(err) };
+      }
+    }
+  }
+
+  // onSuccessUpdateEmail (RFC 8621 §7.5) — 성공한 submission이 참조한 이메일에 패치 적용(부수효과)
+  const onSuccess = asObjectLocal(args.onSuccessUpdateEmail);
+  if (onSuccess) {
+    for (const [subRef, patch] of Object.entries(onSuccess)) {
+      const creationId = subRef.startsWith("#") ? subRef.slice(1) : subRef;
+      const emailId = emailByCreation[creationId];
+      const p = asObjectLocal(patch);
+      if (!emailId || !p) continue; // 실패한/미지 submission 참조는 무시
+      try {
+        await applyEmailPatch(store, acc, emailId, p);
+      } catch {
+        // 부수효과 실패는 submission 성공을 되돌리지 않음(발송은 이미 큐 적재됨) — 조용히 무시
+      }
+    }
+  }
+
+  const newState = (await store.jmapState(acc)).submission;
+  return { accountId: acc, oldState, newState, created, updated: {}, destroyed: [], notCreated, notUpdated: {}, notDestroyed: {} };
+}
+
+function asObjectLocal(v: unknown): Record<string, unknown> | null {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
+  return v as Record<string, unknown>;
+}
+function resolveRef(v: unknown, createdIds: Record<string, string>): string | null {
+  if (typeof v !== "string") return null;
+  return v.startsWith("#") ? (createdIds[v.slice(1)] ?? null) : v;
+}
+
+function wrapStore(err: unknown): Error {
+  if (err instanceof StoreError) return new SetItemError("invalidProperties", { description: err.message });
+  return err instanceof Error ? err : new Error(String(err));
+}
+
+/** keywords 패치 → add/remove. */
+function keywordChange(patch: Record<string, unknown>, full: boolean, paths: string[], current: Set<string>): { add: string[]; remove: string[] } {
+  if (full) {
+    const kwObj = patch.keywords;
+    if (typeof kwObj !== "object" || kwObj === null || Array.isArray(kwObj)) throw new SetItemError("invalidProperties", { properties: ["keywords"] });
+    const desired = new Set<string>();
+    for (const [k, v] of Object.entries(kwObj as Record<string, unknown>)) {
+      if (v !== true) throw new SetItemError("invalidProperties", { description: "keyword 값은 true여야 함" });
+      desired.add(k.toLowerCase());
+    }
+    return { add: [...desired].filter((k) => !current.has(k)), remove: [...current].filter((k) => !desired.has(k)) };
+  }
+  const add: string[] = [];
+  const remove: string[] = [];
+  for (const key of paths) {
+    const kw = key.slice("keywords/".length).toLowerCase();
+    const v = patch[key];
+    if (v === true) add.push(kw);
+    else if (v === null || v === false) remove.push(kw);
+    else throw new SetItemError("invalidPatch", { description: `keyword 값 오류: ${key}` });
+  }
+  return { add, remove };
+}
+
+/** mailboxIds 패치 → 목표 집합. */
+function desiredMailboxIds(patch: Record<string, unknown>, full: boolean, paths: string[], current: Set<string>): Set<string> {
+  if (full) {
+    const obj = patch.mailboxIds;
+    if (typeof obj !== "object" || obj === null || Array.isArray(obj)) throw new SetItemError("invalidProperties", { properties: ["mailboxIds"] });
+    const desired = new Set<string>();
+    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+      if (v !== true) throw new SetItemError("invalidProperties", { description: "mailboxId 값은 true여야 함" });
+      desired.add(k);
+    }
+    return desired;
+  }
+  const desired = new Set(current);
+  for (const key of paths) {
+    const mbx = key.slice("mailboxIds/".length);
+    const v = patch[key];
+    if (v === true) desired.add(mbx);
+    else if (v === null || v === false) desired.delete(mbx);
+    else throw new SetItemError("invalidPatch", { description: `mailboxId 값 오류: ${key}` });
+  }
+  return desired;
+}
+
+/** Email/get 기본 프로퍼티 (RFC 8621 §4.6). */
+const DEFAULT_EMAIL_PROPS = [
+  "id", "blobId", "threadId", "mailboxIds", "keywords", "size", "receivedAt", "messageId", "inReplyTo", "references",
+  "sender", "from", "to", "cc", "bcc", "replyTo", "subject", "sentAt", "hasAttachment", "preview", "bodyValues", "textBody", "htmlBody", "attachments",
+];
+
+function strArrayOrNull(v: unknown, field: string): string[] | null {
+  if (v === null || v === undefined) return null;
+  if (!Array.isArray(v) || v.some((x) => typeof x !== "string")) throw new MethodError("invalidArguments", { description: field });
+  return v as string[];
+}
+
+/** Email/get (RFC 8621 §4.6) — 메타는 DB, 본문 프로퍼티 요청 시에만 블롭 파싱. ids=null은 미지원. */
+async function emailGet(args: Record<string, unknown>, accountId: string, store: Store, blobs: BlobStore): Promise<Record<string, unknown>> {
+  const acc = requireAccountId(args, accountId);
+  const ids = strArrayOrNull(args.ids, "ids");
+  if (ids === null) throw new MethodError("invalidArguments", { description: "Email/get은 ids 필수(Email/query로 먼저 조회)" });
+  const properties = strArrayOrNull(args.properties, "properties") ?? DEFAULT_EMAIL_PROPS;
+  const propSet = new Set(properties);
+  const maxBodyValueBytes = typeof args.maxBodyValueBytes === "number" && args.maxBodyValueBytes > 0 ? args.maxBodyValueBytes : 0;
+  const fetchText = args.fetchTextBodyValues === true;
+  const fetchHtml = args.fetchHTMLBodyValues === true;
+  const fetchAll = args.fetchAllBodyValues === true;
+
+  // 본문/헤더 파생 프로퍼티가 하나라도 요청되면 블롭 파싱 필요
+  const needBody = properties.some((p) => !CHEAP_EMAIL_PROPS.has(p));
+
+  const state = (await store.jmapState(acc)).email;
+  const metas = await store.getEmailsForJmap(acc, ids);
+  const byId = new Map(metas.map((m) => [m.id, m]));
+
+  const list: JmapObject[] = [];
+  const notFound: string[] = [];
+  for (const id of ids) {
+    const meta = byId.get(id);
+    if (!meta) {
+      notFound.push(id);
+      continue;
+    }
+    const obj = toJmapEmailMeta(meta);
+    if (needBody) {
+      let raw: Uint8Array | null = null;
+      try {
+        raw = await blobs.get(meta.blobId, meta.blobGeneration);
+      } catch {
+        raw = null; // 블롭 소실 — 본문 프로퍼티는 null/빈값(메타는 유지)
+      }
+      addBodyProps(obj, raw, { fetchText, fetchHtml, fetchAll, maxBodyValueBytes });
+    }
+    list.push(project(obj, propSet));
+  }
+  return { accountId: acc, state, list, notFound };
+}
+
+/** 블롭에서 본문/헤더 파생 프로퍼티 추가(RFC 8621 §4.1). raw=null이면 안전한 빈값. */
+function addBodyProps(
+  obj: JmapObject,
+  raw: Uint8Array | null,
+  opts: { fetchText: boolean; fetchHtml: boolean; fetchAll: boolean; maxBodyValueBytes: number },
+): void {
+  if (raw === null) {
+    obj.bodyStructure = null;
+    obj.textBody = [];
+    obj.htmlBody = [];
+    obj.attachments = [];
+    obj.bodyValues = {};
+    obj.messageId = null;
+    obj.inReplyTo = null;
+    obj.references = null;
+    return;
+  }
+  const parsed = parseMessage(raw);
+  obj.messageId = parsed.messageId === null ? null : [parsed.messageId];
+  obj.inReplyTo = parsed.inReplyTo.length > 0 ? parsed.inReplyTo : null;
+  obj.references = parsed.references.length > 0 ? parsed.references : null;
+
+  const body = extractJmapBody(raw, opts.maxBodyValueBytes);
+  obj.bodyStructure = body.bodyStructure as unknown as Record<string, unknown>;
+  obj.textBody = body.textBody as unknown as Record<string, unknown>[];
+  obj.htmlBody = body.htmlBody as unknown as Record<string, unknown>[];
+  obj.attachments = body.attachments as unknown as Record<string, unknown>[];
+
+  // bodyValues는 fetch* 플래그가 지정한 파트만(RFC 8621 §4.6)
+  const wantParts = new Set<string>();
+  if (opts.fetchAll) for (const k of Object.keys(body.bodyValues)) wantParts.add(k);
+  if (opts.fetchText) for (const p of body.textBody) if (p.partId) wantParts.add(p.partId);
+  if (opts.fetchHtml) for (const p of body.htmlBody) if (p.partId) wantParts.add(p.partId);
+  const bodyValues: Record<string, unknown> = {};
+  for (const [partId, v] of Object.entries(body.bodyValues)) {
+    if (wantParts.has(partId)) bodyValues[partId] = v;
+  }
+  obj.bodyValues = bodyValues;
+}
+
+/** id는 항상 포함, 요청 프로퍼티만 남김. */
+function project(obj: JmapObject, props: Set<string>): JmapObject {
+  const out: JmapObject = { id: obj.id };
+  for (const p of props) {
+    if (p !== "id" && p in obj) out[p] = obj[p];
+  }
+  return out;
+}
+
+/** Email/query (RFC 8621 §4.4, v1) — inMailbox/날짜/크기/키워드 필터 + receivedAt 정렬. */
+async function emailQuery(args: Record<string, unknown>, accountId: string, store: Store): Promise<Record<string, unknown>> {
+  const acc = requireAccountId(args, accountId);
+  const state = (await store.jmapState(acc)).email;
+
+  const filter: JmapEmailFilter = {};
+  if (args.filter !== undefined && args.filter !== null) {
+    if (typeof args.filter !== "object" || Array.isArray(args.filter)) throw new MethodError("unsupportedFilter");
+    const f = args.filter as Record<string, unknown>;
+    const allowed = ["inMailbox", "before", "after", "minSize", "maxSize", "hasKeyword", "notKeyword", "text", "subject", "body", "from", "to"];
+    for (const key of Object.keys(f)) if (!allowed.includes(key)) throw new MethodError("unsupportedFilter", { description: key });
+    if (typeof f.inMailbox === "string") filter.inMailbox = f.inMailbox;
+    if (typeof f.before === "string") filter.before = Date.parse(f.before);
+    if (typeof f.after === "string") filter.after = Date.parse(f.after);
+    if (typeof f.minSize === "number") filter.minSize = f.minSize;
+    if (typeof f.maxSize === "number") filter.maxSize = f.maxSize;
+    if (typeof f.hasKeyword === "string") filter.hasKeyword = f.hasKeyword;
+    if (typeof f.notKeyword === "string") filter.notKeyword = f.notKeyword;
+    // 전문 검색(FTS, RFC 8621 §4.4.1) — search_index CJK 바이그램 배선
+    if (typeof f.text === "string") filter.text = f.text;
+    if (typeof f.subject === "string") filter.subject = f.subject;
+    if (typeof f.body === "string") filter.body = f.body;
+    if (typeof f.from === "string") filter.from = f.from;
+    if (typeof f.to === "string") filter.to = f.to;
+  }
+
+  // 정렬 — v1은 receivedAt만(기본 내림차순). 다른 프로퍼티는 unsupportedSort.
+  let ascending = false;
+  const sort = args.sort;
+  if (Array.isArray(sort) && sort.length > 0) {
+    if (sort.length > 1) throw new MethodError("unsupportedSort", { description: "다중 정렬 미지원(v1)" });
+    const s = sort[0] as Record<string, unknown>;
+    if (s.property !== "receivedAt") throw new MethodError("unsupportedSort", { description: String(s.property) });
+    ascending = s.isAscending === true;
+  }
+
+  const position = typeof args.position === "number" && args.position >= 0 ? args.position : 0;
+  const limit = typeof args.limit === "number" && args.limit >= 0 ? Math.min(args.limit, 500) : 500;
+  const { ids, total } = await store.queryEmails(acc, filter, ascending, position, limit);
+  return { accountId: acc, queryState: state, canCalculateChanges: false, position, total, limit, ids };
+}
+
+/**
+ * Mailbox/query (RFC 8621 §2.3) — 필터(parentId/role/hasAnyRole/isSubscribed) + 정렬(sortOrder,name)
+ * + 페이징. 메일함은 소수라 전량 로드 후 앱에서 처리. canCalculateChanges=false(v1).
+ */
+async function mailboxQuery(args: Record<string, unknown>, accountId: string, store: Store): Promise<Record<string, unknown>> {
+  const acc = requireAccountId(args, accountId);
+  const state = (await store.jmapState(acc)).mailbox;
+  let rows = await store.listMailboxes(acc);
+
+  const filter = args.filter;
+  if (filter !== undefined && filter !== null) {
+    if (typeof filter !== "object" || Array.isArray(filter)) throw new MethodError("unsupportedFilter");
+    const f = filter as Record<string, unknown>;
+    for (const key of Object.keys(f)) {
+      if (!["parentId", "role", "hasAnyRole", "isSubscribed"].includes(key)) throw new MethodError("unsupportedFilter", { description: key });
+    }
+    if ("parentId" in f) {
+      const pid = f.parentId === null ? "" : f.parentId;
+      rows = rows.filter((m) => m.parentId === pid);
+    }
+    if ("role" in f) rows = rows.filter((m) => m.role === f.role);
+    if (typeof f.hasAnyRole === "boolean") rows = rows.filter((m) => (m.role !== null) === f.hasAnyRole);
+    if (typeof f.isSubscribed === "boolean") rows = rows.filter((m) => m.subscribed === f.isSubscribed);
+  }
+
+  // 정렬 — 지원: sortOrder, name. 미지원 프로퍼티는 unsupportedSort.
+  const sort = args.sort;
+  if (Array.isArray(sort) && sort.length > 0) {
+    const comparators: ((a: MailboxRow, b: MailboxRow) => number)[] = [];
+    for (const s of sort) {
+      const prop = (s as Record<string, unknown>)?.property;
+      const asc = (s as Record<string, unknown>)?.isAscending !== false;
+      const dir = asc ? 1 : -1;
+      if (prop === "sortOrder") comparators.push(() => 0); // 전부 0 — 안정정렬 유지
+      else if (prop === "name") comparators.push((a, b) => dir * a.name.localeCompare(b.name));
+      else throw new MethodError("unsupportedSort", { description: String(prop) });
+    }
+    rows = [...rows].sort((a, b) => {
+      for (const cmp of comparators) {
+        const r = cmp(a, b);
+        if (r !== 0) return r;
+      }
+      return 0;
+    });
+  }
+
+  const total = rows.length;
+  const position = typeof args.position === "number" && args.position >= 0 ? args.position : 0;
+  const limit = typeof args.limit === "number" && args.limit >= 0 ? Math.min(args.limit, 500) : 500;
+  const ids = rows.slice(position, position + limit).map((m) => m.id);
+
+  return {
+    accountId: acc,
+    queryState: state,
+    canCalculateChanges: false,
+    position,
+    total,
+    limit,
+    ids,
+  };
+}

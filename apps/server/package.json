@@ -1,0 +1,35 @@
+{
+  "name": "@ionosphere/server",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@ionosphere/core": "*",
+    "@ionosphere/db": "*",
+    "@ionosphere/store": "*",
+    "@ionosphere/proto-smtp": "*",
+    "@ionosphere/proto-imap": "*",
+    "@ionosphere/proto-pop3": "*",
+    "@ionosphere/proto-jmap": "*",
+    "@ionosphere/proto-managesieve": "*",
+    "@ionosphere/proto-lmtp": "*",
+    "@ionosphere/mime": "*",
+    "@ionosphere/mail-auth": "*",
+    "@ionosphere/dns": "*",
+    "@ionosphere/mta": "*",
+    "@ionosphere/api": "*",
+    "@ionosphere/autoconfig": "*",
+    "@ionosphere/metrics": "*",
+    "@ionosphere/spam": "*",
+    "@ionosphere/sieve": "*",
+    "@ionosphere/srs": "*",
+    "@ionosphere/tls": "*",
+    "@ionosphere/webhook": "*"
+  },
+  "scripts": {
+    "start": "node src/main.ts"
+  },
+  "devDependencies": {
+    "@ionosphere/testkit": "*"
+  }
+}

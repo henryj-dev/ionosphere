@@ -1,0 +1,19 @@
+{
+  "name": "@ionosphere/admin-cmd",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@ionosphere/core": "*",
+    "@ionosphere/db": "*",
+    "@ionosphere/mail-auth": "*",
+    "@ionosphere/mta-sts": "*",
+    "@ionosphere/store": "*"
+  },
+  "devDependencies": {
+    "@ionosphere/testkit": "*"
+  }
+}

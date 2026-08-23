@@ -1,0 +1,17 @@
+{
+  "name": "@ionosphere/proto-managesieve",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@ionosphere/core": "*",
+    "@ionosphere/proto-imap": "*",
+    "@ionosphere/sieve": "*"
+  },
+  "devDependencies": {
+    "@ionosphere/testkit": "*"
+  }
+}

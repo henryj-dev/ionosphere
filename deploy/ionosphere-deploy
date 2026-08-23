@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# 배포 전용 forced-command 래퍼 — `/usr/local/bin/ionosphere-deploy`에 설치된다.
+# authorized_keys의 배포키 항목이 command="/usr/local/bin/ionosphere-deploy",restrict 로
+# 이 스크립트를 강제하므로, 그 키로 SSH하면 **여기 정의된 동작만** 할 수 있다.
+#
+# ★왜 래퍼가 필요한가: linuxuser는 sudo (ALL) NOPASSWD: ALL 이다. 배포키를 그냥
+# authorized_keys에 넣으면 GitHub Actions(및 워크플로가 당겨쓰는 서드파티 액션 전부)가
+# 이 메일서버의 root를 얻는다. 서버에는 전 테넌트의 메일 본문·자격증명 해시·DKIM
+# 개인키가 있어서, 그 신뢰 범위는 배포에 필요한 것보다 압도적으로 넓다.
+#
+# ★왜 인자를 파싱하지 않는가: SSH_ORIGINAL_COMMAND는 클라이언트가 보낸 문자열이라
+# 신뢰할 수 없는 입력이다. 부분 일치(case 패턴·prefix 검사)로 허용하면 인자 주입이
+# 남는다. 그래서 **정확한 리터럴 문자열 비교**만 하고, 코드는 인자가 아니라
+# stdin(tar 스트림)으로 받는다. 파싱할 인자가 없으므로 주입면이 0이다.
+set -euo pipefail
+
+DEST="/opt/ionosphere"
+STAGE="/var/lib/ionosphere/deploy-stage"
+LOG="/var/log/ionosphere-deploy.log"
+
+log() {
+  # 어떤 키로 무엇을 했는지 남긴다 — 배포는 라이브 코드 교체라 사후 추적이 가능해야 한다.
+  printf '%s [%s] %s\n' "$(date -Is)" "${SSH_CONNECTION%% *}" "$*" | sudo tee -a "$LOG" >/dev/null
+}
+
+deny() {
+  log "DENY: $1"
+  echo "ionosphere-deploy: 허용되지 않은 명령" >&2
+  exit 126
+}
+
+# 대화형 로그인(빈 명령)도 거부한다 — 이 키는 배포 외 용도가 없다.
+CMD="${SSH_ORIGINAL_COMMAND:-}"
+
+case "$CMD" in
+  # ── 1) 코드 트리 교체 ──
+  # stdin으로 `git archive` tar 스트림을 받아 스테이징에 풀고, DEST로 원자적으로 반영한다.
+  # rsync 대신 tar를 쓰는 이유: rsync는 원격에서 인자를 해석하는 프로토콜이라 forced-command
+  # 아래에서도 --rsync-path 류 옵션 표면이 남는다. tar 스트림은 그냥 바이트다.
+  # git archive를 쓰면 **커밋에 든 것만** 올라간다 — 로컬 작업본의 gitignore된 파일
+  # (과거 라이브 자격증명이 든 개인 메모가 작업 트리에 있었다)이 라이브로 새지 않는다.
+  "sync")
+    log "sync 시작"
+    rm -rf "$STAGE"
+    mkdir -p "$STAGE"
+    # tar 자체가 신뢰 경계다: 절대경로·상위참조 항목을 거부해 STAGE 밖 쓰기를 막는다.
+    tar -xz -C "$STAGE" --no-same-owner --no-same-permissions \
+        --exclude='.git' --exclude='node_modules'
+    # 최소한의 온전성 검사 — 빈/엉뚱한 tar로 라이브 트리를 날리지 않는다.
+    for required in package.json apps/server/src/main.ts packages/core; do
+      [ -e "$STAGE/$required" ] || deny "sync: 스테이징에 $required 없음 (tar 손상?)"
+    done
+    # DB·블롭·TLS는 /var/lib/ionosphere에 있어 DEST 안에 없다(2026-07-31 확인). 그래도
+    # 과거 배치를 남긴 서버가 있을 수 있으니 --delete 예외는 유지한다 — fail closed.
+    #
+    # ★패턴에 `/` 앵커를 붙인다. rsync에서 슬래시 없는 `--exclude tls`는 **경로 어디에 있든
+    # 이름이 tls인 것을 전부** 제외한다. 그래서 `/opt/ionosphere/tls`(인증서)를 지키려던 규칙이
+    # `packages/tls` 패키지를 통째로 배제해, **그 패키지의 변경이 라이브에 한 번도 가지 못했다**
+    # (2026-08-02 실측: core는 당일 갱신, packages/tls는 07-31에 멈춘 채 http-challenge.ts 부재 →
+    # `does not provide an export named 'httpChallengeServer'`로 10회 재시작 크래시루프).
+    # `/tls`는 전송 루트 기준 최상위만 가리키므로 의도한 것만 제외된다.
+    # 같은 함정이 blobs·.env에도 있어 함께 앵커를 붙였다(ionosphere.db*는 원래 최상위 파일이다).
+    sudo rsync -a --delete \
+      --exclude '/ionosphere.db*' --exclude '/blobs' --exclude '/.env' --exclude '/tls' \
+      "$STAGE"/ "$DEST"/
+    sudo chown -R linuxuser:linuxuser "$DEST"
+    sudo restorecon -R "$DEST" 2>/dev/null || true
+    rm -rf "$STAGE"
+    log "sync 완료"
+    ;;
+
+  # ── 2) 의존성 설치 ──
+  # sync가 node_modules를 지우므로 필수다. npm ci는 package-lock.json을 따른다.
+  "install")
+    log "install 시작"
+    export PATH=/usr/local/bin:$PATH
+    cd "$DEST"
+    # ★`npm ci`(옵션 없음)를 쓴다. `--omit=dev`를 주면 안 된다 — 라이브는 PostgreSQL이고
+    # `pg`는 루트 **devDependency**다(bun install도 dev를 포함했으므로 이게 정확한 등가).
+    npm ci
+    log "install 완료"
+    ;;
+
+  # ── 3) 재시작 + 살아있는지 확인 ──
+  # is-active가 실패하면 exit≠0이라 워크플로가 빨간불이 된다. 배포가 조용히 죽는 것을
+  # 막는 유일한 지점이다(과거 env 개행 손상으로 15회 재시작 크래시루프를 겪었다).
+  #
+  # ★고정 sleep 뒤에 한 번만 묻지 않는다. 예전엔 `sleep 3` + `is-active` 한 번이었는데,
+  # 기동이 3초를 넘으면 `activating`에서 exit 3으로 **배포가 실패로 뒤집혔다**(2026-08-02 실측:
+  # 코드는 이미 반영·설치됐는데 여기서 멈춰 헬스체크 단계에 도달조차 못 했다). 기동 시간은
+  # 리스너 수·DB 크기·머신 부하에 따라 변하므로 고정 대기는 언젠가 반드시 짧아진다.
+  #
+  # 그래서 `activating`인 동안만 기다리고, 상태가 **정해지는 순간** 판정한다. 최대 30초까지
+  # 기다린 뒤에도 activating이면 실패로 본다 — 그만큼 걸리는 기동은 정상이 아니다.
+  # `failed`는 기다리지 않고 즉시 실패시킨다(죽은 것을 30초 더 지켜볼 이유가 없다).
+  "restart")
+    log "restart 시작"
+    sudo systemctl restart ionosphere
+    state=""
+    for _ in $(seq 1 30); do
+      state=$(sudo systemctl is-active ionosphere || true)
+      [ "$state" = "activating" ] || break
+      sleep 1
+    done
+    sudo journalctl -u ionosphere -n 20 --no-pager -o cat
+    if [ "$state" != "active" ]; then
+      log "restart 실패 (상태=$state)"
+      exit 1
+    fi
+    log "restart 완료 (active)"
+    ;;
+
+  # ── 3-1) 마이그레이션 전 DB 백업 ──
+  # 워크플로가 **마이그레이션 파일이 변경된 배포에서만** 부른다(deploy.yml).
+  # ★sync보다 먼저 불러야 한다: 마이그레이션은 새 코드가 기동하는 순간(restart) 돌기 때문에,
+  # 그 뒤에 백업하면 이미 변형된 스키마를 백업한다 — 되돌릴 대상이 사라진다.
+  # 실패하면 exit≠0으로 워크플로를 세운다. "백업 못 했으면 마이그레이션도 하지 않는다"가
+  # 안전한 쪽이다(fail closed) — 조용히 넘어가면 백업 없는 마이그레이션이 된다.
+  # ★sudo를 쓰지 않는다. 백업 타이머(`ionosphere-backup.service`)가 `User=linuxuser`로 돌고 있어
+  # 이 스크립트는 애초에 root를 필요로 하지 않는다. sudo로 돌리면 산출물이 root 소유가 되어
+  # ① 기존 백업(linuxuser 소유)과 소유자가 섞이고
+  # ② 다음 타이머 실행의 보관 정책(`find … -delete`)이 root 파일을 지우지 못해 디스크가 찬다.
+  # 실측으로 확인했다(sudo -E로 한 번 돌려 root:root 타르볼이 생겼다 — 아래 로그의 첫 backup).
+  "backup")
+    log "backup 시작 (마이그레이션 포함 배포)"
+    export PATH=/usr/local/bin:$PATH
+    "$DEST/scripts/backup.sh"
+    log "backup 완료"
+    ;;
+
+  # ── 4) 배포 후 헬스체크 ──
+  # 재시작 카운트(1행)와 리스너 로그 수(2행)를 출력한다 — 워크플로가 행 번호로 읽으므로
+  # 출력 형식을 바꾸면 .github/workflows/deploy.yml의 헬스체크도 같이 고칠 것.
+  # sudo 없이 되는 것은 sudo 없이 한다(래퍼가 여는 권한을 최소로 유지).
+  #
+  # ★`journalctl -n 40`으로 세지 않는다. 두 방향으로 틀렸다(2026-08-03 실측):
+  #   ① **정상을 실패로** — 최근 40줄은 시간 창이지 기동 경계가 아니다. 기동 후 로그가 쌓이면
+  #      `listening` 줄이 창 밖으로 밀려나 0이 된다. MRA(node-02)가 이미 그 상태였다
+  #      (최근 40줄=0인데 실제로는 정상 기동 — 143·993·110·995·4190 전부 응답).
+  #      IMAP 인증 실패가 시간당 5회 찍히는 것만으로 창이 다 찼다. 워크플로는 이 값이 1 미만이면
+  #      "기동 실패 의심"으로 배포를 세우므로, **정상 서버를 실패로 뒤집는다.**
+  #   ② **실패를 정상으로** — 세는 범위가 이번 기동으로 제한되지 않으므로, 기동에 실패해
+  #      `listening`을 못 찍어도 **이전 기동의 줄을 세서** 통과한다. fail open이다 —
+  #      크래시루프를 잡아야 할 관측이 크래시루프를 통과시킨다.
+  #
+  # 그래서 **이번 invocation으로 범위를 좁힌다.** systemd가 기동마다 새 InvocationID를 주므로
+  # `_SYSTEMD_INVOCATION_ID`로 필터하면 "지금 돌고 있는 프로세스가 리스너를 열었는가"만 남는다.
+  # 시간 창과 달리 로그량에 좌우되지 않고, 이전 기동의 줄이 섞이지 않는다.
+  "health")
+    systemctl show ionosphere -p NRestarts --value
+    inv=$(systemctl show ionosphere -p InvocationID --value)
+    if [ -z "$inv" ]; then
+      # InvocationID가 비면 유닛이 한 번도 기동하지 않은 것이다 — 0을 내서 실패시킨다(fail closed).
+      echo 0
+    else
+      journalctl -u ionosphere _SYSTEMD_INVOCATION_ID="$inv" --no-pager -o cat \
+        | grep -c 'listening' || true
+    fi
+    ;;
+
+  # ── 5) 롤백용 현재 커밋 확인 ──
+  "revision")
+    cat "$DEST/.deployed-revision" 2>/dev/null || echo "unknown"
+    ;;
+
+  # ── 6) 라이브 트리 매니페스트 (배포 무결성 검사용) ──
+  #
+  # ★왜 필요한가: 배포가 파일 일부를 **조용히 빠뜨려도** 알 방법이 없었다. `--exclude tls`가
+  # 앵커 없이 쓰여 `packages/tls` 패키지 전체가 몇 주 동안 배포에서 빠져 있었는데(2026-08-02),
+  # 그게 드러난 건 마침 "없는 export를 import하는" 형태가 되어 **크래시루프가 났기 때문**이다.
+  # 크래시를 내지 않는 누락이었다면 라이브는 낡은 코드로 멀쩡히 돌고 아무도 몰랐을 것이다.
+  # revision 파일은 tar에 따로 얹히므로 "리비전은 최신인데 트리는 낡은" 상태를 잡지 못한다 —
+  # 실제로 그랬다. 그래서 **내용 해시**를 봐야 한다.
+  #
+  # 출력: "<sha256>  <경로>" 정렬본. 러너가 같은 커밋의 git 트리로 같은 계산을 해서 대조한다.
+  # 제외 대상은 sync의 --exclude와 같아야 한다(다르면 대조가 영구 불일치가 된다).
+  # ★LC_ALL=C로 고정한다. 정렬 순서가 **로케일에 따라 달라진다** — en_US.UTF-8은 구두점과
+  # 대소문자를 무시하고 비교해서 `.gitignore`·`CLAUDE.md`·`mta-sts`의 위치가 C 로케일과
+  # 어긋난다. 러너(ubuntu)와 서버의 로케일이 다르면 **내용이 완전히 같은데도** diff가 나
+  # 배포가 실패한다(2026-08-02 첫 실사용에서 그렇게 터졌다). 대조하는 두 쪽이 같은 규칙을
+  # 써야 하므로 워크플로 쪽에도 같은 고정이 있다.
+  "manifest")
+    cd "$DEST"
+    export LC_ALL=C
+    find . -type f \
+      -not -path "./node_modules/*" -not -path "./.git/*" \
+      -not -path "./tls/*" -not -path "./blobs/*" \
+      -not -name "ionosphere.db*" -not -name ".env" -not -name ".deployed-revision" \
+      -print0 \
+    | sort -z \
+    | xargs -0 sha256sum \
+    | sed 's|  \./|  |'
+    ;;
+
+  *)
+    deny "알 수 없는 명령: $(printf '%q' "$CMD")"
+    ;;
+esac

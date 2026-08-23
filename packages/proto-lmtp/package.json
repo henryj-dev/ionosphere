@@ -1,0 +1,16 @@
+{
+  "name": "@ionosphere/proto-lmtp",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@ionosphere/core": "*",
+    "@ionosphere/db": "*"
+  },
+  "devDependencies": {
+    "@ionosphere/testkit": "*"
+  }
+}

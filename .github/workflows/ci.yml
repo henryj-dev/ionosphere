@@ -1,0 +1,61 @@
+name: CI
+
+# 공개 저장소용 CI. 비공개 저장소의 것과 **의도적으로 다르다**.
+#
+# ★왜 다른가: 비공개 쪽은 사내 self-hosted 러너(`runs-on: [self-hosted, runner-01]`)에서 돈다.
+# 공개 저장소에서 같은 설정을 쓰면 **누구든 PR 하나로 사내 러너에서 임의 코드를 실행**한다
+# (fork PR의 워크플로는 PR 브랜치의 정의로 돌기 때문이다). 러너는 사내 대역에 도달할 수 있어
+# 시크릿이 없어도 네트워크 위치 자체가 자산이다. 그래서 공개판은 GitHub 호스티드만 쓴다.
+#
+# ★왜 배포 워크플로가 없는가: 배포 대상·경로는 공개 대상이 아니다. 공개 스냅샷은
+# "이 코드가 무엇인가"만 담고 "우리가 어디에 올리는가"는 담지 않는다.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      # MySQL이 없으면 mysql.test.ts가 한 번도 돌지 않는다. 4방언 실연결 계약이 문서상
+      # 보장인데 한 방언만 자동 검증이 없으면 그 보장은 사람 기억에 의존하게 된다.
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: test
+          MYSQL_DATABASE: ionosphere
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -uroot -ptest"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      IONOSPHERE_TEST_PG_URL: postgres://postgres:test@localhost:5432/postgres
+      IONOSPHERE_TEST_MYSQL_URL: mysql://root:test@localhost:3306/ionosphere
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: npm ci
+      # 린터가 규약(.ts 확장자·import type·npm 화이트리스트·패키지 순환)을 기계로 강제한다.
+      - run: npm run lint
+      - run: npm run typecheck
+      # ★e2e 파일 하나가 리스너를 여럿 띄운다. 코어 수만큼 병렬로 돌리면 소켓 경쟁으로
+      # 간헐 실패가 나므로 CI에서는 낮춰 고정한다.
+      - run: npm test -- --test-concurrency=2
+      - run: npm run smoke

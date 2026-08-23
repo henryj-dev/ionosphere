@@ -1,0 +1,33 @@
+# 메인 서비스 유닛 — 라이브의 `/etc/systemd/system/ionosphere.service` 정본.
+#
+# ★왜 리포에 두는가(감사 5차 §1·§8-1): 이 파일이 리포에 없어서 **프로세스가 어떤 UID로 도는지
+# 코드로 확인할 수 없었다.** 저장소 전체에 privilege drop 호출이 0건이고 요구 포트가 전부
+# 1024 미만이라, 감사는 "root로 기동한다면 root로 계속 돈다"를 미검증 위험으로 남겨야 했다.
+# 실제로는 아래처럼 비특권 사용자 + capability 구성이었지만, **그 사실을 리포에서 읽을 수 없다는
+# 것 자체가 감사 비용**이었다. 배포 스크립트가 이 파일을 설치하지는 않는다(수동 설치 유지) —
+# 목적은 "라이브 구성이 리포에서 검증 가능할 것"이다. 라이브를 바꾸면 여기도 함께 바꿀 것.
+[Unit]
+Description=ionosphere (SMTP/POP3/Submission)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# root로 돌지 않는다. 1024 미만 포트(25·110·143·443·465·587·993·995·4190)는 아래 capability로만 연다 —
+# 코드에 privilege drop이 없으므로 **처음부터 비특권으로 시작하는 것**이 유일하게 맞는 구성이다.
+User=linuxuser
+WorkingDirectory=/opt/ionosphere
+EnvironmentFile=/etc/ionosphere.env
+ExecStart=/usr/local/bin/node /opt/ionosphere/apps/server/src/main.ts
+Restart=on-failure
+RestartSec=3
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+# 프로세스가 만드는 파일을 소유자 전용으로 — DB(`ionosphere.db`)와 블롭은 **전 테넌트의 메일 본문·
+# 자격증명 해시·DKIM 개인키**다. 기본 umask(022)로는 0644가 되어 같은 호스트의 다른 계정이
+# 그대로 읽는다(감사 5차 §8-3 실측: 라이브 DB가 실제로 0644였다). 백업 타르볼 쪽 같은 결함이
+# M-10이었고, 그건 `scripts/backup.sh`의 `umask 077`로 닫았다 — 런타임 산출물은 여기서 닫는다.
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
