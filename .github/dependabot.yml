@@ -1,0 +1,13 @@
+version: 2
+updates:
+  # ★GitHub Actions만 본다. npm은 일부러 뺐다 — 이 저장소의 규약이 "의존성 최소"이고
+  # devDependency가 다섯 개뿐이라, 자동 PR이 주는 이득보다 소음이 크다. 대신 액션은
+  # 참조가 태그(`@v5`)라 조용히 낡고, 낡은 액션은 공급망 문제로 직결된다.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    commit-message:
+      # 이 저장소의 커밋 제목 규약(한국어 + 접두사)에 맞춘다.
+      prefix: "정리"

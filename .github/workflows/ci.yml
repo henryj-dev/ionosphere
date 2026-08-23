@@ -2,21 +2,48 @@ name: CI
 
 # 공개 저장소용 CI. 비공개 저장소의 것과 **의도적으로 다르다**.
 #
-# ★왜 다른가: 비공개 쪽은 사내 self-hosted 러너(`runs-on: [self-hosted, runner-01]`)에서 돈다.
-# 공개 저장소에서 같은 설정을 쓰면 **누구든 PR 하나로 사내 러너에서 임의 코드를 실행**한다
-# (fork PR의 워크플로는 PR 브랜치의 정의로 돌기 때문이다). 러너는 사내 대역에 도달할 수 있어
-# 시크릿이 없어도 네트워크 위치 자체가 자산이다. 그래서 공개판은 GitHub 호스티드만 쓴다.
+# ★왜 GitHub 호스티드만 쓰는가: 비공개 쪽은 사내 러너를 쓸 수 있지만, 공개 저장소에서 같은
+# 설정을 쓰면 **누구든 PR 하나로 그 러너에서 임의 코드를 실행**한다(fork PR의 워크플로는 PR
+# 브랜치의 정의로 돈다). 시크릿이 없어도 러너의 네트워크 위치 자체가 자산이다.
 #
-# ★왜 배포 워크플로가 없는가: 배포 대상·경로는 공개 대상이 아니다. 공개 스냅샷은
-# "이 코드가 무엇인가"만 담고 "우리가 어디에 올리는가"는 담지 않는다.
+# ★왜 배포 워크플로가 없는가: 배포 대상·경로는 공개 대상이 아니다. 이 스냅샷은 "이 코드가
+# 무엇인가"만 담고 "우리가 어디에 올리는가"는 담지 않는다.
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+# ★`push`를 main으로 제한한 이유: 같은 저장소의 브랜치에 푸시하고 PR을 열면 push와
+# pull_request가 **둘 다** 걸려 같은 커밋을 두 번 검사한다. 공개 저장소에서 그 낭비는
+# 그대로 남의 대기 시간이 된다.
+
+# 최소 권한. 이 워크플로는 코드를 읽기만 한다 — 기본값(저장소 설정에 따라 쓰기까지)에
+# 기대지 않고 명시한다. 공개 저장소에서 토큰 권한은 공격 표면이다.
+permissions:
+  contents: read
+
+# 같은 PR에 연달아 푸시하면 앞의 실행은 의미가 없다. main은 취소하지 않는다 —
+# 각 커밋의 검사 결과가 이력으로 남아야 한다.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   verify:
+    name: verify (node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    # 전체 스위트가 4~8분이다. 멈춘 테스트가 6시간 기본값을 다 태우지 않게 상한을 둔다.
+    timeout-minutes: 25
+    strategy:
+      # 한쪽이 깨져도 다른 쪽 결과를 봐야 원인이 "그 버전만"인지 알 수 있다.
+      fail-fast: false
+      matrix:
+        # 24 = package.json engines의 하한(LTS). 26 = 현재 릴리스.
+        # ★두 버전을 다 도는 이유: 이 저장소는 `.ts`를 **타입 스트리핑으로 직접 실행**하고
+        # `node:sqlite`를 쓴다. 둘 다 아직 메이저마다 동작이 움직이는 영역이라, 한 버전만
+        # 검사하면 "우리 머신에서는 되는데" 상태가 조용히 생긴다.
+        node: ["24", "26"]
     services:
       postgres:
         image: postgres:17
@@ -50,9 +77,12 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: 24
+          node-version: ${{ matrix.node }}
+          cache: npm
+      # ★`npm ci`다(`npm install`이 아니라). 락파일과 다른 트리를 조용히 만들지 않는다.
       - run: npm ci
-      # 린터가 규약(.ts 확장자·import type·npm 화이트리스트·패키지 순환)을 기계로 강제한다.
+      # 린터가 규약(.ts 확장자·import type·npm 화이트리스트·패키지 순환·엔진 순수성)을
+      # 기계로 강제한다. 이 저장소에서 규약이 갈라진 곳은 늘 기계가 안 보던 영역이었다.
       - run: npm run lint
       - run: npm run typecheck
       # ★e2e 파일 하나가 리스너를 여럿 띄운다. 코어 수만큼 병렬로 돌리면 소켓 경쟁으로

@@ -1,0 +1,48 @@
+name: CodeQL
+
+# 정적 보안 분석. 이 저장소는 **메일 서버**라 취약점의 영향 범위가 일반 앱보다 넓다 —
+# 파서 하나가 인터넷에서 오는 바이트를 직접 먹고, 인증 판정 하나가 남의 메일함을 가른다.
+# 사람 리뷰가 놓치는 계열(주입·경로 조작·안전하지 않은 정규식·프로토타입 오염)을 기계가 훑는다.
+#
+# ★왜 주기 실행도 두는가: CodeQL 규칙은 계속 갱신된다. 코드가 그대로여도 **새 규칙이 옛
+# 코드에서 문제를 찾는다.** 푸시 때만 돌리면 그 발견을 영영 못 본다.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # 매주 월요일 03:17 UTC. 정각을 피하는 이유는 GitHub 쪽 스케줄 혼잡을 피하기 위해서다.
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # 결과를 Security 탭에 올리려면 이 권한이 필요하다. 잡 단위로만 준다.
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          # security-extended: 기본 질의 묶음보다 넓다. 오탐이 조금 늘지만, 이 저장소는
+          # 신뢰할 수 없는 입력을 직접 파싱하는 코드가 대부분이라 넓은 쪽이 맞다.
+          queries: security-extended
+
+      # ★빌드 단계가 없다. 이 저장소는 트랜스파일하지 않고 `.ts`를 그대로 실행하므로
+      # CodeQL이 소스를 직접 읽으면 된다(autobuild를 부르면 할 일이 없어 헛돈다).
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript-typescript"
