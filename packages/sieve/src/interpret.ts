@@ -8,7 +8,7 @@
  * **원격 발신자가 보낸 `Subject:`** 가 매칭 값이 되므로, 계정 하나로 전 테넌트의 메일을
  * 세울 수 있었다(실측 19.6초). IMAP LIST에 같은 결함이 복제돼 있었다 — glob.ts 머리 주석 참조.
  */
-import { compileGlob, globCaptures, SIEVE_MATCH_SYNTAX } from "@ionosphere/core";
+import { compileGlob, compileRegex, execRegex, globCaptures, RegexSyntaxError, SIEVE_MATCH_SYNTAX } from "@ionosphere/core";
 import { datePartOf, isDatePart, parseHeaderDate, parseZoneOffset } from "./date-parts.ts";
 import { applyModifiers, isModifier, isValidVariableName, SieveVariables, type Modifier } from "./variables.ts";
 import type { SieveArg, SieveCommand, SieveTest } from "./ast.ts";
@@ -162,6 +162,7 @@ export const SUPPORTED_EXTENSION_LIST = [
   "comparator-i;ascii-numeric",
   "include",
   "variables",
+  "regex",
 ] as const;
 
 const SUPPORTED_EXTENSIONS: ReadonlySet<string> = new Set(SUPPORTED_EXTENSION_LIST);
@@ -625,6 +626,11 @@ type MatchKind =
   | { kind: "is" }
   | { kind: "contains" }
   | { kind: "matches" }
+  /**
+   * `:regex`(draft-ietf-sieve-regex) — **역추적 없는 엔진**으로 돈다(`@ionosphere/core`).
+   * `RegExp`을 쓰면 사용자 패턴 하나로 이 프로세스 전체가 멈춘다(ReDoS).
+   */
+  | { kind: "regex" }
   | { kind: "value"; rel: Relation }
   | { kind: "count"; rel: Relation };
 
@@ -635,6 +641,7 @@ const RELATIONS: ReadonlySet<string> = new Set(["gt", "ge", "lt", "le", "eq", "n
 function matchType(args: readonly SieveArg[]): MatchKind {
   if (hasTag(args, "contains")) return { kind: "contains" };
   if (hasTag(args, "matches")) return { kind: "matches" };
+  if (hasTag(args, "regex")) return { kind: "regex" };
   /**
    * ★`:value`/`:count`는 **값을 받는 태그**다(`:value "ge"`). 값을 안 읽고 태그만 보면
    * 그 관계 연산자가 위치 인자로 새어 키 목록에 섞인다.
@@ -724,6 +731,31 @@ function anyMatch(
         const r = globCaptures(k.toLowerCase(), v, SIEVE_MATCH_SYNTAX);
         if (!r.matched) continue;
         vars.setMatches(v, r.captures);
+        return true;
+      }
+    }
+    return false;
+  }
+  if (kind.kind === "regex") {
+    /**
+     * ★패턴은 **키마다 한 번만** 컴파일한다. 값이 여러 개일 때(헤더가 여러 줄, 주소가 여럿)
+     * 값×키마다 다시 컴파일하면 그 자체가 낭비다(`compileGlob`을 둔 것과 같은 이유).
+     *
+     * 문법 오류는 `SieveError`로 옮긴다 — 스크립트 오류이므로 배달이 INBOX 폴백으로 가고,
+     * 그건 "필터가 안 먹었다"이지 "메일이 사라졌다"가 아니다.
+     */
+    let compiled;
+    try {
+      compiled = keys.map((k) => compileRegex(k, { caseInsensitive: true }));
+    } catch (err) {
+      throw new SieveError(err instanceof RegexSyntaxError ? `invalid :regex pattern — ${err.message}` : String(err));
+    }
+    for (const v of values) {
+      for (const re of compiled) {
+        const r = execRegex(re, v);
+        if (!r.matched) continue;
+        // `${1}`은 `:matches`와 같은 자리에 담긴다 — 사용자에게는 같은 기능이다.
+        vars?.setMatches(v, r.captures);
         return true;
       }
     }

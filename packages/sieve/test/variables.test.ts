@@ -200,3 +200,55 @@ describe("include와 함께", () => {
     expect(r.fileinto).toEqual(["FromChild"]);
   });
 });
+
+describe(":regex (draft-ietf-sieve-regex)", () => {
+  const RR = 'require ["regex","variables","fileinto"];';
+
+  test("헤더를 정규식으로 검사한다", () => {
+    expect(runSieve(`${RR} if header :regex "subject" "patch [0-9]+" { fileinto "HIT"; }`, env()).fileinto).toEqual(["HIT"]);
+    expect(runSieve(`${RR} if header :regex "subject" "^nope" { fileinto "HIT"; }`, env()).fileinto).toEqual([]);
+  });
+
+  test("캡처가 ${1}로 들어간다", () => {
+    const r = runSieve(`${RR} if header :regex "subject" "patch ([0-9]+)" { fileinto "\${1}"; }`, env());
+    expect(r.fileinto).toEqual(["42"]);
+  });
+
+  test("주소에도 쓸 수 있다", () => {
+    const r = runSieve(`${RR} if address :regex "from" "^(.+)@example[.]com$" { fileinto "\${1}"; }`, env());
+    expect(r.fileinto).toEqual(["alice"]);
+  });
+
+  test("대소문자를 구분하지 않는다", () => {
+    expect(runSieve(`${RR} if header :regex "subject" "PATCH" { fileinto "HIT"; }`, env()).fileinto).toEqual(["HIT"]);
+  });
+
+  /** 문법 오류는 SieveError — 배달은 INBOX 폴백이라 "필터가 안 먹었다"이지 유실이 아니다. */
+  test("깨진 패턴은 SieveError", () => {
+    expect(() => runSieve(`${RR} if header :regex "subject" "(unclosed" { keep; }`, env())).toThrow(SieveError);
+  });
+
+  test("역참조·룩어라운드는 SieveError", () => {
+    expect(() => runSieve(`${RR} if header :regex "subject" "(a)\\\\1" { keep; }`, env())).toThrow(SieveError);
+    expect(() => runSieve(`${RR} if header :regex "subject" "(?=a)" { keep; }`, env())).toThrow(SieveError);
+  });
+
+  /**
+   * ★이 테스트가 `:regex`를 손으로 만든 이유다. `RegExp`이었다면 여기서 이벤트 루프가
+   * 멈추고, 그건 필터를 쓴 한 사용자가 **메일 서비스 전체를 멈추는** 것이다.
+   */
+  test("ReDoS 패턴이 즉시 끝난다", () => {
+    const e = env({ headers: new Map([["subject", ["a".repeat(60)]]]) });
+    const started = Date.now();
+    const r = runSieve(`${RR} if header :regex "subject" "^(a+)+$" { fileinto "HIT"; }`, e);
+    expect(r.fileinto).toEqual(["HIT"]); // 매칭 자체는 성립한다
+    expect(Date.now() - started < 2000).toBe(true);
+  });
+
+  test("ReDoS 패턴 + 매칭 실패도 즉시 끝난다", () => {
+    const e = env({ headers: new Map([["subject", ["a".repeat(60) + "b"]]]) });
+    const started = Date.now();
+    expect(runSieve(`${RR} if header :regex "subject" "^(a+)+$" { fileinto "HIT"; }`, e).fileinto).toEqual([]);
+    expect(Date.now() - started < 2000).toBe(true);
+  });
+});

@@ -89,3 +89,6 @@ export {
   SIEVE_MATCH_SYNTAX,
   type GlobSyntax,
 } from "./glob.ts";
+// 역추적 없는 정규식 엔진 — Sieve `:regex`가 쓴다. 사용자 패턴을 `RegExp`으로 돌리면
+// 단일 프로세스 서버에서 ReDoS 하나가 메일 서비스 전체를 멈춘다(regex.ts 머리 주석).
+export { compileRegex, execRegex, regexMatch, RegexSyntaxError, type CompiledRegex, type RegexMatch } from "./regex.ts";
