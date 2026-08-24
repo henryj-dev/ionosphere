@@ -19,7 +19,7 @@ import {
   type ScramStoredKeys,
 } from "@ionosphere/core";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { parseMessage, type ParsedAddress, type ParsedMessage } from "@ionosphere/mime";
+import { extractJmapBody, parseMessage, splitHeaderBody, type ParsedAddress, type ParsedMessage } from "@ionosphere/mime";
 import { isLocallyRoutableDomain, type DbDriver } from "@ionosphere/db";
 import { arcSeal, parseCidrList, type CidrMatcher, type DkimAlgorithm, type DnsResolver } from "@ionosphere/mail-auth";
 import { prependAuthResults, runInboundAuth, stripForgedAuthResults, stripForgedReceivedSpf } from "./inbound-auth.ts";
@@ -70,7 +70,20 @@ function buildSieveEnv(
   env: { mailFrom: string; rcptTo: readonly string[] },
   size: number,
   mailboxes: readonly string[],
+  extra: { raw?: Uint8Array; spamScore?: number | undefined; wantContentParts?: boolean } = {},
 ): SieveEnv {
+  /**
+   * `body :raw`(RFC 5173)는 **헤더 뒤 전체**다. 헤더 경계는 `@ionosphere/mime`의 정본
+   * (`splitHeaderBody`)으로 자른다 — 두 벌로 두면 파서와 다른 바이트를 보게 된다.
+   */
+  const bodyRaw = extra.raw ? splitHeaderBody(new TextDecoder().decode(extra.raw)).bodyText : undefined;
+  /**
+   * ★`:content`용 파트는 **스크립트가 그 태그를 쓸 때만** 만든다. 안 쓰는데 MIME 트리를
+   * 매번 도는 것은 배달 경로에서 그냥 손해다. 리터럴 태그가 있어야 파서가 읽으므로
+   * 문자열 검사로 거르는 것이 안전하다(오탐은 비용만, 누락은 불가능).
+   */
+  const bodyParts =
+    extra.wantContentParts && extra.raw ? contentPartsFor(extra.raw) : undefined;
   return {
     headers: parsed.headers,
     envelopeFrom: env.mailFrom,
@@ -78,7 +91,43 @@ function buildSieveEnv(
     size,
     // `mailboxexists`(RFC 5490)는 조회가 아니라 **주입**이다 — 평가기는 I/O를 모른다.
     mailboxes,
+    ...(parsed.textBody ? { bodyText: parsed.textBody } : {}),
+    ...(bodyRaw !== undefined ? { bodyRaw } : {}),
+    ...(bodyParts !== undefined ? { bodyParts } : {}),
+    ...(extra.spamScore !== undefined ? { spamScore: normalizeSpamScore(extra.spamScore) } : {}),
   };
+}
+
+/**
+ * 스팸 점수 원값 → `spamtest`(RFC 5235)의 **1~10** 눈금.
+ *
+ * ★`0`은 이 함수가 내지 않는다 — 규격에서 `"0"`은 "검사하지 않았다"이고, 그 갈래는
+ * 점수가 아예 없을 때(undefined)다. 검사했는데 깨끗한 것은 `"1"`이다. 둘을 섞으면
+ * 검사하지 않은 메일이 "확실히 깨끗함"으로 통과한다.
+ *
+ * 눈금은 거부 임계값에 맞춰 편다: 0점이 1, 거부 임계값이 10이다. 그러면 junk 임계값(기본 5)이
+ * 대략 5~6에 놓여 RFC의 "5 = 스팸일 수 있음"과 어긋나지 않는다.
+ */
+function normalizeSpamScore(score: number, rejectThreshold = 10): number {
+  const t = rejectThreshold > 0 ? rejectThreshold : 10;
+  const ratio = Math.min(1, Math.max(0, score / t));
+  return 1 + Math.round(ratio * 9);
+}
+
+/** `body :content`용 파트 목록 — (Content-Type, 디코드된 텍스트). */
+function contentPartsFor(raw: Uint8Array): { contentType: string; text: string }[] {
+  const body = extractJmapBody(raw);
+  const out: { contentType: string; text: string }[] = [];
+  const walk = (part: { partId?: string | null; type?: string | null; subParts?: unknown }): void => {
+    const id = part.partId ?? null;
+    if (id !== null) {
+      const v = body.bodyValues[id];
+      if (v) out.push({ contentType: String(part.type ?? "text/plain"), text: v.value });
+    }
+    for (const sp of (part.subParts as { partId?: string | null; type?: string | null; subParts?: unknown }[] | null) ?? []) walk(sp);
+  };
+  walk(body.bodyStructure as never);
+  return out;
 }
 
 /** MailboxRow 목록 → "A/B" 경로 → id 맵(계층은 parentId, 루트 parentId=''). */
@@ -236,6 +285,14 @@ interface PreparedInbound {
    * 배달은 하되 Junk 메일함(있으면)과 `$Junk` 키워드로 보낸다.
    */
   junk?: boolean;
+  /**
+   * 스팸 점수 원값 — Sieve `spamtest`(RFC 5235)가 볼 값이다.
+   *
+   * ★`junk`(불리언)와 따로 두는 이유: `junk`는 "임계값을 넘었나"이고 이건 "얼마인가"다.
+   * 스크립트는 자기 임계값을 쓰고 싶어 한다(`spamtest :value "ge" "3"`) — 우리 판정만
+   * 넘겨주면 그걸 할 수 없다. 검사를 안 했으면 undefined이고, 그건 `"0"`(not checked)이다.
+   */
+  spamScoreRaw?: number;
   /** SCHEMA §9-3 코드. `spf: null`은 "검사 안 함"(신뢰 릴레이)이고 `0`(none)과 다르다. */
   authCodes: { spf: number | null; dkim: number; dmarc: number } | null;
   authResultsValue: string;
@@ -553,6 +610,8 @@ export class IonosphereSmtpBackend implements SmtpBackend {
     parsed: ParsedMessage,
     env: { mailFrom: string; rcptTo: readonly string[] },
     size: number,
+    /** `body`(RFC 5173)·`spamtest`(RFC 5235)가 볼 것들 — 스크립트가 쓸 때만 값이 든다. */
+    content: { raw?: Uint8Array; spamScore?: number | undefined } = {},
   ): Promise<{ mailboxIds: string[]; keywords: string[]; redirect: string[]; discard: boolean; fileintoUsed: boolean; reject: string | null; vacation: VacationRequest | null }> {
     /**
      * ★JMAP `VacationResponse`(RFC 8621 §8)를 **Sieve와 같은 게이트로** 흘린다.
@@ -590,7 +649,15 @@ export class IonosphereSmtpBackend implements SmtpBackend {
 
     let result;
     try {
-      result = runSieve(script, buildSieveEnv(parsed, env, size, [...pathToId.keys()]));
+      result = runSieve(
+        script,
+        buildSieveEnv(parsed, env, size, [...pathToId.keys()], {
+          ...(content.raw ? { raw: content.raw } : {}),
+          ...(content.spamScore !== undefined ? { spamScore: content.spamScore } : {}),
+          // 리터럴 태그가 있어야 파서가 읽으므로 문자열 검사로 거른다(오탐은 비용만).
+          wantContentParts: script.includes(":content"),
+        }),
+      );
     } catch (err) {
       this.log.warn("sieve error — INBOX fallback", { accountId, error: err instanceof Error ? err.message : String(err) });
       return fallback;
@@ -1038,6 +1105,7 @@ export class IonosphereSmtpBackend implements SmtpBackend {
      * 사라지지 않는다. 확신이 낮은 구간은 junk로 흘린다(유실 없음).
      */
     let junkVerdict: SpamScore | null = null;
+    let spamScoreRaw: number | undefined;
     if (this.spamScore) {
       const verdict = scoreSpam(
         {
@@ -1062,6 +1130,8 @@ export class IonosphereSmtpBackend implements SmtpBackend {
       }
       // junk는 **거부가 아니다** — 배달은 하되 아래에서 Junk 메일함/키워드로 보낸다.
       if (verdict.action === SPAM_ACTION.junk) junkVerdict = verdict;
+      // 점수 자체는 판정과 무관하게 남긴다 — Sieve `spamtest`가 자기 임계값을 쓴다.
+      spamScoreRaw = verdict.score;
     }
 
     /**
@@ -1141,6 +1211,7 @@ export class IonosphereSmtpBackend implements SmtpBackend {
       authCodes,
       authResultsValue,
       ...(junkVerdict ? { junk: true } : {}),
+      ...(spamScoreRaw !== undefined ? { spamScoreRaw } : {}),
     };
   }
 
@@ -1272,7 +1343,10 @@ export class IonosphereSmtpBackend implements SmtpBackend {
     if (!inbox) return { status: "unknown" };
 
     // Sieve 필터(Phase 4) — 활성 스크립트로 배달 대상/플래그/폐기 결정. 오류·미설정 시 INBOX.
-    const route = await this.runSieveRoute(accountId, inbox.id, parsed, env, size);
+    const route = await this.runSieveRoute(accountId, inbox.id, parsed, env, size, {
+      raw: prep.stored,
+      ...(prep.spamScoreRaw !== undefined ? { spamScore: prep.spamScoreRaw } : {}),
+    });
     if (route.reject !== null) {
       /**
        * ★`discard`와 **정반대의 처분**이다. discard는 조용히 버리는 것이라 발신자에게 성공을
