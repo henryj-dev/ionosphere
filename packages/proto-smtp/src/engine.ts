@@ -930,19 +930,35 @@ export class SmtpEngine {
   /**
    * 저장된 SCRAM 키(없으면 null) — **null이어도 교환은 계속된다.**
    * 즉시 실패시키면 "그 계정이 없다"가 응답 형태로 샌다(scram-session.ts 주석).
+   *
+   * ★다른 `xxxResult()`와 **똑같이** `pump()` → `guardErrors()`를 거친다. 예전엔 이 메서드만
+   * 둘 다 빠져 있었다:
+   *
+   *  · `pump()` 누락 — `awaiting` 동안 버퍼에 쌓인 파이프라인 바이트가 재개 시점에 처리되지
+   *    않았다. client-first와 다음 줄을 한 세그먼트로 보내는 클라이언트는 server-first를 받고도
+   *    서버가 다음 줄을 읽지 않아 **5분 유휴 타임아웃까지 교착**한다. PIPELINING을 광고하는
+   *    서버라 정상 클라이언트가 걸릴 수 있는 형태다.
+   *  · `guardErrors()` 누락 — 이 경로의 535가 `MAX_SMTP_ERRORS_PER_SESSION`에 세어지지 않았다.
+   *    그 함수 주석이 "공개 메서드는 **전부** 반환 직전에 이 함수를 통과한다 … 새는 갈래
+   *    하나가 곧 무제한 오라클"이라고 못 박은 계약이 여기서 깨져 있었다.
    */
   scramKeysResult(keys: ScramStoredKeys | null): SmtpAction[] {
     if (this.awaiting !== "scramKeys") throw new Error("scramKeysResult() called without a pending SCRAM lookup");
     this.awaiting = null;
     const cont = this.authContinuation;
-    if (cont === null || cont.mechanism !== "SCRAM-SHA-256") return [];
-    const step = cont.session.provideKeys(keys);
-    if (step.need !== "send") {
-      this.authContinuation = null;
-      return [this.scramFailedAction(step), reply(535, "5.7.8", "Authentication credentials invalid")];
+    const actions: SmtpAction[] = [];
+    if (cont !== null && cont.mechanism === "SCRAM-SHA-256") {
+      const step = cont.session.provideKeys(keys);
+      if (step.need === "send") {
+        this.authContinuation = { mechanism: "SCRAM-SHA-256", session: cont.session, stage: "final" };
+        actions.push(rawReply(`334 ${Buffer.from(step.message).toString("base64")}`));
+      } else {
+        this.authContinuation = null;
+        actions.push(this.scramFailedAction(step), reply(535, "5.7.8", "Authentication credentials invalid"));
+      }
     }
-    this.authContinuation = { mechanism: "SCRAM-SHA-256", session: cont.session, stage: "final" };
-    return [rawReply(`334 ${Buffer.from(step.message).toString("base64")}`)];
+    actions.push(...this.pump());
+    return this.guardErrors(actions);
   }
 
   private resetTransaction(): void {

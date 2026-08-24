@@ -429,20 +429,31 @@ export class ManageSieveEngine {
 
   /**
    * SCRAM 저장 키(없으면 null) — **null이어도 교환은 계속된다**(계정 열거 방어).
+   *
+   * ★다른 `xxxResult()`와 같이 `drain()`으로 끝난다. 예전엔 이것만 빠져 있어서, 실패 갈래에서
+   * `pending`을 비우고도 큐에 남은 파이프라인 줄을 처리하지 않았다(SMTP·POP3 엔진의 같은
+   * 결함과 한 쌍 — 계약을 네 프로토콜이 공유한다).
+   *
+   * 성공 갈래에서도 부르는 것이 안전하다: `drain()`은 `!this.pending`을 정지 조건으로 두므로
+   * `auth-line`을 세팅한 뒤에는 no-op이다. 갈래마다 부를지 말지를 판단하게 두면 다음 사람이
+   * 한쪽을 빠뜨린다 — 그게 이 결함이 생긴 방식이다.
    */
   scramKeysResult(keys: ScramStoredKeys | null): ManageSieveAction[] {
     if (this.pending?.kind !== "scram-keys") throw new Error("scramKeysResult 순서 오류");
     const sc = this.scram;
-    if (!sc) return [];
+    if (!sc) {
+      this.pending = null;
+      return [...this.drain()];
+    }
     const step = sc.session.provideKeys(keys);
     if (step.need !== "send") {
       this.scram = null;
       this.pending = null;
-      return [this.scramFailedAction(step), reply('NO "authentication failed"')];
+      return [this.scramFailedAction(step), reply('NO "authentication failed"'), ...this.drain()];
     }
     this.pending = { kind: "auth-line", sasl: "SCRAM-SHA-256" };
     const b64 = Buffer.from(step.message).toString("base64");
-    return [reply(`{${b64.length}+}\r\n${b64}`)];
+    return [reply(`{${b64.length}+}\r\n${b64}`), ...this.drain()];
   }
 
   /** AUTHENTICATE PLAIN base64 디코드 → auth 액션. */

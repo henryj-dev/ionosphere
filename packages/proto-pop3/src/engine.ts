@@ -267,18 +267,21 @@ export class Pop3Engine {
 
   /**
    * SCRAM 저장 키(없으면 null) — **null이어도 교환은 계속된다**(계정 열거 방어).
+   *
+   * ★다른 `xxxResult()`와 같이 `drain()`으로 끝난다. 예전엔 이것만 빠져 있어서, 대기 중
+   * 버퍼에 쌓인 파이프라인 줄이 재개 시점에 처리되지 않았다(SMTP 엔진의 같은 결함과 한 쌍).
    */
   scramKeysResult(keys: ScramStoredKeys | null): Pop3Action[] {
     if (this.pending?.kind !== "scram-keys") throw new Error("Pop3Engine: scramKeysResult()는 scramKeys 액션 이후에만 호출 가능");
     this.pending = null;
     const sasl = this.awaitingSasl;
-    if (!sasl || sasl.mechanism !== "SCRAM-SHA-256") return [];
+    if (!sasl || sasl.mechanism !== "SCRAM-SHA-256") return [...this.drain()];
     const step = sasl.session.provideKeys(keys);
     if (step.need !== "send") {
       this.awaitingSasl = null;
-      return [this.scramFailedAction(step), { kind: "reply", text: "-ERR [AUTH] authentication failed" }];
+      return [this.scramFailedAction(step), { kind: "reply", text: "-ERR [AUTH] authentication failed" }, ...this.drain()];
     }
-    return [{ kind: "reply", text: `+ ${Buffer.from(step.message).toString("base64")}` }];
+    return [{ kind: "reply", text: `+ ${Buffer.from(step.message).toString("base64")}` }, ...this.drain()];
   }
 
   authResult(result: Pop3AuthResult): Pop3Action[] {
