@@ -391,7 +391,7 @@ export class JmapServer {
     if (idx === -1) return { ok: false, presented: true };
     const user = decoded.slice(0, idx);
     const pass = decoded.slice(idx + 1);
-    const result = await authenticate(this.opts.db, user, pass);
+    const result = await authenticate(this.opts.db, user, pass, "jmap");
     if (!result) {
       this.log.warn("auth failed", { user });
       return { ok: false, presented: true, user };

@@ -20,7 +20,7 @@ export class IonosphereManageSieveBackend implements ManageSieveBackend {
    * 여기서 기록하지 않는 이유: 이 클래스에는 IP가 없다(어댑터만 소켓을 본다).
    */
   async authenticate(user: string, pass: string): Promise<{ accountId: string; credKind?: string | undefined } | null> {
-    const r = await authenticate(this.db, user, pass);
+    const r = await authenticate(this.db, user, pass, "sieve");
     return r === null ? null : { accountId: r.accountId, credKind: r.credKind };
   }
 

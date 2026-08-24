@@ -203,10 +203,10 @@ describe("AdminApiServer", () => {
     expect(list[0]!.email).toBe("user@acme.test");
     expect(list[0]!.status).toBe(1);
 
-    const authResult = await authenticate(f.db, "user@acme.test", "s3cret-pw");
+    const authResult = await authenticate(f.db, "user@acme.test", "s3cret-pw", "imap");
     expect(authResult?.accountId).toBe(accountId);
 
-    const wrongPw = await authenticate(f.db, "user@acme.test", "nope");
+    const wrongPw = await authenticate(f.db, "user@acme.test", "nope", "imap");
     expect(wrongPw).toBeNull();
   });
 
@@ -677,7 +677,7 @@ describe("AdminApiServer", () => {
     expect(created.password).toMatch(/^[a-z]{4}-[a-z]{4}-[a-z]{4}-[a-z]{4}$/);
 
     // 발급된 평문으로 실제 로그인이 되어야 한다(store 인증 경로까지 태운다)
-    expect((await authenticate(f.db, "ap@acme.test", created.password))?.accountId).toBe(accountId);
+    expect((await authenticate(f.db, "ap@acme.test", created.password, "imap"))?.accountId).toBe(accountId);
 
     const listRes = await fetch(`${f.baseUrl}/v1/accounts/${accountId}/app-passwords`, { headers: authHeader(apiKey) });
     expect(listRes.status).toBe(200);
@@ -700,8 +700,8 @@ describe("AdminApiServer", () => {
     expect(await revokeRes.json()).toEqual({ revoked: true });
 
     // 폐기 후에는 그 앱 비밀번호로 인증 불가, 기본 비밀번호는 그대로 살아 있어야 한다
-    expect(await authenticate(f.db, "ap@acme.test", created.password)).toBeNull();
-    expect((await authenticate(f.db, "ap@acme.test", "primary-pw"))?.accountId).toBe(accountId);
+    expect(await authenticate(f.db, "ap@acme.test", created.password, "imap")).toBeNull();
+    expect((await authenticate(f.db, "ap@acme.test", "primary-pw", "imap"))?.accountId).toBe(accountId);
 
     const afterRes = await fetch(`${f.baseUrl}/v1/accounts/${accountId}/app-passwords`, { headers: authHeader(apiKey) });
     expect(await afterRes.json()).toEqual([]);
@@ -754,7 +754,7 @@ describe("AdminApiServer", () => {
 
     const res = await fetch(`${f.baseUrl}/v1/credentials/${primaryId}`, { method: "DELETE", headers: authHeader(apiKey) });
     expect(res.status).toBe(400);
-    expect((await authenticate(f.db, "lock@acme.test", "primary-pw"))?.accountId).toBe(accountId);
+    expect((await authenticate(f.db, "lock@acme.test", "primary-pw", "imap"))?.accountId).toBe(accountId);
   });
 
   test("목록 응답에 id 포함 — 콘솔이 행마다 계정/도메인을 지목할 수 있어야 한다", async () => {

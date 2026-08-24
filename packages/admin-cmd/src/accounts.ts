@@ -8,7 +8,7 @@
  * 마이그레이션 006이 인덱스로 의도를 증언하는데 정리 코드가 없던 것과 같은 모양의 구멍이다.
  */
 import { CREDENTIAL_KIND, ACCOUNT_STATUS, type DbDriver } from "@ionosphere/db";
-import { createAppPassword, createCredential, createOAuthToken, listCredentials, revokeCredential } from "@ionosphere/store";
+import { AUTH_SURFACES, createAppPassword, createCredential, createOAuthToken, listCredentials, revokeCredential } from "@ionosphere/store";
 import { CommandError, type Command, type CommandContext } from "./types.ts";
 
 /** 이 명령이 작용할 테넌트. root가 지정하지 않으면 대상이 정해지지 않는다 — 추측하지 않는다. */
@@ -72,6 +72,27 @@ const accountFields = [
   { key: "usedBytes", label: "사용량", format: "bytes" as const },
   { key: "id", label: "id" },
 ];
+
+/**
+ * 표면 목록 정규화·검증 — 빈 값이면 `undefined`(제한 없음).
+ *
+ * ★모르는 이름은 **거절한다.** `credentialAllowsSurface`는 모르는 이름을 "아무 표면도 열지
+ * 않음"으로 다루므로(fail closed), 오타가 있는 채로 발급되면 그 자격증명은 어디서도 로그인이
+ * 안 되는데 화면에는 성공으로 보인다. 만들 때 막는 편이 그 혼란을 없앤다.
+ */
+function normalizeSurfaces(raw: string | undefined): string | undefined {
+  const parts = (raw ?? "")
+    .split(/[,\s]+/)
+    .map((x) => x.trim().toLowerCase())
+    .filter((x) => x.length > 0);
+  if (parts.length === 0) return undefined;
+  const known: readonly string[] = AUTH_SURFACES;
+  const unknown = parts.filter((x) => !known.includes(x));
+  if (unknown.length > 0) {
+    throw new CommandError("invalid", `알 수 없는 표면: ${unknown.join(", ")} (가능: ${AUTH_SURFACES.join(", ")})`);
+  }
+  return [...new Set(parts)].join(",");
+}
 
 export const accountCommands: readonly Command[] = [
   {
@@ -239,6 +260,9 @@ export const accountCommands: readonly Command[] = [
       args: [{ name: "account", label: "계정(주소 또는 id)", type: "string", required: true }],
       fields: [
         { key: "label", label: "라벨" },
+        // ★스코프를 보여 준다 — 스코프 거절은 인증 실패와 구분되지 않게 나가므로(자격증명
+        //   확인 수단이 되지 않게), 운영자가 "비밀번호는 맞는데 왜 안 되지"에 답할 자리가 여기뿐이다.
+        { key: "scopes", label: "허용 표면" },
         { key: "createdAt", label: "생성", format: "time" },
         { key: "lastUsedAt", label: "최근 사용", format: "time" },
         { key: "id", label: "id" },
@@ -248,7 +272,15 @@ export const accountCommands: readonly Command[] = [
       const tenantId = requireTenant(ctx);
       const acc = await resolveAccount(ctx.db, tenantId, args.account!);
       const creds = await listCredentials(ctx.db, acc.id, CREDENTIAL_KIND.appPassword);
-      return { rows: creds.map((c) => ({ id: c.id, label: c.label, createdAt: c.createdAt, lastUsedAt: c.lastUsedAt })) };
+      return {
+        rows: creds.map((c) => ({
+          id: c.id,
+          label: c.label,
+          scopes: c.scopes ?? "(제한 없음)",
+          createdAt: c.createdAt,
+          lastUsedAt: c.lastUsedAt,
+        })),
+      };
     },
   },
   {
@@ -261,18 +293,26 @@ export const accountCommands: readonly Command[] = [
       args: [
         { name: "account", label: "계정(주소 또는 id)", type: "string", required: true },
         { name: "label", label: "라벨", type: "string", required: false, placeholder: "iPhone Mail" },
+        {
+          name: "scopes",
+          label: "허용 표면",
+          type: "string",
+          required: false,
+          placeholder: AUTH_SURFACES.join(","),
+        },
       ],
     },
     async run(ctx, args) {
       const tenantId = requireTenant(ctx);
       const acc = await resolveAccount(ctx.db, tenantId, args.account!);
       const label = args.label?.trim() || "app";
-      const { id, password } = await createAppPassword(ctx.db, acc.id, label);
+      const scopes = normalizeSurfaces(args.scopes);
+      const { id, password } = await createAppPassword(ctx.db, acc.id, label, ...(scopes ? [scopes] : []));
       return {
-        data: { id, label },
+        data: { id, label, scopes: scopes ?? null },
         // 저장은 해시뿐이라 이 화면을 벗어나면 복구할 수 없다 — 그래서 일반 data와 나눠 둔다.
         secret: { label: `앱 비밀번호 (${label})`, value: password, hint: "하이픈/공백은 무시되므로 그대로 붙여넣어도 됩니다." },
-        message: `앱 비밀번호 발급됨: ${acc.email} (${label}, id=${id})`,
+        message: `앱 비밀번호 발급됨: ${acc.email} (${label}, id=${id}${scopes ? `, 표면=${scopes}` : ""})`,
       };
     },
   },

@@ -155,9 +155,17 @@ export async function createAppPassword(
   db: DbDriver,
   accountId: string,
   label: string,
+  /** 허용 표면(`AUTH_SURFACES`). 생략하면 제한 없음 — 기존 동작 그대로다. */
+  scopes?: string,
 ): Promise<{ id: string; password: string }> {
   const password = generateAppPassword();
-  const id = await createCredential(db, { accountId, password: normalizeAppPassword(password), kind: CREDENTIAL_KIND.appPassword, label });
+  const id = await createCredential(db, {
+    accountId,
+    password: normalizeAppPassword(password),
+    kind: CREDENTIAL_KIND.appPassword,
+    label,
+    ...(scopes ? { scopes } : {}),
+  });
   return { id, password };
 }
 
@@ -180,9 +188,11 @@ export async function createOAuthToken(
   db: DbDriver,
   accountId: string,
   label: string,
+  /** 허용 표면(`AUTH_SURFACES`). 생략하면 제한 없음. */
+  scopes?: string,
 ): Promise<{ id: string; token: string }> {
   const token = generateOAuthToken();
-  const id = await createCredential(db, { accountId, password: token, kind: 2, label });
+  const id = await createCredential(db, { accountId, password: token, kind: 2, label, ...(scopes ? { scopes } : {}) });
   return { id, token };
 }
 
@@ -191,15 +201,21 @@ export async function listCredentials(
   db: DbDriver,
   accountId: string,
   kind?: 0 | 1 | 2,
-): Promise<{ id: string; kind: number; label: string | null; createdAt: number; lastUsedAt: number | null }[]> {
+): Promise<{ id: string; kind: number; label: string | null; scopes: string | null; createdAt: number; lastUsedAt: number | null }[]> {
   const { rows } = await db.query({
-    sql: `SELECT id, kind, label, created_at, last_used_at FROM credentials WHERE account_id = ?${kind !== undefined ? " AND kind = ?" : ""} ORDER BY created_at`,
+    sql: `SELECT id, kind, label, scopes, created_at, last_used_at FROM credentials WHERE account_id = ?${kind !== undefined ? " AND kind = ?" : ""} ORDER BY created_at`,
     params: kind !== undefined ? [accountId, kind] : [accountId],
   });
   return rows.map((r) => ({
     id: String(r.id),
     kind: Number(r.kind),
     label: r.label == null ? null : String(r.label),
+    /**
+     * ★스코프를 목록에 실어야 한다. 스코프 거절은 인증 실패와 **구분되지 않게** 나가므로
+     * (auth.ts `authenticate` 주석), 운영자가 "비밀번호는 맞는데 왜 안 되지"에 답할 수 있는
+     * 자리가 여기뿐이다.
+     */
+    scopes: r.scopes == null ? null : String(r.scopes),
     createdAt: Number(r.created_at),
     lastUsedAt: r.last_used_at == null ? null : Number(r.last_used_at),
   }));
@@ -233,14 +249,56 @@ export async function createCredential(
 }
 
 /**
- * email+password 인증 → accountId 또는 null.
- * 계정 status=1만 허용 (§7-7 가시성 계약). scope 검사는 호출자(프로토콜별) 몫.
+ * 자격증명이 쓰일 수 있는 **표면** — 프로토콜 하나가 하나다.
+ *
+ * "이 앱 비밀번호는 IMAP 전용"이 자연스러운 요구라 `credentials.scopes`에 이 이름들을
+ * 쉼표/공백으로 적는다. 비어 있으면(`null`·빈 문자열) 제한 없음이다 — 기존 자격증명이
+ * 전부 그 상태이므로 **기본값이 곧 하위 호환**이다.
+ */
+export const AUTH_SURFACES = ["imap", "pop3", "submission", "jmap", "sieve"] as const;
+export type AuthSurface = (typeof AUTH_SURFACES)[number];
+
+/**
+ * scopes 문자열이 이 표면을 허용하는가.
+ *
+ * ★모르는 이름이 섞여 있어도 **아는 이름만** 본다. 오타(`imapp`)가 있으면 그 항목은 아무
+ * 표면도 열지 않으므로, 결과적으로 "덜 열리는" 쪽으로 틀린다 — 보안은 fail closed다.
+ * 반대로 모르는 이름을 무시하고 통과시키면 오타 하나가 제한을 통째로 없앤다.
+ */
+export function credentialAllowsSurface(scopes: string | null | undefined, surface: AuthSurface): boolean {
+  if (scopes == null) return true;
+  const wanted = scopes
+    .split(/[,\s]+/)
+    .map((x) => x.trim().toLowerCase())
+    .filter((x) => x.length > 0);
+  if (wanted.length === 0) return true; // 빈 문자열 = 제한 없음
+  return wanted.includes(surface);
+}
+
+/**
+ * email+password 인증 → accountId 또는 null. 계정 status=1만 허용 (§7-7 가시성 계약).
+ *
+ * ★`surface`가 **필수 인자**인 것이 이 함수의 핵심이다 (2026-08-24, 감사 G1).
+ *
+ * 예전 주석은 "scope 검사는 호출자(프로토콜별) 몫"이라고 적었는데 **그 호출자가 없었다** —
+ * `credentials.scopes`는 저장만 되고 아무도 읽지 않았다. `api_keys.scopes`가 똑같은 결함을
+ * 겪고 "표면마다 손으로 붙이면 언젠가 하나가 빠지고, 빠진 자리는 조용히 통과한다"는 이유로
+ * 단일 관문이 된 적이 있는데(`api/server.ts`의 `SCOPE_ADMIN` 주석), 여기는 그 교훈이
+ * 적용되지 않은 채 남아 있었다.
+ *
+ * 그래서 검사를 **여기 안에** 두고 표면을 필수 인자로 만든다. 새 프로토콜을 붙이는 사람은
+ * 자기 표면을 대지 않으면 컴파일이 안 되고, 검사를 잊을 자리 자체가 없다.
+ *
+ * ★스코프 거절은 **비밀번호 실패와 같은 `null`**이다. 갈래를 나누면 "비밀번호는 맞고 표면만
+ * 틀렸다"가 응답 차이로 새어 나가 자격증명 확인 수단이 된다. 운영자는 감사 로그의 표면과
+ * 자격증명 목록(`scopes`)으로 진단한다 — 사용자에게는 알리지 않는 쪽이 맞다.
  */
 export async function authenticate(
   db: DbDriver,
   email: string,
   password: string,
-): Promise<{ accountId: string; credentialId: string; credKind: CredentialKindName | undefined } | null> {
+  surface: AuthSurface,
+): Promise<{ accountId: string; credentialId: string; credKind: CredentialKindName | undefined; scopes: string | null } | null> {
   const { rows: accounts } = await db.query({
     sql: "SELECT id FROM accounts WHERE email = ? AND status = 1",
     params: [email.toLowerCase()],
@@ -253,7 +311,7 @@ export async function authenticate(
   }
 
   const { rows: creds } = await db.query({
-    sql: "SELECT id, kind, secret FROM credentials WHERE account_id = ?",
+    sql: "SELECT id, kind, secret, scopes FROM credentials WHERE account_id = ?",
     params: [accountId],
   });
   const normalizedApp = normalizeAppPassword(password);
@@ -265,6 +323,17 @@ export async function authenticate(
       (await verifySecret(password, secret)) ||
       (Number(c.kind) === 1 && normalizedApp !== password && (await verifySecret(normalizedApp, secret)));
     if (matched) {
+      const scopes = c.scopes == null ? null : String(c.scopes);
+      /**
+       * ★관문. 비밀번호가 맞아도 이 표면이 아니면 들어올 수 없다.
+       *
+       * `continue`가 아니라 여기서 끝내지 않는 이유: 같은 계정의 **다른** 자격증명이 같은
+       * 비밀번호를 가질 수 있고(있어선 안 되지만 막지 않는다), 그중 하나가 이 표면을
+       * 허용할 수 있다. 계속 도는 편이 사용자에게 맞고, 어차피 전부 막히면 아래에서 null이다.
+       *
+       * `last_used_at`도 갱신하지 않는다 — 쓰이지 않은 자격증명이다.
+       */
+      if (!credentialAllowsSurface(scopes, surface)) continue;
       const credentialId = String(c.id);
       // last_used_at 갱신(베스트에포트 — 실패해도 인증 성공엔 무관)
       try {
@@ -301,7 +370,8 @@ export async function authenticate(
       // ★`credKind`를 함께 돌려준다 — 접근 감사 로그가 "이 로그인이 기본 비밀번호인가 앱
       // 비밀번호인가 OAuth 토큰인가"를 구분해야 한다. 예전엔 이 값이 쿼리에는 있는데 반환에
       // 없어서, 어느 로그에도 그 구분이 남지 않았다. 인코딩 역매핑은 소유 패키지(@ionosphere/db).
-      return { accountId, credentialId, credKind: credentialKindName(Number(c.kind)) };
+      // scopes도 올린다 — 감사 로그가 "어떤 권한의 자격증명으로 들어왔나"를 남길 수 있어야 한다.
+      return { accountId, credentialId, credKind: credentialKindName(Number(c.kind)), scopes };
     }
   }
   return null;
@@ -340,11 +410,25 @@ export async function scramKeysFor(db: DbDriver, email: string): Promise<StoredS
  * 맞을 수 있다. PLAIN 경로는 `authenticate`가 `status = 1`을 함께 보지만, SCRAM은 검증을
  * 엔진이 하므로 이 확인이 **따로** 있어야 한다 — 없으면 정지가 SCRAM에서만 새어 나간다.
  */
-export async function scramAuthorize(db: DbDriver, email: string): Promise<{ accountId: string } | null> {
+export async function scramAuthorize(db: DbDriver, email: string, surface: AuthSurface): Promise<{ accountId: string } | null> {
+  /**
+   * ★스코프 관문이 여기에도 있어야 한다 — SCRAM은 `authenticate`를 **거치지 않는다**
+   * (증명은 엔진이 하고 여기는 최종 승인만 한다). 이 검사를 빠뜨리면 "IMAP 전용" 앱
+   * 비밀번호가 SCRAM으로 로그인할 때만 제한 없이 통과한다. 정지 계정이 SCRAM에서만 새던
+   * 것과 **정확히 같은 부류**의 구멍이라, 같은 자리에서 함께 막는다.
+   *
+   * SCRAM은 기본 비밀번호(kind=0)로만 쓴다(`scramKeysFor` 주석) — 그래서 그 자격증명의
+   * scopes만 본다. 여러 개면 `scramKeysFor`와 같은 순서(created_at ASC)의 첫 행이다.
+   */
   const { rows } = await db.query({
-    sql: "SELECT id FROM accounts WHERE email = ? AND status = 1",
-    params: [email.toLowerCase()],
+    sql: `SELECT a.id AS id, c.scopes AS scopes
+            FROM accounts a LEFT JOIN credentials c ON c.account_id = a.id AND c.kind = ?
+           WHERE a.email = ? AND a.status = 1
+           ORDER BY c.created_at ASC`,
+    params: [CREDENTIAL_KIND.password, email.toLowerCase()],
   });
-  const id = rows[0]?.id;
-  return typeof id === "string" ? { accountId: id } : null;
+  const row = rows[0];
+  if (typeof row?.id !== "string") return null;
+  if (!credentialAllowsSurface(row.scopes == null ? null : String(row.scopes), surface)) return null;
+  return { accountId: String(row.id) };
 }

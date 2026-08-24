@@ -63,14 +63,14 @@ describe("auth (SCHEMA §4 credentials)", () => {
     ]);
     await createCredential(db, { accountId: acct, password: "pw-1", kind: 1, label: "테스트기기" });
 
-    const ok = await authenticate(db, "USER@Example.COM", "pw-1"); // 대소문자 정규화
+    const ok = await authenticate(db, "USER@Example.COM", "pw-1", "imap"); // 대소문자 정규화
     expect(ok?.accountId).toBe(acct);
-    expect(await authenticate(db, "user@example.com", "wrong")).toBeNull();
-    expect(await authenticate(db, "ghost@example.com", "pw-1")).toBeNull();
+    expect(await authenticate(db, "user@example.com", "wrong", "imap")).toBeNull();
+    expect(await authenticate(db, "ghost@example.com", "pw-1", "imap")).toBeNull();
 
     // status=0 계정은 인증 불가 (§7-7 가시성)
     await db.batch([{ sql: "UPDATE accounts SET status = 0 WHERE id = ?", params: [acct] }]);
-    expect(await authenticate(db, "user@example.com", "pw-1")).toBeNull();
+    expect(await authenticate(db, "user@example.com", "pw-1", "imap")).toBeNull();
     await db.close();
   });
 });
@@ -179,7 +179,7 @@ describe("SCRAM 지연 생성", () => {
       },
     ]);
 
-    expect(await authenticate(db, "old@x.test", "pw")).not.toBeNull();
+    expect(await authenticate(db, "old@x.test", "pw", "imap")).not.toBeNull();
 
     // 지연 생성은 베스트에포트(비동기)라 잠깐 기다린다. 인증 성공을 막지 않는 것이 설계다.
     for (let i = 0; i < 40; i++) {

@@ -73,7 +73,7 @@ export class IonosphereImapBackend implements ImapBackend {
   }
 
   async authenticate(user: string, pass: string): Promise<{ accountId: string; credKind?: string | undefined } | null> {
-    const result = await authenticate(this.db, user, pass);
+    const result = await authenticate(this.db, user, pass, "imap");
     if (!result) {
       this.log.warn("auth failed", { user });
       return null;
@@ -100,7 +100,7 @@ export class IonosphereImapBackend implements ImapBackend {
    * 보지만 SCRAM은 검증을 엔진이 하므로 이 확인이 따로 있어야 한다.
    */
   async scramAuthorize(user: string) {
-    const ok = await scramAuthorize(this.db, user);
+    const ok = await scramAuthorize(this.db, user, "imap");
     if (!ok) {
       this.log.warn("scram authorize 실패 — 계정 없음/정지", { user });
       return null;

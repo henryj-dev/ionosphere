@@ -83,6 +83,9 @@ export type {
   TenantUsage,
 } from "./types.ts";
 export { scramSegment, buildScramSegment, scramKeysFor, scramAuthorize, type StoredScram } from "./auth.ts";
+// 자격증명 표면 스코프의 **정본**(감사 G1) — 관문은 `authenticate`/`scramAuthorize` 안에 있고,
+// 여기 나가는 것은 표면 이름 목록과 판정 함수다(관리 명령이 입력 검증에 쓴다).
+export { AUTH_SURFACES, credentialAllowsSurface, type AuthSurface } from "./auth.ts";
 export { createBayesStore } from "./bayes-store.ts";
 
 /**

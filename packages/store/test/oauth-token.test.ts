@@ -23,9 +23,9 @@ describe("OAuth 토큰", () => {
   test("생성 → 그 토큰으로 authenticate 성공(원문 검증)", async () => {
     const { db, accountId } = await setup();
     const { token } = await createOAuthToken(db, accountId, "gmail-app");
-    expect(await authenticate(db, "u@x.test", token)).toMatchObject({ accountId });
+    expect(await authenticate(db, "u@x.test", token, "imap")).toMatchObject({ accountId });
     // 잘못된 토큰은 실패
-    expect(await authenticate(db, "u@x.test", token + "x")).toBeNull();
+    expect(await authenticate(db, "u@x.test", token + "x", "imap")).toBeNull();
   });
 
   test("인증 시 last_used_at 갱신, list는 kind=2만", async () => {
@@ -34,7 +34,7 @@ describe("OAuth 토큰", () => {
     await createOAuthToken(db, accountId, "phone");
     const before = (await listCredentials(db, accountId, 2)).find((c) => c.id === id)!;
     expect(before.lastUsedAt).toBeNull();
-    await authenticate(db, "u@x.test", token);
+    await authenticate(db, "u@x.test", token, "imap");
     const after = (await listCredentials(db, accountId, 2)).find((c) => c.id === id)!;
     expect(after.lastUsedAt).not.toBeNull();
     const list = await listCredentials(db, accountId, 2);
@@ -46,10 +46,10 @@ describe("OAuth 토큰", () => {
     const { db, accountId } = await setup();
     const { id, token } = await createOAuthToken(db, accountId, "t");
     expect(await revokeCredential(db, accountId, id)).toBe(true);
-    expect(await authenticate(db, "u@x.test", token)).toBeNull();
+    expect(await authenticate(db, "u@x.test", token, "imap")).toBeNull();
     const primary = (await listCredentials(db, accountId, 0))[0]!;
     expect(await revokeCredential(db, accountId, primary.id)).toBe(false);
-    expect(await authenticate(db, "u@x.test", "primary-pw")).toMatchObject({ accountId });
+    expect(await authenticate(db, "u@x.test", "primary-pw", "imap")).toMatchObject({ accountId });
     await db.close();
   });
 });

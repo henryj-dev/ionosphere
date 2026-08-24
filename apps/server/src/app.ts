@@ -617,7 +617,7 @@ export class IonosphereApp {
         // `throttled`를 실어 올린다 — 어댑터가 감사 로그에서 "거부됨"과 "비밀번호 틀림"을 가른다.
         return { ok: false, throttled: true };
       }
-      const result = await authenticate(this.db, user, pass);
+      const result = await authenticate(this.db, user, pass, "submission");
       if (result) {
         log.info("auth ok", { user });
         this.authThrottle.clear({ account: user });
@@ -653,7 +653,7 @@ export class IonosphereApp {
           log.warn("auth throttled (scram)", { user });
           return { ok: false, throttled: true };
         }
-        const ok = await scramAuthorize(this.db, user);
+        const ok = await scramAuthorize(this.db, user, "submission");
         if (!ok) {
           log.warn("scram authorize 실패 — 계정 없음/정지", { user });
           this.authThrottle.recordFailure({ account: user });
