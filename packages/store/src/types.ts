@@ -174,6 +174,8 @@ export interface MessageBlobRef {
 
 /** Store 생성자 옵션. */
 export interface StoreOptions {
+  /** COPY 후속 검색 색인 실패를 운영 계층에 전달한다. 코어 배치는 이미 커밋됐으므로 재throw하지 않는다. */
+  onArtifactCopyFailure?: (failure: { accountId: string; messageIds: readonly string[]; error: unknown }) => void;
   /**
    * false면 body 필드는 색인/검색 대상에서 제외(subject/from/to만 색인) — SCHEMA.md §8
    * D1 어댑터 기본값(10GB 한도, body 역색인 제외). 기본값 true.
@@ -218,10 +220,11 @@ export interface JmapStates {
   mailbox: string;
   thread: string;
   submission: string;
+  identity: string;
 }
 
 /** change_log 엔티티 (SCHEMA §6-1). */
-export type JmapEntity = "email" | "mailbox" | "thread" | "submission";
+export type JmapEntity = "email" | "mailbox" | "thread" | "submission" | "identity";
 
 /** JMAP Email/get용 메시지 메타(블롭 제외 — 본문은 어댑터가 blobId로 별도 조회). */
 export interface JmapEmailMeta {

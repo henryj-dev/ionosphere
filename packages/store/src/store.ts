@@ -32,6 +32,7 @@ import {
   sendableAddresses,
   updateIdentity,
   getSubmissions,
+  cancelSubmission,
   getThreadsForJmap,
   jmapChanges,
   jmapState,
@@ -189,12 +190,14 @@ export class Store {
   private readonly db: DbDriver;
   private readonly writer = new WriterQueue();
   private readonly searchIndexBody: boolean;
+  private readonly onArtifactCopyFailure?: StoreOptions["onArtifactCopyFailure"];
   /** 하위 스토어 모듈(Sieve·웹훅 등)에 넘기는 내부 표면 — private 헬퍼를 노출하지 않는다. */
   private readonly internals: StoreInternals;
 
   constructor(db: DbDriver, opts: StoreOptions = {}) {
     this.db = db;
     this.searchIndexBody = opts.searchIndexBody ?? true;
+    this.onArtifactCopyFailure = opts.onArtifactCopyFailure;
     this.internals = {
       db: this.db,
       masterKey: opts.masterKey,
@@ -407,7 +410,7 @@ export class Store {
     if (mbx.length === 0) return { purged: 0, detached: 0 }; // 이미 수거됐거나 활성 — no-op
 
     const { rows: memRows } = await this.db.query({
-      sql: `SELECT mm.message_id AS message_id, m.size_bytes AS size_bytes
+      sql: `SELECT mm.message_id AS message_id, m.size_bytes AS size_bytes, m.thread_id AS thread_id
             FROM message_mailbox mm JOIN messages m ON m.id = mm.message_id WHERE mm.mailbox_id = ?`,
       params: [mailboxId],
     });
@@ -429,6 +432,7 @@ export class Store {
       const dying = messageIds.filter((id) => (cnt.get(id) ?? 0) <= 1);
       const dyingSet = new Set(dying);
       const surviving = messageIds.filter((id) => !dyingSet.has(id));
+      const threadIds = [...new Set(memRows.map((r) => String(r.thread_id)))];
 
       const nextModseq = acct.modseq + 1;
       stmts.push({ sql: "INSERT INTO modseq_claims (account_id, modseq) VALUES (?, ?)", params: [accountId, nextModseq] });
@@ -456,11 +460,12 @@ export class Store {
       for (const id of surviving) {
         stmts.push({ sql: CHANGE_LOG_SQL, params: [accountId, nextModseq, ENTITY.Email, id, CHANGE_KIND.updated, now] });
       }
+      for (const threadId of threadIds) stmts.push({ sql: CHANGE_LOG_SQL, params: [accountId, nextModseq, ENTITY.Thread, threadId, CHANGE_KIND.updated, now] });
 
       const dyingBytes = memRows.filter((r) => dyingSet.has(String(r.message_id))).reduce((s, r) => s + Number(r.size_bytes), 0);
       stmts.push({
-        sql: `UPDATE accounts SET modseq = ?, state_email = ?, used_bytes = used_bytes - ?, message_count = message_count - ? WHERE id = ?`,
-        params: [nextModseq, nextModseq, dyingBytes, dying.length, accountId],
+        sql: `UPDATE accounts SET modseq = ?, state_email = ?, state_thread = ?, used_bytes = used_bytes - ?, message_count = message_count - ? WHERE id = ?`,
+        params: [nextModseq, nextModseq, nextModseq, dyingBytes, dying.length, accountId],
       });
       purged = dying.length;
       detached = surviving.length;
@@ -634,9 +639,7 @@ export class Store {
     // 쿼터 검사 — 스냅샷마다 재검증(§7-1/§7-8), quota_bytes=0이면 무제한.
     // 그룹은 합계로 본다: 개별로 통과하고 합계로 초과하면 쿼터가 뚫린다.
     const totalBytes = inputs.reduce((n, i) => n + i.sizeBytes, 0);
-    if (acct.quotaBytes > 0 && acct.usedBytes + totalBytes > acct.quotaBytes) {
-      throw new StoreQuotaError(`quota exceeded: account=${accountId}`);
-    }
+    this.assertQuota(acct, totalBytes, accountId);
 
     // 대상 메일함은 그룹 전체의 합집합을 한 번만 조회하고, uidnext는 로컬 커서로 이어 붙인다.
     const allMailboxIds = [...new Set(inputs.flatMap((i) => i.mailboxIds))];
@@ -792,6 +795,12 @@ export class Store {
     }
 
     return results;
+  }
+
+  private assertQuota(acct: Pick<AccountRow, "quotaBytes" | "usedBytes">, addBytes: number, accountId: string): void {
+    if (acct.quotaBytes > 0 && acct.usedBytes + addBytes > acct.quotaBytes) {
+      throw new StoreQuotaError(`quota exceeded: account=${accountId}`);
+    }
   }
 
   /**
@@ -1235,7 +1244,7 @@ export class Store {
     // UIDPLUS UID EXPUNGE — uid 필터 지정 시 그 범위의 deleted=1만 (§7-4 변형).
     // 필터가 있으면 uid 수만큼 파라미터가 붙으므로 한도 안에서 나눠 돈다(`UID EXPUNGE 1:*`).
     const selectTargets = (ph: string): string =>
-      `SELECT mm.uid AS uid, mm.message_id AS message_id, m.size_bytes AS size_bytes
+      `SELECT mm.uid AS uid, mm.message_id AS message_id, m.size_bytes AS size_bytes, m.thread_id AS thread_id
             FROM message_mailbox mm JOIN messages m ON m.id = mm.message_id
             WHERE mm.mailbox_id = ? AND mm.deleted = 1${ph === "" ? "" : ` AND mm.uid IN (${ph})`}`;
     const targetRows =
@@ -1250,6 +1259,7 @@ export class Store {
       sizeBytes: Number(r.size_bytes),
     }));
     const messageIds = [...new Set(targets.map((t) => t.messageId))];
+    const threadIds = [...new Set(targets.map((t) => String((t as typeof t & { thread_id?: unknown }).thread_id)).filter((id) => id !== "undefined"))];
 
     // 마지막 membership 판정 — 스냅샷 시점 전체 membership 카운트 (§7-4)
     const countRows = await queryInChunks(
@@ -1325,6 +1335,7 @@ export class Store {
     }
 
     stmts.push({ sql: CHANGE_LOG_SQL, params: [input.accountId, nextModseq, ENTITY.Mailbox, input.mailboxId, CHANGE_KIND.updated, now] });
+    for (const threadId of threadIds) stmts.push({ sql: CHANGE_LOG_SQL, params: [input.accountId, nextModseq, ENTITY.Thread, threadId, CHANGE_KIND.updated, now] });
 
     const dyingBytes = targets.filter((t) => dyingSet.has(t.messageId)).reduce((sum, t) => sum + t.sizeBytes, 0);
     const mailboxBytes = targets.reduce((sum, t) => sum + t.sizeBytes, 0);
@@ -1335,8 +1346,8 @@ export class Store {
       params: [targets.length, mailboxBytes, unreadDelta, nextModseq, input.mailboxId],
     });
     stmts.push({
-      sql: `UPDATE accounts SET modseq = ?, state_email = ?, state_mailbox = ?, used_bytes = used_bytes - ?, message_count = message_count - ? WHERE id = ?`,
-      params: [nextModseq, nextModseq, nextModseq, dyingBytes, dyingIds.length, input.accountId],
+      sql: `UPDATE accounts SET modseq = ?, state_email = ?, state_mailbox = ?, state_thread = ?, used_bytes = used_bytes - ?, message_count = message_count - ? WHERE id = ?`,
+      params: [nextModseq, nextModseq, nextModseq, nextModseq, dyingBytes, dyingIds.length, input.accountId],
     });
 
     await this.db.batch(stmts);
@@ -1356,7 +1367,7 @@ export class Store {
   private async removeMembershipAttempt(accountId: string, messageId: string, mailboxId: string): Promise<{ destroyed: boolean }> {
     const acct = await this.mustGetAccount(accountId);
     const { rows } = await this.db.query({
-      sql: `SELECT mm.uid AS uid, m.size_bytes AS size_bytes FROM message_mailbox mm
+      sql: `SELECT mm.uid AS uid, m.size_bytes AS size_bytes, m.thread_id AS thread_id FROM message_mailbox mm
             JOIN messages m ON m.id = mm.message_id WHERE mm.message_id = ? AND mm.mailbox_id = ? AND m.account_id = ?`,
       params: [messageId, mailboxId, accountId],
     });
@@ -1364,6 +1375,7 @@ export class Store {
     if (!row) throw new StoreError(`message not in mailbox: ${messageId}`);
     const uid = Number(row.uid);
     const sizeBytes = Number(row.size_bytes);
+    const threadId = String(row.thread_id);
 
     const { rows: cntRows } = await this.db.query({ sql: "SELECT COUNT(*) AS n FROM message_mailbox WHERE message_id = ?", params: [messageId] });
     const isLast = Number(cntRows[0]?.n ?? 0) <= 1;
@@ -1393,15 +1405,16 @@ export class Store {
         { sql: `DELETE FROM blob_refs WHERE ref_kind = ${REF_KIND.message} AND ref_id = ?`, params: [messageId] },
         { sql: CHANGE_LOG_SQL, params: [accountId, nextModseq, ENTITY.Email, messageId, CHANGE_KIND.destroyed, now] },
         {
-          sql: "UPDATE accounts SET modseq = ?, state_email = ?, state_mailbox = ?, used_bytes = used_bytes - ?, message_count = message_count - 1 WHERE id = ?",
-          params: [nextModseq, nextModseq, nextModseq, sizeBytes, accountId],
+          sql: "UPDATE accounts SET modseq = ?, state_email = ?, state_mailbox = ?, state_thread = ?, used_bytes = used_bytes - ?, message_count = message_count - 1 WHERE id = ?",
+          params: [nextModseq, nextModseq, nextModseq, nextModseq, sizeBytes, accountId],
         },
       );
     } else {
       stmts.push(
         { sql: "UPDATE messages SET modseq = ? WHERE id = ?", params: [nextModseq, messageId] },
         { sql: CHANGE_LOG_SQL, params: [accountId, nextModseq, ENTITY.Email, messageId, CHANGE_KIND.updated, now] },
-        { sql: "UPDATE accounts SET modseq = ?, state_email = ?, state_mailbox = ? WHERE id = ?", params: [nextModseq, nextModseq, nextModseq, accountId] },
+        { sql: CHANGE_LOG_SQL, params: [accountId, nextModseq, ENTITY.Thread, threadId, CHANGE_KIND.updated, now] },
+        { sql: "UPDATE accounts SET modseq = ?, state_email = ?, state_mailbox = ?, state_thread = ? WHERE id = ?", params: [nextModseq, nextModseq, nextModseq, nextModseq, accountId] },
       );
     }
     await this.db.batch(stmts);
@@ -1491,6 +1504,15 @@ export class Store {
       [input.fromMailboxId],
     );
     const srcUidBy = new Map(srcRows.map((r) => [String(r.message_id), Number(r.uid)]));
+
+    // 같은 메일함 MOVE는 기존 멤버십을 삭제하지 않는 성공 no-op이다(RFC 9051 §6.4.8).
+    // 이 조기 반환은 아래의 "이미 대상에 있음" 분기가 자기 자신을 지우는 사고를 막는다.
+    if (input.op === "move" && input.fromMailboxId === input.toMailboxId) {
+      return { pairs: ids.flatMap((messageId) => {
+        const uid = srcUidBy.get(messageId);
+        return uid === undefined ? [] : [{ messageId, uid }];
+      }) };
+    }
 
     /**
      * MOVE에서만 의미가 있다 — 이미 대상에 있는 메시지는 원본 멤버십만 걷어내면 된다.
@@ -1587,15 +1609,17 @@ export class Store {
         // 이미 대상에 있다 — 복사는 no-op. 이동이면 원본 멤버십만 걷어낸다.
         pairs.push({ messageId: id, uid: existing });
         if (input.op === "move") {
-          stmts.push({
-            sql: "DELETE FROM message_mailbox WHERE mailbox_id = ? AND uid = ?",
-            params: [input.fromMailboxId, srcUid],
-          });
-          expungedRows.push([input.fromMailboxId, srcUid, nextModseq, now]);
-          delCount += 1;
-          delBytes += size;
-          delUnread += unread;
-          touched.push(id);
+          if (srcUid !== existing) {
+            stmts.push({
+              sql: "DELETE FROM message_mailbox WHERE mailbox_id = ? AND uid = ?",
+              params: [input.fromMailboxId, srcUid],
+            });
+            expungedRows.push([input.fromMailboxId, srcUid, nextModseq, now]);
+            delCount += 1;
+            delBytes += size;
+            delUnread += unread;
+            touched.push(id);
+          }
         }
         continue;
       }
@@ -1663,7 +1687,11 @@ export class Store {
       copyBytes += size;
     }
 
+    const changedThreadIds = [...new Set(ids.map((id) => srcMsgBy.get(id)?.thread_id).filter((id): id is string => typeof id === "string"))];
+
     if (touched.length === 0 && copiedIds.length === 0) return { pairs };
+
+    if (copiedIds.length > 0) this.assertQuota(acct, copyBytes, input.accountId);
 
     const batch: Statement[] = [
       { sql: "INSERT INTO modseq_claims (account_id, modseq) VALUES (?, ?)", params: [input.accountId, nextModseq] },
@@ -1699,6 +1727,9 @@ export class Store {
       //   id의 변경을 받고 그 자체로 재동기화를 유발한다.
       batch.push({ sql: CHANGE_LOG_SQL, params: [input.accountId, nextModseq, ENTITY.Email, id, CHANGE_KIND.created, now] });
     }
+    for (const threadId of changedThreadIds) {
+      batch.push({ sql: CHANGE_LOG_SQL, params: [input.accountId, nextModseq, ENTITY.Thread, threadId, CHANGE_KIND.updated, now] });
+    }
     if (addCount > 0) {
       batch.push({
         sql: `UPDATE mailboxes SET uidnext = ?, total_count = total_count + ?, total_bytes = total_bytes + ?, unread_count = unread_count + ?, highestmodseq = ? WHERE id = ?`,
@@ -1721,13 +1752,13 @@ export class Store {
      */
     if (copiedIds.length > 0) {
       batch.push({
-        sql: "UPDATE accounts SET modseq = ?, state_email = ?, state_mailbox = ?, used_bytes = used_bytes + ?, message_count = message_count + ? WHERE id = ?",
-        params: [nextModseq, nextModseq, nextModseq, copyBytes, copiedIds.length, input.accountId],
+        sql: "UPDATE accounts SET modseq = ?, state_email = ?, state_mailbox = ?, state_thread = ?, used_bytes = used_bytes + ?, message_count = message_count + ? WHERE id = ?",
+        params: [nextModseq, nextModseq, nextModseq, nextModseq, copyBytes, copiedIds.length, input.accountId],
       });
     } else {
       batch.push({
-        sql: "UPDATE accounts SET modseq = ?, state_email = ?, state_mailbox = ? WHERE id = ?",
-        params: [nextModseq, nextModseq, nextModseq, input.accountId],
+        sql: "UPDATE accounts SET modseq = ?, state_email = ?, state_mailbox = ?, state_thread = ? WHERE id = ?",
+        params: [nextModseq, nextModseq, nextModseq, nextModseq, input.accountId],
       });
     }
 
@@ -1775,8 +1806,8 @@ export class Store {
        * 여러 통을 복사하면 수천 문장이 된다. 한 배치가 라이터를 붙잡는 시간을 묶어 둔다.
        */
       for (const c of chunk(stmts, COPY_ARTIFACT_STATEMENTS_PER_BATCH)) await this.db.batch(c);
-    } catch {
-      /* 무시 — 사본이 검색에 늦게 잡힐 뿐, 복사 자체는 이미 커밋됐다 */
+    } catch (error) {
+      this.onArtifactCopyFailure?.({ accountId, messageIds: pairs.map((p) => p.to), error });
     }
   }
 
@@ -1787,9 +1818,10 @@ export class Store {
 
   private async destroyMessageAttempt(accountId: string, messageId: string): Promise<void> {
     const acct = await this.mustGetAccount(accountId);
-    const { rows: msgRows } = await this.db.query({ sql: "SELECT size_bytes FROM messages WHERE id = ? AND account_id = ?", params: [messageId, accountId] });
+    const { rows: msgRows } = await this.db.query({ sql: "SELECT size_bytes, thread_id FROM messages WHERE id = ? AND account_id = ?", params: [messageId, accountId] });
     if (!msgRows[0]) throw new StoreError(`message not found: ${messageId}`);
     const sizeBytes = Number(msgRows[0].size_bytes);
+    const threadId = String(msgRows[0].thread_id);
 
     const { rows: memberships } = await this.db.query({ sql: "SELECT mailbox_id, uid FROM message_mailbox WHERE message_id = ?", params: [messageId] });
     const { rows: seenRows } = await this.db.query({ sql: "SELECT 1 AS x FROM message_keywords WHERE message_id = ? AND keyword = '$seen'", params: [messageId] });
@@ -1821,9 +1853,10 @@ export class Store {
       { sql: "DELETE FROM search_index WHERE message_id = ?", params: [messageId] },
       { sql: `DELETE FROM blob_refs WHERE ref_kind = ${REF_KIND.message} AND ref_id = ?`, params: [messageId] },
       { sql: CHANGE_LOG_SQL, params: [accountId, nextModseq, ENTITY.Email, messageId, CHANGE_KIND.destroyed, now] },
+      { sql: CHANGE_LOG_SQL, params: [accountId, nextModseq, ENTITY.Thread, threadId, CHANGE_KIND.updated, now] },
       {
-        sql: "UPDATE accounts SET modseq = ?, state_email = ?, state_mailbox = ?, used_bytes = used_bytes - ?, message_count = message_count - 1 WHERE id = ?",
-        params: [nextModseq, nextModseq, nextModseq, sizeBytes, accountId],
+        sql: "UPDATE accounts SET modseq = ?, state_email = ?, state_mailbox = ?, state_thread = ?, used_bytes = used_bytes - ?, message_count = message_count - 1 WHERE id = ?",
+        params: [nextModseq, nextModseq, nextModseq, nextModseq, sizeBytes, accountId],
       },
     );
     await this.db.batch(stmts);
@@ -1838,12 +1871,13 @@ export class Store {
     const acct = await this.mustGetAccount(input.accountId);
 
     const { rows: msgRows } = await this.db.query({
-      sql: "SELECT size_bytes FROM messages WHERE id = ? AND account_id = ?",
+      sql: "SELECT size_bytes, thread_id FROM messages WHERE id = ? AND account_id = ?",
       params: [input.messageId, input.accountId],
     });
     const msgRow = msgRows[0];
     if (!msgRow) throw new StoreError(`message not found: ${input.messageId}`);
     const sizeBytes = Number(msgRow.size_bytes);
+    const threadId = String(msgRow.thread_id);
 
     const { rows: fromRows } = await this.db.query({
       sql: "SELECT uid FROM message_mailbox WHERE mailbox_id = ? AND message_id = ?",
@@ -1894,6 +1928,7 @@ export class Store {
       { sql: "UPDATE messages SET modseq = ? WHERE id = ?", params: [nextModseq, input.messageId] },
       // ★destroyed 아님 — 메일함 이동은 Email updated (§7-3)
       { sql: CHANGE_LOG_SQL, params: [input.accountId, nextModseq, ENTITY.Email, input.messageId, CHANGE_KIND.updated, now] },
+      { sql: CHANGE_LOG_SQL, params: [input.accountId, nextModseq, ENTITY.Thread, threadId, CHANGE_KIND.updated, now] },
       { sql: CHANGE_LOG_SQL, params: [input.accountId, nextModseq, ENTITY.Mailbox, input.fromMailboxId, CHANGE_KIND.updated, now] },
       { sql: CHANGE_LOG_SQL, params: [input.accountId, nextModseq, ENTITY.Mailbox, input.toMailboxId, CHANGE_KIND.updated, now] },
       {
@@ -1905,8 +1940,8 @@ export class Store {
         params: [newUid + 1, sizeBytes, seen ? 0 : 1, nextModseq, input.toMailboxId],
       },
       {
-        sql: "UPDATE accounts SET modseq = ?, state_email = ?, state_mailbox = ? WHERE id = ?",
-        params: [nextModseq, nextModseq, nextModseq, input.accountId],
+        sql: "UPDATE accounts SET modseq = ?, state_email = ?, state_mailbox = ?, state_thread = ? WHERE id = ?",
+        params: [nextModseq, nextModseq, nextModseq, nextModseq, input.accountId],
       },
     ]);
 
@@ -2039,6 +2074,10 @@ export class Store {
     input: { identityId: string; messageId: string | null; blobId: string; envFrom: string; sendAt: number; undoStatus: number },
   ): Promise<string> {
     return createSubmission(this.internals, accountId, input);
+  }
+
+  cancelSubmission(accountId: string, submissionId: string): Promise<boolean> {
+    return cancelSubmission(this.internals, accountId, submissionId);
   }
 
   getSubmissions(accountId: string, ids: readonly string[] | null): Promise<{ id: string; identityId: string; emailId: string | null; envFrom: string; sendAt: number; undoStatus: number }[]> {

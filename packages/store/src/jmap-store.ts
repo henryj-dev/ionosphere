@@ -26,7 +26,7 @@ import type {
 
 export async function jmapState(s: StoreInternals, accountId: string): Promise<JmapStates> {
   const { rows } = await s.db.query({
-    sql: "SELECT state_email, state_mailbox, state_thread, state_submission FROM accounts WHERE id = ?",
+    sql: "SELECT state_email, state_mailbox, state_thread, state_submission, state_identity FROM accounts WHERE id = ?",
     params: [accountId],
   });
   const row = rows[0];
@@ -36,6 +36,7 @@ export async function jmapState(s: StoreInternals, accountId: string): Promise<J
     mailbox: String(Number(row.state_mailbox)),
     thread: String(Number(row.state_thread)),
     submission: String(Number(row.state_submission)),
+    identity: String(Number(row.state_identity ?? 0)),
   };
 }
 
@@ -50,21 +51,21 @@ export async function jmapChanges(s: StoreInternals, accountId: string, entity: 
   if (!Number.isSafeInteger(since) || since < 0) return { cannotCalculate: true };
 
   const { rows: accRows } = await s.db.query({
-    sql: "SELECT changelog_floor, state_email, state_mailbox, state_thread, state_submission FROM accounts WHERE id = ?",
+    sql: "SELECT changelog_floor, state_email, state_mailbox, state_thread, state_submission, state_identity FROM accounts WHERE id = ?",
     params: [accountId],
   });
   const acc = accRows[0];
   if (!acc) throw new StoreError(`account not found: ${accountId}`);
 
   const floor = Number(acc.changelog_floor);
-  const stateCol = { email: "state_email", mailbox: "state_mailbox", thread: "state_thread", submission: "state_submission" }[entity];
+  const stateCol = { email: "state_email", mailbox: "state_mailbox", thread: "state_thread", submission: "state_submission", identity: "state_identity" }[entity];
   const currentState = Number(acc[stateCol]);
   if (since < floor || since > currentState) return { cannotCalculate: true };
   if (since === currentState) {
     return { cannotCalculate: false, oldState: sinceState, newState: sinceState, hasMoreChanges: false, created: [], updated: [], destroyed: [] };
   }
 
-  const entityCode = { email: ENTITY.Email, mailbox: ENTITY.Mailbox, thread: ENTITY.Thread, submission: ENTITY.EmailSubmission }[entity];
+  const entityCode = { email: ENTITY.Email, mailbox: ENTITY.Mailbox, thread: ENTITY.Thread, submission: ENTITY.EmailSubmission, identity: ENTITY.Identity }[entity];
   const { rows } = await s.db.query({
     sql: "SELECT modseq, object_id, kind FROM change_log WHERE account_id = ? AND entity = ? AND modseq > ? ORDER BY modseq ASC",
     params: [accountId, entityCode, since],
@@ -348,6 +349,24 @@ export async function getSubmissions(s: StoreInternals, accountId: string, ids: 
   }));
 }
 
+/** 큐 적재가 거절된 선행 submission 행을 보상 삭제한다. */
+export async function cancelSubmission(s: StoreInternals, accountId: string, submissionId: string): Promise<boolean> {
+  return s.writer.run(accountId, () => s.withRetry(async () => {
+    const acct = await s.mustGetAccount(accountId);
+    const found = await s.db.query({ sql: "SELECT 1 AS x FROM email_submissions WHERE id = ? AND account_id = ?", params: [submissionId, accountId] });
+    if (found.rows.length === 0) return false;
+    const next = acct.modseq + 1;
+    const now = Date.now();
+    const r = await s.db.batch([
+      { sql: "INSERT INTO modseq_claims (account_id, modseq) VALUES (?, ?)", params: [accountId, next] },
+      { sql: "DELETE FROM email_submissions WHERE id = ? AND account_id = ?", params: [submissionId, accountId] },
+      { sql: CHANGE_LOG_SQL, params: [accountId, next, ENTITY.EmailSubmission, submissionId, CHANGE_KIND.destroyed, now] },
+      { sql: "UPDATE accounts SET modseq = ?, state_submission = ? WHERE id = ?", params: [next, next, accountId] },
+    ]);
+    return (r[1]?.changes ?? 0) > 0;
+  }));
+}
+
 
 /**
  * `SearchSnippet/get`(RFC 8621 §5)용 원문 — `message_text`의 **유일한 독자**다.
@@ -429,26 +448,18 @@ export interface IdentityInput {
 
 export async function createIdentity(s: StoreInternals, accountId: string, v: IdentityInput): Promise<string> {
   const id = ulid();
-  await s.db.batch([
-    {
-      sql: `INSERT INTO identities (id, account_id, email, name, reply_to, text_sig, html_sig, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      params: [id, accountId, v.email.toLowerCase(), v.name, v.replyTo, v.textSignature, v.htmlSignature, Date.now()],
-    },
-  ]);
+  await identityWrite(s, accountId, id, [
+    { sql: `INSERT INTO identities (id, account_id, email, name, reply_to, text_sig, html_sig, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, params: [id, accountId, v.email.toLowerCase(), v.name, v.replyTo, v.textSignature, v.htmlSignature, Date.now()] },
+  ], CHANGE_KIND.created);
   return id;
 }
 
 /** 통째로 덮어쓴다 — 호출자(`/set`)가 patch를 현재 값 위에 얹어 완성한 뒤 넘긴다. */
 export async function updateIdentity(s: StoreInternals, accountId: string, id: string, v: IdentityInput): Promise<boolean> {
-  const r = await s.db.batch([
-    {
-      sql: `UPDATE identities SET email = ?, name = ?, reply_to = ?, text_sig = ?, html_sig = ?
-             WHERE id = ? AND account_id = ?`,
-      params: [v.email.toLowerCase(), v.name, v.replyTo, v.textSignature, v.htmlSignature, id, accountId],
-    },
-  ]);
-  return (r[0]?.changes ?? 0) > 0;
+  const r = await s.db.query({ sql: "SELECT 1 AS x FROM identities WHERE id = ? AND account_id = ?", params: [id, accountId] });
+  if (r.rows.length === 0) return false;
+  await identityWrite(s, accountId, id, [{ sql: `UPDATE identities SET email = ?, name = ?, reply_to = ?, text_sig = ?, html_sig = ? WHERE id = ? AND account_id = ?`, params: [v.email.toLowerCase(), v.name, v.replyTo, v.textSignature, v.htmlSignature, id, accountId] }], CHANGE_KIND.updated);
+  return true;
 }
 
 /**
@@ -458,6 +469,22 @@ export async function updateIdentity(s: StoreInternals, accountId: string, id: s
  * 주는 값이라, 스코프가 빠지면 남의 신원을 지울 수 있다.
  */
 export async function deleteIdentity(s: StoreInternals, accountId: string, id: string): Promise<boolean> {
-  const r = await s.db.batch([{ sql: "DELETE FROM identities WHERE id = ? AND account_id = ?", params: [id, accountId] }]);
-  return (r[0]?.changes ?? 0) > 0;
+  const found = await s.db.query({ sql: "SELECT 1 AS x FROM identities WHERE id = ? AND account_id = ?", params: [id, accountId] });
+  if (found.rows.length === 0) return false;
+  await identityWrite(s, accountId, id, [{ sql: "DELETE FROM identities WHERE id = ? AND account_id = ?", params: [id, accountId] }], CHANGE_KIND.destroyed);
+  return true;
+}
+
+async function identityWrite(s: StoreInternals, accountId: string, id: string, operation: { sql: string; params: unknown[] }[], kind: number): Promise<void> {
+  await s.writer.run(accountId, () => s.withRetry(async () => {
+    const acct = await s.mustGetAccount(accountId);
+    const next = acct.modseq + 1;
+    const now = Date.now();
+    await s.db.batch([
+      { sql: "INSERT INTO modseq_claims (account_id, modseq) VALUES (?, ?)", params: [accountId, next] },
+      ...operation,
+      { sql: CHANGE_LOG_SQL, params: [accountId, next, ENTITY.Identity, id, kind, now] },
+      { sql: "UPDATE accounts SET modseq = ?, state_identity = ? WHERE id = ?", params: [next, next, accountId] },
+    ]);
+  }));
 }

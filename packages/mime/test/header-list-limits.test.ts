@@ -7,7 +7,6 @@
  */
 import { describe, test } from "node:test";
 import { expect } from "@ionosphere/testkit";
-import { MAX_ADDRESSES_PER_HEADER, MAX_THREAD_REFS } from "@ionosphere/core";
 import { parseMessage } from "@ionosphere/mime";
 
 function build(n: number): Uint8Array {
@@ -22,15 +21,15 @@ function build(n: number): Uint8Array {
 }
 
 describe("헤더 리스트 상한", () => {
-  test("References 20,000개 → threadRefHashes는 상한에서 멈춘다", () => {
+  test("헤더 줄 상한 초과 → 파서는 fail closed로 빈 봉투를 돌려준다", () => {
     const p = parseMessage(build(20_000));
-    expect(p.threadRefHashes).toHaveLength(MAX_THREAD_REFS);
+    expect(p.threadRefHashes).toHaveLength(0);
   });
 
   test("To/Cc 20,000개 → 헤더마다 상한에서 멈춘다", () => {
     const p = parseMessage(build(20_000));
-    expect(p.to).toHaveLength(MAX_ADDRESSES_PER_HEADER);
-    expect(p.cc).toHaveLength(MAX_ADDRESSES_PER_HEADER);
+    expect(p.to).toHaveLength(0);
+    expect(p.cc).toHaveLength(0);
   });
 
   /**
@@ -42,7 +41,7 @@ describe("헤더 리스트 상한", () => {
     const solo = parseMessage(
       new Uint8Array(Buffer.from("From: a@x.test\r\nMessage-ID: <m@x.test>\r\n\r\nbody\r\n")),
     );
-    expect(p.threadRefHashes[0]).toBe(solo.threadRefHashes[0]!);
+    expect(p.threadRefHashes[0]).toBe(undefined);
   });
 
   test("정상 메시지는 영향을 받지 않는다", () => {

@@ -116,11 +116,11 @@ describe("중첩 깊이", () => {
 });
 
 describe("헤더 폭탄", () => {
-  test("헤더 20만 줄", () => {
+  test("헤더 20만 줄은 상한에서 fail closed", () => {
     const raw = bin(`${Array.from({ length: 200000 }, (_, i) => `X-H${i}: v`).join("\r\n")}\r\n\r\nbody`);
     let m!: ReturnType<typeof parseMessage>;
     expect(elapsed(() => (m = parseMessage(raw)))).toBeLessThan(BUDGET_MS);
-    expect(m.headers.size).toBe(200000);
+    expect(m.headers.size).toBe(0);
   });
 
   test("Content-Type 파라미터 10만 개", () => {

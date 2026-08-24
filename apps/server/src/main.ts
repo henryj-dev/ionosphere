@@ -11,7 +11,7 @@ import type { SmarthostOptions, TlsMode } from "@ionosphere/mta";
 import { listenersFromEnv } from "./listeners.ts";
 import { RecursiveResolver } from "@ionosphere/dns";
 import { createCertSource, httpChallengeServer, type AcmeChallenge, type CertSource } from "@ionosphere/tls";
-import { cloudflareDnsProvider } from "./cf-dns.ts";
+import { dnsProviderFromConfig } from "./cf-dns.ts";
 import { FsBlobStore, isBlobGcMode, S3BlobStore, type BlobGcMode, type BlobStore } from "@ionosphere/store";
 import { HTTP_SERVICES, IonosphereApp, type AppAuditOptions, type HttpServiceName, type ServiceHosts, type TlsListenerName } from "./app.ts";
 
@@ -200,7 +200,7 @@ function acmeChallengeFromEnv(): AcmeChallenge {
     if (!cfToken) throw new Error("IONOSPHERE_TLS_ACME_CHALLENGE=dns-01엔 IONOSPHERE_CF_DNS_TOKEN 필요 (또는 http-01을 쓸 것)");
     return {
       type: "dns-01",
-      dns: cloudflareDnsProvider({ apiToken: cfToken, ...(process.env.IONOSPHERE_CF_ZONE_ID ? { zoneId: process.env.IONOSPHERE_CF_ZONE_ID } : {}) }),
+      dns: dnsProviderFromConfig(process.env.IONOSPHERE_TLS_ACME_DNS_PROVIDER ?? "cloudflare", { apiToken: cfToken, ...(process.env.IONOSPHERE_CF_ZONE_ID ? { zoneId: process.env.IONOSPHERE_CF_ZONE_ID } : {}) }),
     };
   }
   if (kind !== "http-01") throw new Error(`알 수 없는 IONOSPHERE_TLS_ACME_CHALLENGE: ${kind} (http-01|dns-01)`);

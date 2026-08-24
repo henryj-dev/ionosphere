@@ -128,6 +128,11 @@ export const MAX_RECEIVED_HOPS = 30;
  */
 export const MAX_COMMAND_LINE = 4096;
 
+/** RFC 5322 헤더 전체 예산. MIME 본문 한도만으로는 거대한 References 한 줄을 막지 못한다. */
+export const MAX_HEADER_SECTION_BYTES = 1024 * 1024;
+/** RFC 5322 §2.1.1 권고(998옥텟)보다 넉넉하지만 무제한은 아닌 논리 헤더 줄 상한. */
+export const MAX_HEADER_LINE_BYTES = 64 * 1024;
+
 /**
  * IMAP 논리 라인의 텍스트 부분 상한(리터럴 제외) — ManageSieve도 같은 리더를 쓴다.
  *

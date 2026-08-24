@@ -107,7 +107,21 @@ export function decodeBytesWithCharset(bytes: Uint8Array, charsetRaw: string | u
   if (cs === "us-ascii" || cs === "iso-8859-1" || cs === "latin1") {
     return bytesToBinary(bytes);
   }
-  // 미선언 또는 미지원 charset
+  const aliases: Record<string, string> = {
+    cp949: "euc-kr",
+    "ks_c_5601-1987": "euc-kr",
+    ksc5601: "euc-kr",
+    euckr: "euc-kr",
+    "windows-949": "euc-kr",
+  };
+  // Node TextDecoder는 ICU가 제공하는 다양한 레이블을 지원한다. 별칭을 먼저 정규화하고,
+  // 모르는 레이블만 기존의 UTF-8 엄격 시도 → latin1 폴백으로 보낸다.
+  try {
+    const decoderLabel = aliases[cs ?? ""] ?? cs;
+    if (decoderLabel) return new TextDecoder(decoderLabel, { fatal: false }).decode(bytes);
+  } catch {
+    // 미선언 또는 미지원 charset
+  }
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {

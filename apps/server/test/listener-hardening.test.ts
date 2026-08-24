@@ -10,7 +10,7 @@
  * 튜닝할 때마다 두 곳을 고쳐야 한다. 빠지는 사고를 잡는 것이 이 테스트의 목적이다.
  */
 import { afterEach, describe, expect, test } from "@ionosphere/testkit";
-import { createServer as createHttpServer } from "node:http";
+import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -189,11 +189,8 @@ function listen(server: ReturnType<typeof createHttpServer>): Promise<number> {
  * 스킴 가드 자체는 위의 별도 테스트가 본다.
  */
 async function fetchViaHttp(httpUrl: string): Promise<string> {
-  const original = globalThis.fetch;
-  globalThis.fetch = ((_input: unknown, init?: RequestInit) => original(httpUrl, init)) as typeof fetch;
-  try {
-    return await fetchMtaStsPolicy(httpUrl.replace("http://", "https://"));
-  } finally {
-    globalThis.fetch = original;
-  }
+  return await fetchMtaStsPolicy(httpUrl.replace("http://", "https://"), {
+    request: httpRequest,
+    lookup: (_hostname, _options, callback) => callback(null, "127.0.0.1", 4),
+  });
 }

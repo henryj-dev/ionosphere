@@ -49,6 +49,8 @@ export interface JmapServerOptions {
   hostname: string;
   /** 세션/URL 생성용 외부 베이스 URL(예: https://mx.ionosphere.test). 미지정 시 요청 Host 사용. */
   externalBaseUrl?: string;
+  /** 외부 URL을 쓰지 않는 개발/테스트 모드의 Host 허용목록. 기본은 서버 이름과 loopback만 허용한다. */
+  allowedHosts?: readonly string[];
   logger?: Logger;
   /**
    * 발송 레이트리밋 — SMTP submission(587/465)과 **같은 값을 넘겨야 한다**.
@@ -438,7 +440,9 @@ export class JmapServer {
 
   private baseUrl(req: IncomingMessage): string {
     if (this.opts.externalBaseUrl) return this.opts.externalBaseUrl.replace(/\/$/, "");
-    const host = req.headers.host ?? this.opts.hostname;
+    const host = (req.headers.host ?? "").split(":")[0]!.toLowerCase();
+    const allowed = this.opts.allowedHosts ?? [this.opts.hostname, "127.0.0.1", "localhost"];
+    if (!allowed.map((h) => h.toLowerCase()).includes(host)) throw new RequestError("about:blank", 421, "misdirected host");
     return `http://${host}`;
   }
 

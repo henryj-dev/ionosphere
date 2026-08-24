@@ -8,7 +8,7 @@
  * - multipart/alternative의 "더 나은 표현 우선" 시맨틱 없이, 트리 DFS 순서상 첫 text/plain을 채택.
  * - 스레드 병합·검색 인덱싱 등은 store 레이어의 책임이며 이 패키지 스코프 밖.
  */
-import { sha256hex32 } from "@ionosphere/core";
+import { MAX_HEADER_LINE_BYTES, MAX_HEADER_SECTION_BYTES, sha256hex32 } from "@ionosphere/core";
 import { parseAddressList } from "./address.ts";
 import { bytesToBinary } from "./binary.ts";
 import { computePreview, extractBody } from "./body.ts";
@@ -44,6 +44,10 @@ function emptyParsedMessage(): ParsedMessage {
 function parseMessageInner(raw: Uint8Array): ParsedMessage {
   const bin = bytesToBinary(raw);
   const { headerText, bodyText } = splitHeaderBody(bin);
+  if (headerText.length > MAX_HEADER_SECTION_BYTES) throw new Error("header section exceeds limit");
+  if (headerText.split(/\r\n|\n|\r/).some((line) => line.length > MAX_HEADER_LINE_BYTES)) {
+    throw new Error("header line exceeds limit");
+  }
   const headers = parseHeaders(headerText);
 
   const subject = firstHeader(headers, "subject");

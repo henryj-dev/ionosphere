@@ -172,7 +172,8 @@ class MysqlDriver implements DbDriver {
 
   insertIgnore(table: string, columns: readonly string[]): string {
     const placeholders = columns.map(() => "?").join(", ");
-    return `INSERT IGNORE INTO ${table} (${columns.join(", ")}) VALUES (${placeholders})`;
+    const key = columns[0]!;
+    return `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${placeholders}) ON DUPLICATE KEY UPDATE ${key} = ${key}`;
   }
 
   async close(): Promise<void> {

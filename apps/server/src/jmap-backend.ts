@@ -369,6 +369,14 @@ async function applyEmailPatch(store: Store, accountId: string, id: string, patc
   if (!meta) throw new SetItemError("notFound");
 
   const curKw = new Set(meta.keywords);
+  let desired: Set<string> | undefined;
+  if (fullMailboxIds || mbxPaths.length > 0) {
+    const current = new Set(meta.mailboxIds);
+    desired = desiredMailboxIds(patch, fullMailboxIds, mbxPaths, current);
+    if (desired.size === 0) throw new SetItemError("invalidProperties", { properties: ["mailboxIds"], description: "이메일은 최소 1개 메일함에 있어야 함" });
+    const owned = new Set((await store.listMailboxes(accountId)).map((m) => m.id));
+    if ([...desired].some((mailboxId) => !owned.has(mailboxId))) throw new SetItemError("invalidProperties", { properties: ["mailboxIds"], description: "메일함이 없거나 다른 계정에 속함" });
+  }
   const kwChange = keywordChange(patch, fullKeywords, kwPaths, curKw);
   if (kwChange.add.length > 0 || kwChange.remove.length > 0) {
     try {
@@ -380,10 +388,9 @@ async function applyEmailPatch(store: Store, accountId: string, id: string, patc
 
   if (fullMailboxIds || mbxPaths.length > 0) {
     const current = new Set(meta.mailboxIds);
-    const desired = desiredMailboxIds(patch, fullMailboxIds, mbxPaths, current);
-    if (desired.size === 0) throw new SetItemError("invalidProperties", { properties: ["mailboxIds"], description: "이메일은 최소 1개 메일함에 있어야 함" });
-    const toAdd = [...desired].filter((m) => !current.has(m));
-    const toRemove = [...current].filter((m) => !desired.has(m));
+    const target = desired!;
+    const toAdd = [...target].filter((m) => !current.has(m));
+    const toRemove = [...current].filter((m) => !target.has(m));
     try {
       if (toAdd.length === 1 && toRemove.length === 1) {
         await store.moveMessage({ accountId, messageId: id, fromMailboxId: toRemove[0]!, toMailboxId: toAdd[0]! });
@@ -447,7 +454,7 @@ export function buildSubmissionModule(db: DbDriver, store: Store, blobs: BlobSto
     const notFound = ids === null ? [] : (ids as string[]).filter((i) => !found.has(i));
     return {
       accountId: acc,
-      state: "0", // 신원 변경 추적 미구현 — 정적 state(신원은 거의 불변)
+      state: await store.jmapState(accountId).then((s) => s.identity),
       list: list.map((i) => ({ id: i.id, name: i.name, email: i.email, replyTo: i.replyTo, bcc: null, textSignature: i.textSignature, htmlSignature: i.htmlSignature, mayDelete: false })),
       notFound,
     };
@@ -480,7 +487,7 @@ export function buildSubmissionModule(db: DbDriver, store: Store, blobs: BlobSto
       "Identity/changes": async (args, ctx) => {
         const acc = requireAccountId(args, ctx.accountId);
         if (typeof args.sinceState !== "string") throw new MethodError("invalidArguments");
-        return { accountId: acc, oldState: args.sinceState, newState: "0", hasMoreChanges: false, created: [], updated: [], destroyed: [] };
+        return await store.jmapChanges(acc, "identity", args.sinceState, Number(args.maxChanges ?? 0) || 256);
       },
       "EmailSubmission/get": (args, ctx) => standardGet(args, ctx.accountId, submissionGetSource),
       "EmailSubmission/changes": (args, ctx) => standardChanges(args, ctx.accountId, submissionChangesSource),
@@ -588,6 +595,7 @@ async function emailSubmissionSet(
             { rateLimit: outbound?.rateLimit ?? DEFAULT_RATE_LIMIT, ...(outbound?.localOnly ? { localOnly: true } : {}) },
           );
         } catch (err) {
+          try { await store.cancelSubmission(acc, submissionId); } catch { /* 보상 실패도 원래 거절을 가리지 않는다. */ }
           if (err instanceof OutboundRejectedError) {
             // external-disabled/domain-unverified는 정책상 영구 실패 → forbidden(재시도해도 같다)
             throw new SetItemError(err.reason === "rate-limited" ? "rateLimit" : "forbidden", { description: err.message });

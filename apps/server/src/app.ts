@@ -46,6 +46,10 @@ import { AuditShipper, type AuditS3Target } from "./audit-shipper.ts";
 import { NodeDnsResolver } from "./dns-resolver.ts";
 import { createTlsaLookup } from "./dane-lookup.ts";
 import { startTlsSupport } from "./starttls-support.ts";
+import { request as httpsRequest } from "node:https";
+import type { ClientRequest, IncomingMessage, RequestOptions } from "node:http";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { createGuardedLookup } from "@ionosphere/webhook";
 
 /** RFC 8314 권장 암시적 TLS 포트 — autoconfig가 클라이언트에 광고하는 기본값. */
 const IMAPS_PORT = 993;
@@ -800,6 +804,11 @@ export class IonosphereApp {
      */
     this.store = new Store(this.db, {
       ...(this.opts.masterKey ? { masterKey: this.opts.masterKey } : {}),
+      onArtifactCopyFailure: ({ accountId, messageIds, error }) => (this.opts.logger ?? noopLogger).error("COPY 검색 부산물 복제 실패", {
+        accountId,
+        messageCount: messageIds.length,
+        error: error instanceof Error ? error.message : String(error),
+      }),
     });
     // POP3 배타 락은 DB 기반 — 인프로세스 Set이면 ① MRA를 2대 띄웠을 때 서로를 못 보고
     // ② 같은 프로세스 안에서도 110·995 백엔드가 각자 락을 갖게 된다.
@@ -1152,7 +1161,7 @@ export class IonosphereApp {
         // 인증 실패 스로틀도 같은 이유로 **공유 인스턴스**를 넘긴다(리스너별 한도 곱하기 방지).
         authThrottle: this.authThrottle,
         audit: this.audit,
-        ...(this.opts.jmapBaseUrl ? { externalBaseUrl: this.opts.jmapBaseUrl } : {}),
+        ...(this.opts.jmapBaseUrl ? { externalBaseUrl: this.opts.jmapBaseUrl } : { allowedHosts: [...hostsFor(this.opts.serviceHosts, "jmap"), "127.0.0.1", "localhost"] }),
         /**
          * `PushSubscription`(RFC 8620 §7.2) — **가드가 걸린 fetch를 조립층이 만들어 넘긴다.**
          * 모듈이 자기 fetch를 만들게 두면 그 방어를 우회한 배선이 생길 수 있다.
@@ -1975,16 +1984,33 @@ export class IonosphereApp {
  * 스킴을 다시 확인하는 이유: URL은 호출부(`packages/mta-sts`)가 만들지만, 그쪽이 바뀌어도
  * 평문 페치가 조용히 성립하면 안 된다. 신뢰 근거를 쓰는 자리에서 스스로 확인한다.
  */
-export async function fetchMtaStsPolicy(url: string): Promise<string> {
+export interface MtaStsFetchDeps {
+  /** 테스트에서만 로컬 HTTP 서버를 주입한다. 기본은 node:https다. */
+  request?: (options: RequestOptions, callback: (response: IncomingMessage) => void) => ClientRequest;
+  /** 테스트에서 DNS를 고정한다. 운영 기본값은 createGuardedLookup다. */
+  lookup?: NonNullable<RequestOptions["lookup"]>;
+}
+
+export async function fetchMtaStsPolicy(url: string, deps: MtaStsFetchDeps = {}): Promise<string> {
   if (!url.startsWith("https://")) throw new Error(`mta-sts: https가 아닌 URL 거부 — ${url}`);
-  const res = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(MTA_STS_FETCH_TIMEOUT_MS) });
-  // `redirect: "manual"`의 표현이 런타임마다 갈린다(3xx 그대로 / status 0의 opaqueredirect).
-  // 둘 다 "따라가지 않았다"는 뜻이므로 양쪽을 함께 막는다.
-  if (res.type === "opaqueredirect" || res.status === 0 || (res.status >= 300 && res.status < 400)) {
-    throw new Error(`mta-sts: 리다이렉트는 따르지 않는다(RFC 8461 §3.3) — ${res.status}`);
-  }
-  if (!res.ok) throw new Error(`mta-sts fetch ${res.status}`);
-  return await readCapped(res, MTA_STS_MAX_POLICY_BYTES);
+  const parsed = new URL(url);
+  const lookup = createGuardedLookup(async (hostname) => (await dnsLookup(hostname, { all: true, verbatim: true })).map((e) => ({ address: e.address, family: e.family })));
+  return await new Promise<string>((resolve, reject) => {
+    const request = deps.request ?? httpsRequest;
+    const req = request({ hostname: parsed.hostname, port: parsed.port || 443, path: `${parsed.pathname}${parsed.search}`, method: "GET", agent: false, lookup: deps.lookup ?? lookup }, (res) => {
+      const status = res.statusCode ?? 0;
+      if (status >= 300 && status < 400) { res.destroy(); reject(new Error(`mta-sts: 리다이렉트는 따르지 않는다(RFC 8461 §3.3) — ${status}`)); return; }
+      if (status < 200 || status >= 300) { res.destroy(); reject(new Error(`mta-sts fetch ${status}`)); return; }
+      const chunks: Buffer[] = [];
+      let total = 0;
+      res.on("data", (chunk: Buffer) => { total += chunk.length; if (total > MTA_STS_MAX_POLICY_BYTES) { req.destroy(new Error(`응답 본문이 상한(${MTA_STS_MAX_POLICY_BYTES}B)을 넘었다`)); return; } chunks.push(chunk); });
+      res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+      res.on("error", reject);
+    });
+    req.setTimeout(MTA_STS_FETCH_TIMEOUT_MS, () => req.destroy(new Error("mta-sts fetch timeout")));
+    req.on("error", reject);
+    req.end();
+  });
 }
 
 /**

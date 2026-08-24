@@ -1,0 +1,25 @@
+name: D1 dialect contract
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  d1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      IONOSPHERE_TEST_D1_ACCOUNT: ${{ secrets.IONOSPHERE_TEST_D1_ACCOUNT }}
+      IONOSPHERE_TEST_D1_TOKEN: ${{ secrets.IONOSPHERE_TEST_D1_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: node --test --test-concurrency=2 apps/server/test/dialect-contract.test.ts

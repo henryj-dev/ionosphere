@@ -2040,7 +2040,9 @@ export class IonospherePop3Backend implements Pop3Backend {
       uids: msgs.map((m) => (m.ref as Pop3Ref).uid),
       deleted: true,
     });
-    await this.store.expunge({ accountId, mailboxId });
+    // POP3 세션이 표시한 메시지만 지운다. UID를 생략하면 IMAP 세션이 남긴 \Deleted까지
+    // 전부 expunge되어 다른 클라이언트의 휴지통 표시가 유실된다.
+    await this.store.expunge({ accountId, mailboxId, uids: msgs.map((m) => (m.ref as Pop3Ref).uid) });
     this.log.info("deletions committed", { accountId, count: msgs.length });
   }
 

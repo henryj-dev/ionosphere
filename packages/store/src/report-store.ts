@@ -63,9 +63,10 @@ export async function recordDmarcRow(db: DbDriver, key: DmarcRowKey, now: number
         params: [...pk, key.dkimDomain ?? null, key.spfDomain ?? null],
       },
     ]);
-  } catch {
+  } catch (error) {
     // 경합 — 다른 프로세스가 방금 넣었다. 다시 올리면 된다(위 주석).
-    await db.batch([{ sql: `UPDATE dmarc_report_rows SET count = count + 1 WHERE ${where}`, params: pk }]);
+    const [retry] = await db.batch([{ sql: `UPDATE dmarc_report_rows SET count = count + 1 WHERE ${where}`, params: pk }]);
+    if ((retry?.changes ?? 0) === 0) throw error;
   }
 }
 
@@ -90,8 +91,9 @@ export async function recordTlsRptRow(db: DbDriver, key: TlsRptRowKey, now: numb
         params: pk,
       },
     ]);
-  } catch {
-    await db.batch([{ sql: `UPDATE tlsrpt_report_rows SET count = count + 1 WHERE ${where}`, params: pk }]);
+  } catch (error) {
+    const [retry] = await db.batch([{ sql: `UPDATE tlsrpt_report_rows SET count = count + 1 WHERE ${where}`, params: pk }]);
+    if ((retry?.changes ?? 0) === 0) throw error;
   }
 }
 

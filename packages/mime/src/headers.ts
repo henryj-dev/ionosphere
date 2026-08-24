@@ -2,7 +2,7 @@
  * RFC 5322 헤더 파싱: CRLF/bare-LF 관용, 폴딩 라인 언폴딩, RFC 2047 encoded-word 디코딩.
  * 손상된 줄은 조용히 건너뛴다 — SMTP DATA로 들어오는 임의 입력에 강건해야 함 (throw 금지).
  */
-import { decodeEncodedWords } from "./encoding.ts";
+import { decodeBytesWithCharset, decodeEncodedWords } from "./encoding.ts";
 
 export interface ContentTypeInfo {
   type: string;
@@ -144,20 +144,45 @@ function splitHeaderParams(raw: string): { mainValue: string; params: Record<str
   const parts = splitTopLevelSemicolon(raw);
   const mainValue = (parts[0] ?? "").trim();
   const params: Record<string, string> = {};
+  const continuations = new Map<string, Map<number, { value: string; encoded: boolean }>>();
   for (let i = 1; i < parts.length; i++) {
     const p = parts[i]!.trim();
     if (!p) continue;
     const eq = p.indexOf("=");
     if (eq === -1) continue;
-    // 알려진 한계: RFC 2231 확장(charset'lang'value, name*0=... 이어붙이기)은 Phase 0 스코프 밖.
-    // name*= 류는 base 키로 뭉뚱그려 저장하되 percent-encoding은 해석하지 않는다(값 정확도 비보장).
     let key = p.slice(0, eq).trim().toLowerCase();
-    key = key.replace(/\*\d*\*?$/, "");
+    const ext = key.match(/^([^*]+)\*(\d+)?(\*)?$/);
     let val = p.slice(eq + 1).trim();
     const qm = val.match(/^"([^"]*)"/);
     if (qm) val = qm[1]!;
     else val = val.replace(/^"|"$/g, "");
-    if (!(key in params)) params[key] = val; // 최초 값 우선(단순화)
+    if (ext) {
+      const base = ext[1]!;
+      const index = Number(ext[2] ?? 0);
+      const list = continuations.get(base) ?? new Map();
+      list.set(index, { value: val, encoded: ext[3] === "*" });
+      continuations.set(base, list);
+    } else if (!(key in params)) params[key] = val;
+  }
+  for (const [key, pieces] of continuations) {
+    let joined = "";
+    let extended = false;
+    for (let i = 0; pieces.has(i); i++) {
+      const piece = pieces.get(i)!;
+      joined += piece.value;
+      extended ||= piece.encoded;
+    }
+    if (!joined) continue;
+    if (extended) {
+      const m = joined.match(/^([^']*)'[^']*'(.*)$/);
+      const charset = m?.[1];
+      const encoded = m?.[2] ?? joined;
+      try {
+        const bytes = new Uint8Array(encoded.replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(Number.parseInt(h, 16))).split("").map((c) => c.charCodeAt(0)));
+        joined = decodeBytesWithCharset(bytes, charset);
+      } catch { /* 잘못된 RFC 2231 값은 원문을 보존한다. */ }
+    }
+    if (!(key in params)) params[key] = joined;
   }
   return { mainValue, params };
 }

@@ -9,4 +9,4 @@ export { isAllowedWebhookUrl, isBlockedAddress, BlockedAddressError } from "./ur
  * 구현하면 두 벌이 되고, 우회 표기가 하나 발견될 때 한쪽만 고쳐진다 — `url-guard.ts` 머리
  * 주석이 적은 우회 목록이 그 위험의 크기다.
  */
-export { createGuardedFetch, type GuardedFetchOptions, type ResolveHostFn } from "./http-client.ts";
+export { createGuardedFetch, createGuardedLookup, type GuardedFetchOptions, type ResolveHostFn } from "./http-client.ts";

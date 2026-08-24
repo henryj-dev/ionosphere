@@ -6,7 +6,7 @@
  * store-local로 둔다 — 소유자를 한 곳으로 모으되 불필요하게 공개하지는 않는다.
  */
 
-export const ENTITY = { Email: 0, Mailbox: 1, Thread: 2, EmailSubmission: 3, SieveScript: 4 } as const;
+export const ENTITY = { Email: 0, Mailbox: 1, Thread: 2, EmailSubmission: 3, SieveScript: 4, Identity: 5 } as const;
 export const CHANGE_KIND = { created: 0, updated: 1, destroyed: 2 } as const;
 // REF_KIND(blob_refs.ref_kind)는 store 밖(@ionosphere/mta 큐 적재, JMAP 업로드)에서도 참조를
 // 만들어야 해서 스키마 소유 패키지인 @ionosphere/db로 올렸다. 여기서 다시 export하지 않는다 —

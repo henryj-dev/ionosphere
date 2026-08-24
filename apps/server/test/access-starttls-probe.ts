@@ -60,7 +60,13 @@ function plain(port: number, send: string, waitMs = 400): Promise<string> {
  * 별도 청크로 보내는데(실측), 버퍼 누적으로 판정하면 인사말 단계에서 조건이 참이 되어
  * 명령 전에 승격하고, 남은 평문이 TLS 레코드로 읽혀 `ERR_SSL_WRONG_VERSION_NUMBER`가 난다.
  */
-function upgrade(port: number, startCmd: string, okMark: string, after: string, waitMs = 500): Promise<string> {
+function upgrade(
+  port: number,
+  startCmd: string,
+  okMark: string,
+  after: string,
+  isFinalResponse: (text: string) => boolean,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     const raw = connect(port, "127.0.0.1");
     let phase: "greeting" | "starting" = "greeting";
@@ -75,14 +81,19 @@ function upgrade(port: number, startCmd: string, okMark: string, after: string, 
       if (!text.includes(okMark)) return;
       upgraded = true;
       raw.removeListener("data", onData);
-      const secure = tls.connect({ socket: raw, rejectUnauthorized: false }, () => secure.write(after));
+      const secure = tls.connect({ socket: raw, rejectUnauthorized: false });
       let out = "";
-      secure.on("data", (b: Buffer) => (out += b.toString()));
+      const deadline = setTimeout(() => { secure.destroy(); reject(new Error(`최종 응답 없음(${okMark})`)); }, PROBE_DEADLINE_MS);
+      secure.on("data", (b: Buffer) => {
+        out += b.toString();
+        if (isFinalResponse(out)) {
+          clearTimeout(deadline);
+          secure.destroy();
+          resolve(out);
+        }
+      });
       secure.on("error", reject);
-      setTimeout(() => {
-        secure.destroy();
-        resolve(out);
-      }, waitMs);
+      secure.once("secureConnect", () => secure.write(after));
     };
     raw.on("data", onData);
     raw.on("error", reject);
@@ -124,10 +135,10 @@ const imapCaps = await plain(app.imapPort, "a1 CAPABILITY\r\n");
 if (!imapCaps.includes("STARTTLS")) fail(`IMAP 평문 CAPABILITY에 STARTTLS가 없다: ${JSON.stringify(imapCaps.slice(0, 160))}`);
 if (!imapCaps.includes("LOGINDISABLED")) fail("IMAP 평문에서 LOGINDISABLED가 빠졌다 — 평문 인증이 열렸다면 위험하다");
 
-const imapLogin = await upgrade(app.imapPort, "a1 STARTTLS\r\n", "a1 OK", `a2 LOGIN ${USER} ${PASS}\r\n`);
+const imapLogin = await upgrade(app.imapPort, "a1 STARTTLS\r\n", "a1 OK", `a2 LOGIN ${USER} ${PASS}\r\n`, (text) => text.includes("a2 OK"));
 if (!imapLogin.includes("a2 OK")) fail(`IMAP STARTTLS 후 LOGIN 실패: ${JSON.stringify(imapLogin.slice(0, 160))}`);
 
-const imapTwice = await upgrade(app.imapPort, "a1 STARTTLS\r\n", "a1 OK", "a2 STARTTLS\r\n");
+const imapTwice = await upgrade(app.imapPort, "a1 STARTTLS\r\n", "a1 OK", "a2 STARTTLS\r\n", (text) => /a2 (BAD|NO)/.test(text));
 if (!/a2 (BAD|NO)/.test(imapTwice)) fail(`IMAP 이중 STARTTLS가 거절되지 않았다: ${JSON.stringify(imapTwice.slice(0, 160))}`);
 
 // ── POP3 110 ──────────────────────────────────────────────
@@ -139,7 +150,7 @@ const popPlain = await plain(app.pop3Port, `USER ${USER}\r\n`);
 if (!popPlain.includes("-ERR")) fail(`POP3 평문 USER가 거부되지 않았다: ${JSON.stringify(popPlain.slice(0, 160))}`);
 if (!popPlain.toLowerCase().includes("tls")) fail("POP3 평문 USER 거부 사유에 TLS 안내가 없다");
 
-const popLogin = await upgrade(app.pop3Port, "STLS\r\n", "+OK", `USER ${USER}\r\nPASS ${PASS}\r\nSTAT\r\n`);
+const popLogin = await upgrade(app.pop3Port, "STLS\r\n", "+OK", `USER ${USER}\r\nPASS ${PASS}\r\nSTAT\r\n`, (text) => /maildrop has \d+ messages/.test(text));
 if (!/maildrop has \d+ messages/.test(popLogin)) fail(`POP3 STLS 후 로그인 실패: ${JSON.stringify(popLogin.slice(0, 160))}`);
 
 await app.stop();
