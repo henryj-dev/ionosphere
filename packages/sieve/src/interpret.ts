@@ -2,7 +2,13 @@
  * Sieve 평가기 (RFC 5228 §2/§4/§5). 파싱된 스크립트를 메시지 환경에 대해 실행 → 배달 지시.
  * 순수 함수 — 부수효과 없음. 지원: 베이스(if/elsif/else/stop/require, keep/discard/fileinto/
  * redirect) + fileinto/copy/envelope/imap4flags. 미지원 확장 require는 SieveError.
+ *
+ * ★`:matches` 글롭은 `@ionosphere/core`(glob.ts)가 소유한다. 예전엔 여기서 패턴을 정규식으로
+ * 바꿨는데(`*` → `.*`) 지수 백트래킹이 성립했다 — 사용자가 규칙을 심어 두면 그 뒤로는
+ * **원격 발신자가 보낸 `Subject:`** 가 매칭 값이 되므로, 계정 하나로 전 테넌트의 메일을
+ * 세울 수 있었다(실측 19.6초). IMAP LIST에 같은 결함이 복제돼 있었다 — glob.ts 머리 주석 참조.
  */
+import { compileGlob, SIEVE_MATCH_SYNTAX } from "@ionosphere/core";
 import type { SieveArg, SieveCommand, SieveTest } from "./ast.ts";
 import { parseSieve } from "./parser.ts";
 
@@ -202,33 +208,27 @@ function matchType(args: readonly SieveArg[]): MatchKind {
   return "is"; // 기본
 }
 
-/** 하나라도 매칭되면 true. 기본 비교는 i;ascii-casemap(대소문자 무시). */
+/**
+ * 하나라도 매칭되면 true. 기본 비교는 i;ascii-casemap(대소문자 무시).
+ *
+ * ★`:matches` 패턴은 **키마다 한 번만** 컴파일한다. 값이 여러 개일 때(헤더가 여러 줄,
+ * 주소가 여럿) 예전 구현은 (값 × 키)마다 정규식을 다시 만들었다.
+ */
 function anyMatch(values: readonly string[], keys: readonly string[], kind: MatchKind): boolean {
+  const matchers = kind === "matches" ? keys.map((k) => compileGlob(k.toLowerCase(), SIEVE_MATCH_SYNTAX)) : null;
   for (const v of values) {
     const vl = v.toLowerCase();
+    if (matchers) {
+      for (const m of matchers) if (m(vl)) return true;
+      continue;
+    }
     for (const k of keys) {
       const kl = k.toLowerCase();
       if (kind === "is" && vl === kl) return true;
       if (kind === "contains" && vl.includes(kl)) return true;
-      if (kind === "matches" && globMatch(vl, kl)) return true;
     }
   }
   return false;
-}
-
-/** Sieve :matches 글롭 — `*`=임의, `?`=1문자. `\*`/`\?`는 리터럴. */
-function globMatch(value: string, pattern: string): boolean {
-  let re = "^";
-  for (let i = 0; i < pattern.length; i++) {
-    const c = pattern[i]!;
-    if (c === "\\") {
-      const nxt = pattern[++i];
-      re += nxt ? nxt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "";
-    } else if (c === "*") re += ".*";
-    else if (c === "?") re += ".";
-    else re += c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  }
-  return new RegExp(re + "$", "s").test(value);
 }
 
 // ── 인자 헬퍼 ──────────────────────────────────────────────────────────────────

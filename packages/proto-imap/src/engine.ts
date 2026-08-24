@@ -35,9 +35,9 @@ import {
   wireToBytes,
 } from "./fetch-format.ts";
 import {
+  compileListPattern,
   HIERARCHY_DELIMITER,
   joinListPattern,
-  matchesListPattern,
   normalizeMailboxName,
   quoteMailboxName,
   roleToAttribute,
@@ -649,13 +649,15 @@ export class ImapEngine {
       ];
     }
     const full = normalizeMailboxName(joinListPattern(ref, pattern));
+    // 패턴 파싱은 메일함 수와 무관하다 — 루프 밖에서 한 번만 컴파일한다.
+    const matches = compileListPattern(full);
     return this.callBackend({ kind: "listMailboxes" }, (res) => {
       if (res.kind === "no") return [ImapEngine.noReply(cmd.tag, verb, res)];
       if (res.kind !== "mailboxes") return [{ kind: "reply", text: `${cmd.tag} NO ${verb} failed` }];
       const actions: ImapAction[] = [];
       const names = new Set(res.mailboxes.map((m) => m.name));
       for (const m of res.mailboxes) {
-        if (!matchesListPattern(full, m.name)) continue;
+        if (!matches(m.name)) continue;
         if (verb === "LSUB" && m.subscribed === false) continue; // 구독 필터(영속화됨)
         const attrs: string[] = [];
         const special = roleToAttribute(m.role);

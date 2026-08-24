@@ -78,3 +78,10 @@ export {
 } from "./scram.ts";
 export { ScramServerSession, type ScramStep, type ScramStoredKeys } from "./scram-session.ts";
 export { applyLegacyEnvAliases, LegacyEnvConflictError } from "./env-legacy.ts";
+export {
+  compileGlob,
+  globMatch,
+  imapListSyntax,
+  SIEVE_MATCH_SYNTAX,
+  type GlobSyntax,
+} from "./glob.ts";

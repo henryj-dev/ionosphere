@@ -86,6 +86,18 @@ describe("LIST", () => {
     expect(out.filter((l) => l.startsWith("* LIST"))).toEqual(['* LIST (\\HasNoChildren) "/" "INBOX"']);
   });
 
+  /**
+   * ★INBOX **말고는** 대소문자를 구분한다(RFC 9051). 예전엔 패턴 정규식에 `i` 플래그가 붙어
+   * `LIST "" "work"`가 `Work`를 매치했다. INBOX 관용은 위 테스트대로
+   * `normalizeMailboxName()`이 선두 세그먼트에서 처리하므로 매처가 관용일 이유가 없다.
+   */
+  test("INBOX 외 이름은 대소문자를 구분한다", () => {
+    const { out } = run(authedEngine(), 'a1 LIST "" "work"\r\n');
+    expect(out.filter((l) => l.startsWith("* LIST"))).toHaveLength(0);
+    const exact = run(authedEngine(), 'a1 LIST "" "Work"\r\n');
+    expect(exact.out.filter((l) => l.startsWith("* LIST"))).toEqual(['* LIST (\\HasChildren) "/" "Work"']);
+  });
+
   test("인증 전 → BAD", () => {
     const e = new ImapEngine({ hostname: "imap.test", allowInsecureAuth: true });
     expect(replies(e.feed(enc.encode('a1 LIST "" "*"\r\n')))[0]).toContain("a1 BAD");

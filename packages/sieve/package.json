@@ -6,6 +6,9 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "dependencies": {
+    "@ionosphere/core": "*"
+  },
   "devDependencies": {
     "@ionosphere/testkit": "*"
   }
