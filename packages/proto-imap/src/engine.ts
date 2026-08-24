@@ -62,6 +62,8 @@ export interface ImapMailbox {
 /** 엔진 → 어댑터 백엔드 요청. 이름은 정규화(INBOX 케이스) 완료 상태로 전달된다. */
 export type ImapBackendRequest =
   | { kind: "listMailboxes" }
+  /** QUOTA (RFC 9208) — 계정 단위 사용량·한도. */
+  | { kind: "getQuota" }
   | { kind: "createMailbox"; name: string }
   | { kind: "deleteMailbox"; name: string }
   | { kind: "renameMailbox"; from: string; to: string }
@@ -119,6 +121,12 @@ export type ImapBackendResponse =
   | { kind: "appended"; uidvalidity: number; uid: number }
   /** COPY/MOVE 결과 — COPYUID용. srcUids[i] ↔ dstUids[i] 대응. */
   | { kind: "copied"; uidvalidity: number; srcUids: readonly number[]; dstUids: readonly number[] }
+  /**
+   * 쿼터 현황. `limitBytes === 0`이면 무제한 — 그때는 `* QUOTA`에 STORAGE 항목을 싣지 않는다
+   * (RFC 9208은 "한도 없음"을 표현하는 값을 정의하지 않는다. 0을 실으면 "0바이트 허용"으로
+   * 읽혀 클라이언트가 업로드를 막는다).
+   */
+  | { kind: "quota"; usedBytes: number; limitBytes: number; messageCount: number }
   | { kind: "ok" }
   /** code는 RFC 5530 응답 코드(ALREADYEXISTS/NONEXISTENT 등). */
   | { kind: "no"; code?: string; message: string };
@@ -251,7 +259,13 @@ type Pending =
   /** 백엔드 요청 대기 — resume이 응답을 액션으로 변환(명령별 continuation). */
   | { kind: "backend"; resume: (res: ImapBackendResponse) => ImapAction[] };
 
-const BASE_CAPABILITIES = ["IMAP4rev1", "LITERAL-", "SASL-IR", "ID", "ENABLE", "NAMESPACE", "CHILDREN", "SPECIAL-USE", "UNSELECT", "UIDPLUS", "MOVE", "IDLE", "CONDSTORE", "QRESYNC", "ESEARCH", "LIST-STATUS"] as const;
+const BASE_CAPABILITIES = ["IMAP4rev1", "LITERAL-", "SASL-IR", "ID", "ENABLE", "NAMESPACE", "CHILDREN", "SPECIAL-USE", "UNSELECT", "UIDPLUS", "MOVE", "IDLE", "CONDSTORE", "QRESYNC", "ESEARCH", "LIST-STATUS", "QUOTA", "QUOTA=RES-STORAGE", "QUOTA=RES-MESSAGE"] as const;
+
+/**
+ * 쿼터 루트 이름 — 이 저장소의 쿼터는 **계정 단위**라 루트가 하나뿐이다(RFC 9208 §3.1이
+ * 허용하는 형태). 빈 문자열이 관례적인 "전체" 루트다.
+ */
+const QUOTA_ROOT = "";
 /** ENABLE로 옵트인 가능한 확장(RFC 5161). QRESYNC는 CONDSTORE를 함의(RFC 7162). */
 const ENABLABLE = ["CONDSTORE", "QRESYNC"] as const;
 
@@ -523,6 +537,18 @@ export class ImapEngine {
         return this.cmdAuthenticate(cmd);
       case "ENABLE":
         return this.cmdEnable(cmd);
+      case "GETQUOTAROOT":
+        return this.requireAuth(cmd, () => this.cmdGetQuota(cmd, "GETQUOTAROOT"));
+      case "GETQUOTA":
+        return this.requireAuth(cmd, () => this.cmdGetQuota(cmd, "GETQUOTA"));
+      case "SETQUOTA":
+        /**
+         * 쿼터는 **운영자가 정한다**(관리 API·CLI). 클라이언트가 자기 한도를 올릴 수 있으면
+         * 쿼터가 쿼터가 아니다. RFC 9208 §4.1도 서버가 거부할 수 있다고 명시한다.
+         */
+        return this.requireAuth(cmd, () => [
+          { kind: "reply", text: `${cmd.tag} NO [CANNOT] quota is managed by the administrator` },
+        ]);
       case "NAMESPACE":
         return this.requireAuth(cmd, () => [
           { kind: "reply", text: `* NAMESPACE (("" "${HIERARCHY_DELIMITER}")) NIL NIL` },
@@ -1506,6 +1532,51 @@ export class ImapEngine {
       }
     }
     return fields;
+  }
+
+  /**
+   * GETQUOTA / GETQUOTAROOT (RFC 9208 §4.2·§4.3).
+   *
+   * 쿼터가 계정 단위라 루트가 하나뿐이고, 어떤 메일함을 물어도 같은 루트를 답한다.
+   * STORAGE 단위는 **KiB**다(§5.2) — 바이트로 답하면 클라이언트가 1024배로 표시한다.
+   */
+  private cmdGetQuota(cmd: ParsedCommand, verb: "GETQUOTA" | "GETQUOTAROOT"): ImapAction[] {
+    const arg = cmd.args[0] ? valueText(cmd.args[0]) : null;
+    if (arg === null || cmd.args.length !== 1) {
+      return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} expects one argument` }];
+    }
+    // GETQUOTA는 **루트 이름**을 받는다 — 우리가 광고한 것 말고는 없다.
+    if (verb === "GETQUOTA" && normalizeMailboxName(arg) !== QUOTA_ROOT) {
+      return [{ kind: "reply", text: `${cmd.tag} NO [NONEXISTENT] no such quota root` }];
+    }
+    const mailbox = normalizeMailboxName(arg);
+    return this.callBackend({ kind: "getQuota" }, (res) => {
+      if (res.kind === "no") return [ImapEngine.noReply(cmd.tag, verb, res)];
+      if (res.kind !== "quota") return [{ kind: "reply", text: `${cmd.tag} NO ${verb} failed` }];
+      const actions: ImapAction[] = [];
+      if (verb === "GETQUOTAROOT") {
+        actions.push({ kind: "reply", text: `* QUOTAROOT ${quoteMailboxName(mailbox)} ${quoteMailboxName(QUOTA_ROOT)}` });
+      }
+      actions.push({ kind: "reply", text: `* QUOTA ${quoteMailboxName(QUOTA_ROOT)} (${ImapEngine.quotaResources(res)})` });
+      actions.push({ kind: "reply", text: `${cmd.tag} OK ${verb} completed` });
+      return actions;
+    });
+  }
+
+  /**
+   * `* QUOTA`의 자원 목록.
+   *
+   * ★한도가 0(무제한)이면 **STORAGE를 싣지 않는다.** RFC 9208은 "한도 없음"을 표현하는 값을
+   * 정의하지 않으므로, 0을 실으면 클라이언트가 "0바이트 허용"으로 읽고 업로드를 막는다 —
+   * 없는 제한을 있다고 말하는 셈이다. 자원이 하나도 없으면 빈 목록이 되고, 그건 RFC가
+   * 허용하는 "이 루트에 제한이 없다"는 표현이다.
+   */
+  private static quotaResources(q: Extract<ImapBackendResponse, { kind: "quota" }>): string {
+    if (q.limitBytes <= 0) return "";
+    // STORAGE 단위는 KiB(§5.2). 올림해야 "한도보다 조금 적게 썼는데 꽉 찼다"가 되지 않는다.
+    const usedKib = Math.ceil(q.usedBytes / 1024);
+    const limitKib = Math.ceil(q.limitBytes / 1024);
+    return `STORAGE ${usedKib} ${limitKib}`;
   }
 
   private cmdCapability(cmd: ParsedCommand): ImapAction[] {

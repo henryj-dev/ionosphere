@@ -16,6 +16,7 @@ import {
   putBlob,
   queryInChunks,
   StoreError,
+  StoreQuotaError,
   type AppendAddress,
   type BlobStore,
   type MailboxRow,
@@ -111,6 +112,14 @@ export class IonosphereImapBackend implements ImapBackend {
   async request(accountId: string, req: ImapBackendRequest): Promise<ImapBackendResponse> {
     try {
       switch (req.kind) {
+        case "getQuota": {
+          /**
+           * 데이터는 이미 있었다(§7-1의 쿼터 검사가 같은 컬럼을 본다) — 보여 줄 표면만 없었다.
+           * `quotaBytes === 0`은 무제한이고, 그 판정은 스토어의 기존 계약을 그대로 전달한다.
+           */
+          const q = await this.store.getQuota(accountId);
+          return { kind: "quota", usedBytes: q.usedBytes, limitBytes: q.quotaBytes, messageCount: q.messageCount };
+        }
         case "listMailboxes":
           return { kind: "mailboxes", mailboxes: (await this.pathedMailboxes(accountId)).map((p) => this.toImapMailbox(p)) };
         case "createMailbox":
@@ -157,6 +166,17 @@ export class IonosphereImapBackend implements ImapBackend {
           return await this.copyOrMove(accountId, req.from, req.to, req.uids, "move");
       }
     } catch (err) {
+      /**
+       * ★쿼터 초과는 **전용 응답 코드**로 알린다(RFC 9208 §5.1 `OVERQUOTA`).
+       *
+       * 예전엔 평범한 `NO`로 나가서 클라이언트가 "왜 실패했는지"를 표시할 방법이 없었다 —
+       * 사용자에게는 원인 불명의 저장 실패로 보인다. `StoreQuotaError`는 `StoreError`의
+       * 하위 타입이라 아래 분기에 먼저 걸렸었다(순서가 중요하다).
+       */
+      if (err instanceof StoreQuotaError) {
+        this.log.warn("imap quota exceeded", { kind: req.kind });
+        return { kind: "no", code: "OVERQUOTA", message: "quota exceeded" };
+      }
       if (err instanceof StoreError) {
         this.log.warn("imap store error", { kind: req.kind, error: err.message });
         return { kind: "no", message: err.message };

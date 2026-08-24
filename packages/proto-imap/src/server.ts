@@ -103,6 +103,8 @@ const DEFAULT_IDLE_POLL_MS = 15_000;
 function auditDetailOf(req: ImapBackendRequest): { detail?: Record<string, string | number> } {
   switch (req.kind) {
     case "listMailboxes":
+    // 쿼터 조회는 대상도 규모도 없다 — 남길 detail이 없다.
+    case "getQuota":
       return {};
     case "createMailbox":
     case "deleteMailbox":

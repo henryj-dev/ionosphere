@@ -877,6 +877,29 @@ export class Store {
     return tenantUsage(this.internals, tenantId, opts);
   }
 
+  /**
+   * 계정 쿼터 현황 (IMAP QUOTA · JMAP Quota).
+   *
+   * ★데이터는 **이미 있었다** — `accounts.quota_bytes`/`used_bytes`/`message_count`를
+   * `appendMessagesAttempt`가 스냅샷마다 검사한다(§7-1). 다만 그것을 **클라이언트에게 보여 줄
+   * 길이 없어서**, 사용자는 쿼터가 찰 때까지 모르고 있다가 APPEND가 실패하는 것만 봤다.
+   *
+   * `quotaBytes === 0`은 무제한이다(스토어의 기존 계약 — 위 검사가 `> 0`일 때만 본다).
+   */
+  async getQuota(accountId: string): Promise<{ usedBytes: number; quotaBytes: number; messageCount: number }> {
+    const { rows } = await this.db.query({
+      sql: "SELECT quota_bytes, used_bytes, message_count FROM accounts WHERE id = ?",
+      params: [accountId],
+    });
+    const row = rows[0];
+    if (!row) throw new StoreError(`account not found: ${accountId}`);
+    return {
+      usedBytes: Number(row.used_bytes),
+      quotaBytes: Number(row.quota_bytes),
+      messageCount: Number(row.message_count),
+    };
+  }
+
   async setKeywords(input: SetKeywordsInput): Promise<void> {
     return this.writer.run(input.accountId, () => this.withRetry(() => this.setKeywordsAttempt(input)));
   }
