@@ -16,7 +16,7 @@
  * STARTTLS opportunistic 경로 자체는 그대로 구현해 둔다.
  */
 import { connect as netConnect, type Socket } from "node:net";
-import { connect as tlsConnect, type DetailedPeerCertificate, type TLSSocket } from "node:tls";
+import { connect as tlsConnect, TLSSocket, type DetailedPeerCertificate } from "node:tls";
 import { X509Certificate } from "node:crypto";
 import { checkDane, hasUsableTlsa, type DaneTlsaSet } from "@ionosphere/mail-auth";
 import { findUnsafeAddress, isSafeEnvelopeAddress } from "./envelope.ts";
@@ -52,6 +52,7 @@ export interface SmtpClientOptions {
    * 바운스/suppression 처리하면 안 되기 때문(재시도 대상).
    */
   auth?: SmtpAuth;
+
   /**
    * DANE(RFC 7672) — **DNSSEC로 검증된** TLSA 집합. 조회·검증은 호출부 몫이다
    * (`@ionosphere/dns`의 ValidatingResolver). 여기서는 "검증됐다"는 사실을 받아 쓴다.
@@ -179,6 +180,12 @@ class ReplyReader {
       tryParse(); // 이전 읽기에서 남은 버퍼로 즉시 완결될 수도 있음
     });
   }
+}
+
+/** 봉투 주소가 순수 ASCII인가 — SMTPUTF8이 필요한지의 판정 기준(RFC 6531 §3.4). */
+function isAscii(s: string): boolean {
+  for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) > 0x7f) return false;
+  return true;
 }
 
 function isPermanent(code: number): boolean {
@@ -574,6 +581,34 @@ export async function sendSmtp(opts: SmtpClientOptions): Promise<SmtpClientResul
     }
 
     if (opts.auth) {
+      /**
+       * ★**TLS를 기대했는데 서지 않았으면** 자격증명을 보내지 않는다 (fail closed).
+       *
+       * `verifyPeer` 주석이 이미 "스마트호스트는 AUTH PLAIN으로 **자격증명을 실어 보낸다**"고
+       * 위험을 적어 뒀는데, 정작 STARTTLS가 실패해도 그대로 진행했다. `opportunistic`에서
+       * 상대가 STARTTLS를 광고하지 않거나 거절하면 **릴레이 비밀번호가 평문으로 나갔다** —
+       * 아무 신호도 없이.
+       *
+       * ★`never`는 막지 않는다. 그건 운영자가 **명시적으로 고른** 구성이고(smarthosts.tls_mode에
+       * 저장되는 값이다) 루프백이나 신뢰된 사설 링크의 릴레이에는 합리적일 수 있다. 여기서
+       * 닫으려는 것은 그 선택이 아니라 **조용한 강등**이다 — 설정은 TLS를 말하는데 실제로는
+       * 평문이 되는 경우.
+       *
+       * 배달을 포기하는 것이 아니라 **지연**시킨다(permanent=false) — 상대 설정이 잠깐
+       * 흔들린 것일 수 있고, 자격증명을 흘리는 것보다 늦게 가는 편이 낫다.
+       */
+      if (!(socket instanceof TLSSocket) && tlsMode !== "never") {
+        const result: SmtpClientResult = {
+          ok: false,
+          code: 0,
+          message: "AUTH refused on cleartext connection (credentials would be exposed)",
+          permanent: false,
+          rcptResults,
+        };
+        await quit(socket, reader);
+        socket.destroy();
+        return result;
+      }
       const authReply = await doAuth(socket, reader, ehlo.lines, opts.auth);
       if (authReply.code !== 235) {
         // 인증 실패는 자격증명·설정 문제 — 절대 permanent로 만들지 않는다(바운스/suppression 방지).
@@ -590,8 +625,35 @@ export async function sendSmtp(opts: SmtpClientOptions): Promise<SmtpClientResul
       }
     }
 
+    /**
+     * SMTPUTF8 (RFC 6531) — 봉투 주소에 비ASCII가 있으면 **상대가 지원해야만** 보낼 수 있다.
+     *
+     * ★예전엔 이 판정이 아예 없었다. 수신측 엔진은 EHLO에 SMTPUTF8을 광고하고 UTF-8 주소를
+     * 받아들이는데(그 파라미터를 파싱해 두고도 쓰는 곳이 없었다), 발신측은 상대의 광고를
+     * 보지도 파라미터를 붙이지도 않았다. 그래서 UTF-8 주소로 받은 메일을 포워딩하면
+     * **미지원 상대에게 raw UTF-8 봉투가 그대로 나갔다** — 상대가 어떻게 해석할지는 알 수 없다.
+     *
+     * 미지원이면 영구 실패로 닫는다: 주소 자체가 그 경로로는 표현될 수 없으므로 재시도해도
+     * 같다. RFC 6531 §3.2가 요구하는 다운그레이드(ASCII 대체 주소)는 우리가 가진 정보로는
+     * 만들 수 없다 — 없는 주소를 지어내는 것보다 정직하게 실패하는 편이 낫다.
+     */
+    const needsUtf8 = !isAscii(opts.mailFrom) || opts.rcptTo.some((r) => !isAscii(r));
+    if (needsUtf8 && !caps.has("SMTPUTF8")) {
+      const result: SmtpClientResult = {
+        ok: false,
+        code: 550,
+        message: "recipient server does not support SMTPUTF8 (RFC 6531)",
+        permanent: true,
+        rcptResults,
+      };
+      await quit(socket, reader);
+      socket.destroy();
+      return result;
+    }
+
     const bodyParam = caps.has("8BITMIME") ? " BODY=8BITMIME" : "";
-    socket.write(`MAIL FROM:<${opts.mailFrom}>${bodyParam}\r\n`);
+    const utf8Param = needsUtf8 ? " SMTPUTF8" : "";
+    socket.write(`MAIL FROM:<${opts.mailFrom}>${bodyParam}${utf8Param}\r\n`);
     const mailReply = await reader.read();
     if (mailReply.code < 200 || mailReply.code >= 300) {
       const result: SmtpClientResult = {
