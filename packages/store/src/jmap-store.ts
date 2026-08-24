@@ -348,3 +348,42 @@ export async function getSubmissions(s: StoreInternals, accountId: string, ids: 
   }));
 }
 
+
+/**
+ * `SearchSnippet/get`(RFC 8621 §5)용 원문 — `message_text`의 **유일한 독자**다.
+ *
+ * ★이 함수가 생기기 전까지 `message_text`는 쓰기만 하고 아무도 읽지 않았다(감사 G3).
+ * 제목과 본문 텍스트가 들어가는 테이블이라 "읽을 계획 없이 두는 것"은 순수 비용이자
+ * 프라이버시 표면이었다. 이 계약이 그 테이블의 존재 이유이므로, **여기를 지우면
+ * `message_text` 쓰기도 함께 지워야 한다.**
+ *
+ * ★`message_text`에는 `account_id`가 없다(PK가 message_id+field). 그래서 반드시
+ * `messages`를 통해 계정으로 좁힌다 — 안 그러면 id만 알면 남의 메일 본문을 읽는다.
+ */
+export async function getMessageTextForSnippets(
+  s: StoreInternals,
+  accountId: string,
+  ids: readonly string[],
+): Promise<Map<string, { subject: string | null; body: string | null }>> {
+  const out = new Map<string, { subject: string | null; body: string | null }>();
+  if (ids.length === 0) return out;
+  for (const idChunk of chunk([...ids], rowsPerStatement(1) - 1)) {
+    // lint-allow chunked-in-query: 바깥 chunk() 루프가 이미 한도를 건다(청크당 99개).
+    const ph = idChunk.map(() => "?").join(", ");
+    const { rows } = await s.db.query({
+      sql: `SELECT t.message_id AS message_id, t.field AS field, t.content AS content
+            FROM message_text t JOIN messages m ON m.id = t.message_id
+            WHERE m.account_id = ? AND t.message_id IN (${ph})`,
+      params: [accountId, ...idChunk],
+    });
+    for (const r of rows) {
+      const id = String(r.message_id);
+      const cur = out.get(id) ?? { subject: null, body: null };
+      const field = Number(r.field);
+      if (field === SEARCH_FIELD.subject) cur.subject = String(r.content);
+      else if (field === SEARCH_FIELD.body) cur.body = String(r.content);
+      out.set(id, cur);
+    }
+  }
+  return out;
+}

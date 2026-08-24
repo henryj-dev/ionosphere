@@ -1,9 +1,29 @@
 /**
  * SEARCH 크라이테리어 — 파싱 + 평가 (RFC 9051 §6.4.4의 실용 부분집합).
  *
- * 평가 데이터는 엔진이 fetchMessages로 받아온 메시지(flags/size/internalDate/raw)로
- * 충당한다 — 인덱스 최적화(스토어 위임)는 후속. \Recent은 rev2 시맨틱상 미지원:
- * RECENT/NEW는 공집합, OLD는 전체와 동치.
+ * 평가 데이터는 엔진이 fetchMessages로 받아온 메시지(flags/size/internalDate/raw)로 충당한다.
+ * \Recent은 rev2 시맨틱상 미지원: RECENT/NEW는 공집합, OLD는 전체와 동치.
+ *
+ * ## ★`search_index`를 선필터로 쓰지 않는다 (2026-08-24 결정)
+ *
+ * 예전 주석은 "인덱스 최적화(스토어 위임)는 후속"이라고 적었는데, 실제로 해 보면 **할 수
+ * 없는 일**이다. 두 검색의 의미가 다르다:
+ *
+ *  · IMAP `SEARCH BODY "x"`는 **부분 문자열**이다(RFC 9051 §6.4.4). `BODY "oo"`는 `foo`를
+ *    매치해야 한다 — 아래 `full.includes(needle)`이 그 규정이다.
+ *  · `search_index`는 **단어/바이그램 토큰**이다(`store/tokenize.ts`). `oo`를 질의하면 토큰
+ *    `oo`를 찾는데 `foo`는 토큰 `foo`로 저장돼 있어 매치되지 않는다.
+ *
+ * 색인을 선필터로 쓰면 **거짓 음성**이 생긴다 — 매치돼야 할 메일이 검색에서 사라진다.
+ * 선필터는 거짓 음성이 없을 때만 건전한데 그 조건이 성립하지 않으므로, 이건 성능 최적화가
+ * 아니라 **정확성 회귀**다. 메모리 폭발은 엔진의 배치화가 이미 막았고(engine.ts의 SEARCH
+ * 배치 주석), 남는 것은 CPU·I/O 비용뿐이라 그 값을 치르기로 했다.
+ *
+ * JMAP은 영향이 없다 — RFC 8621의 `text`/`body` 필터는 **구현체 정의**라 토큰 의미가
+ * 허용되고, 그래서 JMAP만 색인을 쓴다. 두 표면이 다른 것은 규격이 다르기 때문이지
+ * 갈라진 것이 아니다.
+ *
+ * 이 결정은 `search-substring.test.ts`가 지킨다 — 부분 문자열 매치가 깨지면 실패한다.
  */
 import { parseMessage } from "@ionosphere/mime";
 import type { ImapValue } from "./parser.ts";

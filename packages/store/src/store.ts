@@ -25,6 +25,7 @@ import { CHANGE_KIND, CHANGE_LOG_SQL, ENTITY, SEARCH_FIELD } from "./codes.ts";
 import {
   createSubmission,
   getEmailsForJmap,
+  getMessageTextForSnippets,
   getIdentities,
   getSubmissions,
   getThreadsForJmap,
@@ -1779,6 +1780,11 @@ export class Store {
 
   getEmailsForJmap(accountId: string, ids: readonly string[]): Promise<JmapEmailMeta[]> {
     return getEmailsForJmap(this.internals, accountId, ids);
+  }
+
+  /** `SearchSnippet/get`용 원문 — `message_text`의 유일한 독자다(jmap-store.ts 주석 참조). */
+  getMessageTextForSnippets(accountId: string, ids: readonly string[]): Promise<Map<string, { subject: string | null; body: string | null }>> {
+    return getMessageTextForSnippets(this.internals, accountId, ids);
   }
 
   queryEmails(accountId: string, filter: JmapEmailFilter, ascending: boolean, position: number, limit: number): Promise<JmapEmailQueryResult> {

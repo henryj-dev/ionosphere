@@ -4,6 +4,7 @@
  */
 import { ADDRESS_FIELDS, RECIPIENT_KINDS, type DbDriver } from "@ionosphere/db";
 import { toAppendAddresses } from "./addresses.ts";
+import { buildSnippet, snippetTermsFromFilter } from "./snippet.ts";
 import { lookupBlob, Store, type BlobStore, type JmapEmailFilter, type JmapEmailMeta, type MailboxRow } from "@ionosphere/store";
 import { extractJmapBody, parseMessage, type ParsedAddress, type ParsedMessage } from "@ionosphere/mime";
 import {
@@ -25,6 +26,12 @@ import {
 } from "@ionosphere/proto-jmap";
 import { StoreError, type AppendAddress } from "@ionosphere/store";
 import { DEFAULT_RATE_LIMIT, enqueueMessage, findUnsafeAddress, isSafeEnvelopeAddress, OutboundRejectedError, type OutboundPolicy } from "@ionosphere/mta";
+
+/**
+ * `SearchSnippet/get` 한 번에 받을 수 있는 메시지 수. 조각은 **본문 원문을 읽으므로**
+ * `/get`류보다 비싸다 — 상한이 없으면 한 요청으로 계정 전체 본문을 메모리에 올린다.
+ */
+const MAX_SNIPPET_EMAILS = 100;
 
 /** 단일 사용자 계정 — 소유자는 전권. JMAP Mailbox.myRights (RFC 8621 §2). */
 const OWNER_RIGHTS = {
@@ -158,6 +165,7 @@ export function buildMailModule(db: DbDriver, store: Store, blobs: BlobStore): C
       "Email/import": (args, ctx) => emailImport(args, ctx, store, buildEmailSetSource(db, store, blobs)),
       "Email/copy": (args, ctx) => emailCopy(args, ctx.accountId),
       // RFC 8620 §5.6 — 델타를 계산할 수 없다는 것을 **규격의 말로** 알린다(standard.ts 주석).
+      "SearchSnippet/get": (args, ctx) => searchSnippetGet(args, ctx.accountId, store),
       "Email/queryChanges": (args, ctx) => standardQueryChanges(args, ctx.accountId),
       "Mailbox/queryChanges": (args, ctx) => standardQueryChanges(args, ctx.accountId),
       "Thread/get": (args, ctx) => standardGet(args, ctx.accountId, threadGetSource),
@@ -953,4 +961,44 @@ async function emailCopy(args: Record<string, unknown>, accountId: string): Prom
     throw new MethodError("invalidArguments", { description: "fromAccountId는 accountId와 달라야 함" });
   }
   throw new MethodError("fromAccountNotFound");
+}
+
+/**
+ * SearchSnippet/get (RFC 8621 §5) — 검색 결과에 "왜 걸렸는지"를 보여 주는 조각.
+ *
+ * ★`message_text`의 **유일한 독자**다. 그 테이블은 여태 쓰기만 하고 아무도 읽지 않아서
+ * 순수 비용이자 프라이버시 표면이었는데(감사 G3), 이 메서드가 그 존재 이유다.
+ * 여기를 지우면 `message_text` 쓰기도 함께 지워야 한다.
+ *
+ * ★인출은 **계정으로 좁혀서** 한다(`getMessageTextForSnippets`). `message_text`에는
+ * account_id가 없어서 id만으로 조회하면 남의 메일 본문이 나온다.
+ *
+ * ★조각이 없는 것(`notFound`)과 매치가 없는 것(`subject: null`)은 다르다. 전자는 그런
+ * 메시지가 없다는 뜻이고, 후자는 있는데 검색어가 그 부분에 없다는 뜻이다.
+ */
+async function searchSnippetGet(args: Record<string, unknown>, accountId: string, store: Store): Promise<Record<string, unknown>> {
+  const acc = requireAccountId(args, accountId);
+  const emailIds = args.emailIds;
+  if (!Array.isArray(emailIds) || emailIds.some((x) => typeof x !== "string")) {
+    throw new MethodError("invalidArguments", { description: "emailIds는 문자열 배열이어야 함" });
+  }
+  if (emailIds.length > MAX_SNIPPET_EMAILS) {
+    // §5는 상한을 `maxObjectsInGet`으로 두라고 한다 — 조각은 본문을 읽으므로 더욱 상한이 필요하다.
+    throw new MethodError("requestTooLarge", { description: `emailIds는 최대 ${MAX_SNIPPET_EMAILS}개` });
+  }
+
+  const terms = snippetTermsFromFilter(args.filter);
+  const texts = await store.getMessageTextForSnippets(acc, emailIds as string[]);
+
+  const list: Record<string, unknown>[] = [];
+  const notFound: string[] = [];
+  for (const id of emailIds as string[]) {
+    const t = texts.get(id);
+    if (!t) {
+      notFound.push(id);
+      continue;
+    }
+    list.push({ emailId: id, subject: buildSnippet(t.subject, terms), preview: buildSnippet(t.body, terms) });
+  }
+  return { accountId: acc, list, notFound };
 }

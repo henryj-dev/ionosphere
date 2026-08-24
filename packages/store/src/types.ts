@@ -50,6 +50,23 @@ export interface AppendEnvelope {
  * 전체가 없으므로 호출자(백엔드)가 ParsedMessage에서 뽑아 별도로 전달한다.
  * 생략하면(undefined) message_text/search_index를 채우지 않는다(하위 호환 — 기존
  * appendMessage 호출부는 수정 없이 그대로 동작).
+ *
+ * ## 두 테이블의 **독자가 다르다** (2026-08-24 확정)
+ *
+ * 같은 입력에서 두 가지가 나가는데 용도가 갈린다. 여기 적어 두는 이유는, 예전에 이 계약이
+ * 아무 데도 없어서 `message_text`가 "쓰기만 하고 아무도 읽지 않는 테이블"로 1년을 있었기
+ * 때문이다 — 제목과 본문이 들어가는 테이블이라 순수 비용이자 프라이버시 표면이었다.
+ *
+ *  · `search_index` — **토큰**(단어/CJK 바이그램). 독자는 JMAP `Email/query`의
+ *    `text`/`subject`/`body` 필터다. RFC 8621의 그 필터는 **구현체 정의**라 토큰 의미가
+ *    허용된다. IMAP `SEARCH`는 이걸 **쓰지 않는다** — 부분 문자열이라 의미가 다르고,
+ *    선필터로 쓰면 거짓 음성이 생긴다(proto-imap `search-criteria.ts` 머리 주석).
+ *  · `message_text` — **원문 그대로**. 독자는 JMAP `SearchSnippet/get`(RFC 8621 §5)
+ *    하나뿐이다(`getMessageTextForSnippets`). 조각에 "검색어가 어디 있는지"를 보여 주려면
+ *    토큰이 아니라 원문이 있어야 한다.
+ *
+ * ⚠ `SearchSnippet/get`을 없애면 `message_text` **쓰기도 함께 없애야 한다.** 독자가 하나뿐인
+ * 테이블이라 그 하나가 사라지면 다시 "아무도 안 읽는 저장"으로 돌아간다.
  */
 export interface AppendSearchText {
   subject?: string;
