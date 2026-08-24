@@ -60,6 +60,12 @@ export interface ImapMailbox {
   totalCount: number;
   unreadCount: number;
   totalBytes: number;
+  /**
+   * OBJECTID(RFC 8474)의 `MAILBOXID` — 이름·UIDVALIDITY와 무관한 **불변 id**다.
+   * 메일함 이름을 바꿔도 같은 값이라, 클라이언트가 "이름이 바뀐 것"과 "지우고 새로 만든 것"을
+   * 구분할 수 있다(그 구분이 없으면 캐시를 통째로 버린다).
+   */
+  mailboxId?: string;
 }
 
 /** 엔진 → 어댑터 백엔드 요청. 이름은 정규화(INBOX 케이스) 완료 상태로 전달된다. */
@@ -103,7 +109,18 @@ export type ImapBackendRequest =
   /** EXPUNGE — \Deleted 영구 삭제. uids 지정 시 그 UID들만(UIDPLUS UID EXPUNGE). */
   | { kind: "expunge"; name: string; uids: readonly number[] | null }
   /** APPEND — internalDateMs null이면 현재 시각(백엔드 결정). */
-  | { kind: "appendMessage"; name: string; flags: readonly string[]; internalDateMs: number | null; raw: Uint8Array }
+    /**
+   * APPEND. `items`가 있으면 MULTIAPPEND(RFC 3502)이고 **전부 아니면 전무**로 처리해야 한다
+   * (§3). 단일 APPEND는 `items` 하나짜리와 같다 — 백엔드가 갈래를 나누지 않게 항상 채운다.
+   */
+  | {
+      kind: "appendMessage";
+      name: string;
+      flags: readonly string[];
+      internalDateMs: number | null;
+      raw: Uint8Array;
+      items?: readonly { raw: Uint8Array; flags: readonly string[]; internalDateMs?: number }[];
+    }
   | { kind: "copyMessages"; from: string; to: string; uids: readonly number[] }
   /** MOVE — 원자적 이동(RFC 6851). 응답은 copied 재사용(원본 제거는 엔진이 EXPUNGE 방출). */
   | { kind: "moveMessages"; from: string; to: string; uids: readonly number[] };
@@ -113,6 +130,13 @@ export type { ImapSortKeys } from "./sort-thread.ts";
 
 export interface ImapFetchData {
   uid: number;
+  /**
+   * OBJECTID(RFC 8474)의 `EMAILID` — **UID가 아니라** 메시지 자체의 불변 id다.
+   * COPY하면 UID는 새로 붙지만 이건 사본의 새 id다(사본은 다른 메시지이므로).
+   */
+  emailId?: string;
+  /** OBJECTID의 `THREADID` — 같은 스레드면 같은 값. 없으면 NIL. */
+  threadId?: string;
   flags: readonly string[];
   /**
    * INTERNALDATE — **메시지가 서버에 도착한 시각**이다.
@@ -155,7 +179,8 @@ export type ImapBackendResponse =
   /** 실제 삭제된 UID 목록(오름차순 무관 — 엔진이 정렬). */
   | { kind: "expunged"; uids: readonly number[] }
   /** APPEND 결과 — APPENDUID 응답 코드용(UIDPLUS). */
-  | { kind: "appended"; uidvalidity: number; uid: number }
+  /** APPENDUID — MULTIAPPEND면 `uids`가 전부이고 `uid`는 그 첫 번째다(단일 경로 호환). */
+  | { kind: "appended"; uidvalidity: number; uid: number; uids?: readonly number[] }
   /** COPY/MOVE 결과 — COPYUID용. srcUids[i] ↔ dstUids[i] 대응. */
   | { kind: "copied"; uidvalidity: number; srcUids: readonly number[]; dstUids: readonly number[] }
   /**
@@ -226,6 +251,11 @@ export type ImapAction =
   | { kind: "close" }
   /** 어댑터가 소켓을 TLS로 승격하고 `tlsEstablished()`로 알린다(RFC 3501 §6.2.1). */
   | { kind: "startTls" }
+  /**
+   * COMPRESS=DEFLATE (RFC 4978) — **이 액션 다음부터** 양방향이 압축된다.
+   * 태그 OK는 이 액션 **앞에** 놓여 평문으로 나가야 한다(STARTTLS와 같은 규율).
+   */
+  | { kind: "startCompress" }
   | { kind: "auth"; user: string; pass: string }
   /** SCRAM 교환 중 — 저장된 키를 찾아 `scramKeysResult()`로 돌려준다. */
   | { kind: "scramKeys"; user: string }
@@ -296,7 +326,7 @@ type Pending =
   /** 백엔드 요청 대기 — resume이 응답을 액션으로 변환(명령별 continuation). */
   | { kind: "backend"; resume: (res: ImapBackendResponse) => ImapAction[] };
 
-const BASE_CAPABILITIES = ["IMAP4rev1", "IMAP4rev2", "LITERAL-", "SASL-IR", "ID", "ENABLE", "NAMESPACE", "CHILDREN", "SPECIAL-USE", "UNSELECT", "UIDPLUS", "MOVE", "IDLE", "CONDSTORE", "QRESYNC", "ESEARCH", "SEARCHRES", "BINARY", "SAVEDATE", "SORT", "THREAD=ORDEREDSUBJECT", "THREAD=REFERENCES", "LIST-STATUS", "QUOTA", "QUOTA=RES-STORAGE", "QUOTA=RES-MESSAGE"] as const;
+const BASE_CAPABILITIES = ["IMAP4rev1", "IMAP4rev2", "LITERAL-", "SASL-IR", "ID", "ENABLE", "NAMESPACE", "CHILDREN", "SPECIAL-USE", "UNSELECT", "UIDPLUS", "MOVE", "IDLE", "CONDSTORE", "QRESYNC", "ESEARCH", "SEARCHRES", "BINARY", "SAVEDATE", "MULTIAPPEND", "OBJECTID", "SORT", "THREAD=ORDEREDSUBJECT", "THREAD=REFERENCES", "LIST-STATUS", "QUOTA", "QUOTA=RES-STORAGE", "QUOTA=RES-MESSAGE"] as const;
 
 /**
  * 쿼터 루트 이름 — 이 저장소의 쿼터는 **계정 단위**라 루트가 하나뿐이다(RFC 9208 §3.1이
@@ -324,6 +354,8 @@ export class ImapEngine {
   private readonly tlsAvailable: boolean;
   /** STARTTLS OK를 보낸 뒤 핸드셰이크를 기다리는 중 — 그 사이 들어온 라인은 버린다. */
   private awaitingTls = false;
+  /** COMPRESS=DEFLATE가 이미 켜졌나 — 두 번 켜면 `NO [COMPRESSIONACTIVE]`(RFC 4978 §3). */
+  private compressed = false;
   private readonly reader: ImapLineReader;
 
   private state: ImapState = "not-authenticated";
@@ -454,6 +486,12 @@ export class ImapEngine {
 
   private capabilities(): string[] {
     const caps: string[] = [...BASE_CAPABILITIES];
+    /**
+     * ★`COMPRESS`는 **인증 후에만** 광고한다. 인증 전에는 받지 않으므로(위 주석) 광고하면
+     * 클라이언트가 시도하고 실패한 뒤 자격증명을 의심한다 — 광고 = 구현이라는 규율이다.
+     * 이미 켜진 뒤에도 빼야 한다(RFC 4978 §3: 두 번 켤 수 없다).
+     */
+    if (this.state !== "not-authenticated" && !this.compressed) caps.push("COMPRESS=DEFLATE");
     if (this.state === "not-authenticated") {
       // 평문이고 인증서가 있으면 STARTTLS를 알린다 — 이게 없으면 143은 로그인 불가 포트가 된다.
       if (this.starttlsOffered()) caps.push("STARTTLS");
@@ -592,6 +630,32 @@ export class ImapEngine {
         return this.cmdAuthenticate(cmd);
       case "ENABLE":
         return this.cmdEnable(cmd);
+      /**
+       * COMPRESS (RFC 4978) — 회선 압축.
+       *
+       * ★TLS 위에서 쓰면 압축 오라클(CRIME 계열)이 성립할 수 있다는 지적이 있지만, IMAP은
+       * HTTP와 달리 **공격자가 같은 회선에 자기 데이터를 끼워 넣을 방법이 없다**(요청을
+       * 유발할 크로스오리진 개념이 없다). 그래서 광고하되, 인증 **후에만** 받는다 —
+       * 인증 전 압축은 자원만 쓰게 하는 무료 증폭 수단이다.
+       */
+      case "COMPRESS": {
+        if (this.state === "not-authenticated") {
+          return [{ kind: "reply", text: `${cmd.tag} BAD COMPRESS not allowed before authentication` }];
+        }
+        const alg = valueText(cmd.args[0] ?? { kind: "atom", value: "" })?.toUpperCase();
+        if (alg !== "DEFLATE") {
+          return [{ kind: "reply", text: `${cmd.tag} BAD COMPRESS unsupported algorithm` }];
+        }
+        if (this.compressed) {
+          return [{ kind: "reply", text: `${cmd.tag} NO [COMPRESSIONACTIVE] compression already active` }];
+        }
+        this.compressed = true;
+        // OK는 **압축 전에** 나가야 한다 — 순서가 뒤집히면 클라이언트가 그 줄을 못 읽는다.
+        return [
+          { kind: "reply", text: `${cmd.tag} OK DEFLATE active` },
+          { kind: "startCompress" },
+        ];
+      }
       case "GETQUOTAROOT":
         return this.requireAuth(cmd, () => this.cmdGetQuota(cmd, "GETQUOTAROOT"));
       case "GETQUOTA":
@@ -926,6 +990,11 @@ export class ImapEngine {
          */
         ...(rev2 ? [] : [{ kind: "reply" as const, text: "* 0 RECENT" }]),
         { kind: "reply", text: `* OK [UIDVALIDITY ${m.uidvalidity}] UIDs valid` },
+        /**
+         * OBJECTID(RFC 8474 §5) — 이름·UIDVALIDITY와 무관한 불변 id. 이게 있으면
+         * 클라이언트가 "이름이 바뀐 것"과 "지우고 새로 만든 것"을 구분해 캐시를 지킨다.
+         */
+        ...(m.mailboxId !== undefined ? [{ kind: "reply" as const, text: `* OK [MAILBOXID (${m.mailboxId})] object id` }] : []),
         { kind: "reply", text: `* OK [UIDNEXT ${m.uidnext}] predicted next UID` },
         { kind: "reply", text: `* OK [HIGHESTMODSEQ ${m.highestmodseq}] modseq` },
         {
@@ -1127,54 +1196,91 @@ export class ImapEngine {
   }
 
   /** APPEND (RFC 9051 §6.3.12) — [flags] [date-time] literal. UIDPLUS APPENDUID 방출. */
+  /**
+   * APPEND (RFC 9051 §6.3.12) + MULTIAPPEND (RFC 3502).
+   *
+   * ★MULTIAPPEND는 `[flags] [date] literal`이 **반복**되는 형태다. 반복이라는 것 말고는
+   * 단일 APPEND와 같아서, 파싱을 한 루프로 두고 백엔드에는 항상 목록으로 넘긴다 —
+   * 갈래를 나누면 한쪽만 고쳐지는 형태가 된다.
+   *
+   * 원자성은 백엔드 몫이다(§3: 전부 아니면 전무). 여기서는 그 계약을 **한 요청**으로
+   * 넘기는 것까지가 할 일이다.
+   */
   private cmdAppend(cmd: ParsedCommand): ImapAction[] {
     const name = this.mailboxArg(cmd, 0);
     if (name === null) return [{ kind: "reply", text: `${cmd.tag} BAD APPEND expects mailbox name` }];
+
+    const items: { raw: Uint8Array; flags: string[]; internalDateMs?: number }[] = [];
     let idx = 1;
-    const flags: string[] = [];
-    const flagsVal = cmd.args[idx];
-    if (flagsVal?.kind === "list") {
-      for (const f of flagsVal.items) {
-        const t = valueText(f);
-        if (t === null) return [{ kind: "reply", text: `${cmd.tag} BAD APPEND invalid flag` }];
-        flags.push(t);
-      }
-      idx += 1;
-    }
-    let internalDateMs: number | null = null;
-    const dateVal = cmd.args[idx];
-    if (dateVal && dateVal.kind === "quoted") {
-      const ms = parseImapDateTime(dateVal.value);
-      if (ms !== null) {
-        internalDateMs = ms;
+    while (idx < cmd.args.length) {
+      const flags: string[] = [];
+      const flagsVal = cmd.args[idx];
+      if (flagsVal?.kind === "list") {
+        for (const f of flagsVal.items) {
+          const t = valueText(f);
+          if (t === null) return [{ kind: "reply", text: `${cmd.tag} BAD APPEND invalid flag` }];
+          flags.push(t);
+        }
         idx += 1;
       }
-    }
-    const msgVal = cmd.args[idx];
-    if (!msgVal || idx !== cmd.args.length - 1) {
-      return [{ kind: "reply", text: `${cmd.tag} BAD APPEND expects message literal` }];
-    }
-    let raw: Uint8Array;
-    if (msgVal.kind === "literal") raw = msgVal.bytes;
-    else if (msgVal.kind === "quoted") raw = new TextEncoder().encode(msgVal.value);
-    else return [{ kind: "reply", text: `${cmd.tag} BAD APPEND expects message literal` }];
-    if (raw.length === 0) return [{ kind: "reply", text: `${cmd.tag} NO APPEND empty message` }];
-
-    return this.callBackend({ kind: "appendMessage", name, flags, internalDateMs, raw }, (res) => {
-      if (res.kind === "appended") {
-        const actions: ImapAction[] = [];
-        // 선택 중 메일함에 APPEND — 즉시 EXISTS 반영(imaptest own_msgs 추적 요구)
-        const view = this.selected;
-        if (view && view.name === name && !view.uids.includes(res.uid)) {
-          view.uids.push(res.uid);
-          view.uids.sort((a, b) => a - b);
-          actions.push({ kind: "reply", text: `* ${view.uids.length} EXISTS` });
+      let internalDateMs: number | null = null;
+      const dateVal = cmd.args[idx];
+      if (dateVal && dateVal.kind === "quoted") {
+        const ms = parseImapDateTime(dateVal.value);
+        if (ms !== null) {
+          internalDateMs = ms;
+          idx += 1;
         }
-        actions.push({ kind: "reply", text: `${cmd.tag} OK [APPENDUID ${res.uidvalidity} ${res.uid}] APPEND completed` });
-        return actions;
       }
-      return [ImapEngine.noReply(cmd.tag, "APPEND", res.kind === "no" ? res : { message: "failed" })];
-    });
+      const msgVal = cmd.args[idx];
+      let raw: Uint8Array;
+      if (msgVal?.kind === "literal") raw = msgVal.bytes;
+      else if (msgVal?.kind === "quoted") raw = new TextEncoder().encode(msgVal.value);
+      else return [{ kind: "reply", text: `${cmd.tag} BAD APPEND expects message literal` }];
+      if (raw.length === 0) return [{ kind: "reply", text: `${cmd.tag} NO APPEND empty message` }];
+      items.push({ raw, flags, ...(internalDateMs !== null ? { internalDateMs } : {}) });
+      idx += 1;
+    }
+    if (items.length === 0) return [{ kind: "reply", text: `${cmd.tag} BAD APPEND expects message literal` }];
+    const first = items[0]!;
+
+    return this.callBackend(
+      {
+        kind: "appendMessage",
+        name,
+        flags: first.flags,
+        internalDateMs: first.internalDateMs ?? null,
+        raw: first.raw,
+        items,
+      },
+      (res) => {
+        if (res.kind === "appended") {
+          const actions: ImapAction[] = [];
+          const uids = res.uids ?? [res.uid];
+          // 선택 중 메일함에 APPEND — 즉시 EXISTS 반영(imaptest own_msgs 추적 요구)
+          const view = this.selected;
+          if (view && view.name === name) {
+            let added = false;
+            for (const u of uids) {
+              if (view.uids.includes(u)) continue;
+              view.uids.push(u);
+              added = true;
+            }
+            if (added) {
+              view.uids.sort((a, b) => a - b);
+              actions.push({ kind: "reply", text: `* ${view.uids.length} EXISTS` });
+            }
+          }
+          // APPENDUID의 uid-set은 넣은 순서를 뜻한다(RFC 4315 §3 / RFC 3502 §4.3).
+          actions.push({
+            kind: "reply",
+            text: `${cmd.tag} OK [APPENDUID ${res.uidvalidity} ${formatUidSet(uids)}] APPEND completed`,
+          });
+          return actions;
+        }
+        return [ImapEngine.noReply(cmd.tag, "APPEND", res.kind === "no" ? res : { message: "failed" })];
+      },
+    );
   }
 
   /** COPY/MOVE + UID 변형 (RFC 9051 §6.4.7, RFC 6851) — COPYUID 방출. */
@@ -1742,6 +1848,11 @@ export class ImapEngine {
         return `MODSEQ (${data.modseq})`;
       case "internaldate":
         return `INTERNALDATE "${formatInternalDate(data.internalDateMs)}"`;
+      case "emailid":
+        // 없으면 NIL — "id가 없다"와 "빈 id"는 다르다(RFC 8474 §4).
+        return `EMAILID ${data.emailId === undefined ? "NIL" : `(${data.emailId})`}`;
+      case "threadid":
+        return `THREADID ${data.threadId === undefined || data.threadId === "" ? "NIL" : `(${data.threadId})`}`;
       case "savedate":
         // 저장 시각을 모르면 NIL이 규격이다(RFC 8514 §3) — 우리는 항상 아는데 타입이 선택이다.
         return `SAVEDATE ${data.saveDateMs === undefined ? "NIL" : `"${formatInternalDate(data.saveDateMs)}"`}`;
@@ -1819,6 +1930,9 @@ export class ImapEngine {
           break;
         case "RECENT":
           fields.push("RECENT 0"); // rev2 시맨틱 — \Recent 미지원(항상 0)
+          break;
+        case "MAILBOXID":
+          if (m.mailboxId !== undefined) fields.push(`MAILBOXID (${m.mailboxId})`);
           break;
         case "UIDNEXT":
           fields.push(`UIDNEXT ${m.uidnext}`);

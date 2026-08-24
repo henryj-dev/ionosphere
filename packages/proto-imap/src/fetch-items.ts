@@ -18,6 +18,9 @@ export type FetchItem =
   | { kind: "internaldate" }
   /** SAVEDATE (RFC 8514) — 이 **메일함에 들어온** 시각. INTERNALDATE(도착 시각)와 다르다. */
   | { kind: "savedate" }
+  /** OBJECTID (RFC 8474) — 메시지·스레드의 불변 id. UID와 다르다. */
+  | { kind: "emailid" }
+  | { kind: "threadid" }
   | { kind: "rfc822size" }
   | { kind: "envelope" }
   | { kind: "body" }
@@ -107,6 +110,10 @@ function parseSingleItem(text: string, fields: string[] | null): FetchItem | Fet
         return { kind: "internaldate" };
       case "SAVEDATE":
         return { kind: "savedate" };
+      case "EMAILID":
+        return { kind: "emailid" };
+      case "THREADID":
+        return { kind: "threadid" };
       case "RFC822.SIZE":
         return { kind: "rfc822size" };
       case "ENVELOPE":

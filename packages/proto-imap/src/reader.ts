@@ -44,6 +44,18 @@ const DEFAULT_MAX_LINE = MAX_IMAP_LINE_BYTES;
 const DEFAULT_MAX_LITERAL = MAX_MESSAGE_BYTES;
 const DEFAULT_MAX_NONSYNC = 4096;
 
+/**
+ * ★`LITERAL+`(RFC 2088)는 **일부러 광고하지 않는다** (2026-08-24 확인).
+ *
+ * `LITERAL+`와 `LITERAL-`(RFC 7888)은 문법이 같고 차이는 하나뿐이다: `LITERAL+`는 non-sync
+ * 리터럴의 크기에 **상한이 없다**. 그건 서버가 "이 APPEND는 너무 크다"를 **받기 전에**
+ * 말할 기회를 잃는다는 뜻이다 — 클라이언트가 continuation을 기다리지 않고 바로 밀어 넣기
+ * 때문이다. RFC 7888이 `LITERAL-`를 만든 이유가 정확히 그것이다.
+ *
+ * 즉 `LITERAL+`는 기능 추가가 아니라 **DoS 저항의 후퇴**다. 큰 데이터가 필요한 자리
+ * (APPEND 본문)는 sync 리터럴로 오면 되고, 그때는 우리가 크기를 보고 거절할 수 있다.
+ */
+
 /** 라인 끝 `{n}` / `{n+}` 선언 탐지 — 반환은 [리터럴 앞 텍스트, 크기, non-sync 여부]. */
 function matchLiteralTail(line: string): { before: string; size: number; nonSync: boolean } | null {
   const m = /\{(\d+)(\+?)\}$/.exec(line);

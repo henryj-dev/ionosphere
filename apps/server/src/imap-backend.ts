@@ -19,6 +19,7 @@ import {
   StoreQuotaError,
   type AppendAddress,
   type BlobStore,
+  type AppendMessageInput,
   type MailboxRow,
   Store,
   scramKeysFor,
@@ -215,6 +216,8 @@ export class IonosphereImapBackend implements ImapBackend {
       totalCount: p.row.totalCount,
       unreadCount: p.row.unreadCount,
       totalBytes: p.row.totalBytes,
+      // OBJECTID(RFC 8474) — 메일함 행의 ULID가 곧 불변 id다. 이름·UIDVALIDITY와 무관하다.
+      mailboxId: p.row.id,
     };
   }
 
@@ -419,6 +422,9 @@ export class IonosphereImapBackend implements ImapBackend {
          */
         internalDateMs: Number(r.received_at),
         saveDateMs: Number(r.savedate),
+        // OBJECTID — 메시지·스레드의 ULID를 그대로 쓴다(이미 불변이고 유일하다).
+        emailId: messageId,
+        threadId: String(r.thread_id ?? ""),
         size: Number(r.size_bytes),
         modseq: Number(r.modseq),
         ...(raw !== undefined ? { raw } : {}),
@@ -584,6 +590,13 @@ export class IonosphereImapBackend implements ImapBackend {
     return out;
   }
 
+  /**
+   * APPEND — 한 통이든 여러 통(MULTIAPPEND, RFC 3502)이든 **한 배치**로 넣는다.
+   *
+   * ★MULTIAPPEND의 요지는 편의가 아니라 **원자성**이다(§3: "either all messages are appended
+   * or none"). 통마다 따로 넣으면 중간에 쿼터가 차서 절반만 들어간 채 `APPENDUID`가 나가고,
+   * 클라이언트는 전부 들어간 줄 안다. `store.appendMessages`가 이미 그룹 배치라 그대로 쓴다.
+   */
   private async appendMessage(
     accountId: string,
     req: Extract<ImapBackendRequest, { kind: "appendMessage" }>,
@@ -591,42 +604,50 @@ export class IonosphereImapBackend implements ImapBackend {
     const found = await this.findByPath(accountId, req.name);
     if (!found) return { kind: "no", code: "TRYCREATE", message: "no such mailbox" };
 
-    const { blobId, size, generation } = await putBlob(this.db, this.blobs, req.raw);
-    const parsed = parseMessage(req.raw);
-    const keywords = req.flags.map(flagToKeyword).filter((k): k is string => k !== null);
-    const wantsDeleted = req.flags.some((f) => f.toLowerCase() === "\\deleted");
-
-    const result = await this.store.appendMessage({
-      accountId,
-      mailboxIds: [found.row.id],
-      blobId,
-      blobGeneration: generation,
-      sizeBytes: size,
-      receivedAt: req.internalDateMs ?? Date.now(),
-      envelope: {
-        subject: parsed.subject,
-        subjectBase: parsed.subjectBase,
-        msgidHash: parsed.msgidHash,
-        sentAt: parsed.sentAt,
-        preview: parsed.preview,
-        hasAttachment: parsed.hasAttachment,
-        addresses: toAppendAddresses(parsed),
-        threadRefHashes: parsed.threadRefHashes,
-      },
-      keywords,
-      searchText: {
-        ...(parsed.subject ? { subject: parsed.subject } : {}),
-        ...(parsed.textBody ? { body: parsed.textBody } : {}),
-        ...(parsed.from[0] ? { from: `${parsed.from[0].name ?? ""} ${parsed.from[0].email}` } : {}),
-        ...(parsed.to.length > 0 ? { to: parsed.to.map((a) => a.email).join(" ") } : {}),
-      },
-    });
-    const uid = result.uids.get(found.row.id);
-    if (uid === undefined) return { kind: "no", message: "append failed" };
-    if (wantsDeleted) {
-      await this.store.setDeleted({ accountId, mailboxId: found.row.id, uids: [uid], deleted: true });
+    const items = req.items ?? [{ raw: req.raw, flags: req.flags, ...(req.internalDateMs !== null ? { internalDateMs: req.internalDateMs } : {}) }];
+    const inputs: AppendMessageInput[] = [];
+    const deletedAt: boolean[] = [];
+    for (const item of items) {
+      const { blobId, size, generation } = await putBlob(this.db, this.blobs, item.raw);
+      const parsed = parseMessage(item.raw);
+      const keywords = item.flags.map(flagToKeyword).filter((k): k is string => k !== null);
+      deletedAt.push(item.flags.some((f) => f.toLowerCase() === "\\deleted"));
+      inputs.push({
+        accountId,
+        mailboxIds: [found.row.id],
+        blobId,
+        blobGeneration: generation,
+        sizeBytes: size,
+        receivedAt: item.internalDateMs ?? Date.now(),
+        envelope: {
+          subject: parsed.subject,
+          subjectBase: parsed.subjectBase,
+          msgidHash: parsed.msgidHash,
+          sentAt: parsed.sentAt,
+          preview: parsed.preview,
+          hasAttachment: parsed.hasAttachment,
+          addresses: toAppendAddresses(parsed),
+          threadRefHashes: parsed.threadRefHashes,
+        },
+        keywords,
+        searchText: {
+          ...(parsed.subject ? { subject: parsed.subject } : {}),
+          ...(parsed.textBody ? { body: parsed.textBody } : {}),
+          ...(parsed.from[0] ? { from: `${parsed.from[0].name ?? ""} ${parsed.from[0].email}` } : {}),
+          ...(parsed.to.length > 0 ? { to: parsed.to.map((a) => a.email).join(" ") } : {}),
+        },
+      });
     }
-    return { kind: "appended", uidvalidity: found.row.uidvalidity, uid };
+
+    const results = await this.store.appendMessages(inputs);
+    const uids = results.map((r) => r.uids.get(found.row.id)).filter((u): u is number => u !== undefined);
+    if (uids.length !== inputs.length) return { kind: "no", message: "append failed" };
+
+    // `\Deleted`는 키워드가 아니라 멤버십 플래그다 — 넣은 뒤 해당 통만 세운다.
+    for (let i = 0; i < results.length; i++) {
+      if (deletedAt[i] === true) await this.store.setDeleted({ accountId, mailboxId: found.row.id, uids: [uids[i]!], deleted: true });
+    }
+    return { kind: "appended", uidvalidity: found.row.uidvalidity, uid: uids[0]!, uids };
   }
 
   private async copyOrMove(

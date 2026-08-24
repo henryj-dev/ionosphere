@@ -47,12 +47,17 @@ describe("APPEND", () => {
     const e = authed();
     const raw = "From: a@x\r\n\r\nbody\r\n";
     const first = e.feed(enc.encode(`p1 APPEND Drafts (\\Draft $x) "01-Jan-2026 09:00:00 +0900" {${raw.length}+}\r\n${raw}\r\n`));
+    /**
+     * ★단일 APPEND도 `items` 하나짜리로 넘어간다 — 백엔드가 갈래를 나누지 않게(MULTIAPPEND와
+     * 같은 코드로 처리하게) 항상 채운다. `flags`/`raw`/`internalDateMs`는 하위 호환용이다.
+     */
     expect(backendReq(first)).toEqual({
       kind: "appendMessage",
       name: "Drafts",
       flags: ["\\Draft", "$x"],
       internalDateMs: Date.UTC(2026, 0, 1),
       raw: enc.encode(raw),
+      items: [{ raw: enc.encode(raw), flags: ["\\Draft", "$x"], internalDateMs: Date.UTC(2026, 0, 1) }],
     });
     expect(replies(e.backendResult({ kind: "appended", uidvalidity: 55, uid: 42 }))).toEqual([
       "p1 OK [APPENDUID 55 42] APPEND completed",
@@ -122,5 +127,40 @@ describe("IDLE", () => {
     e.feed(enc.encode("i1 IDLE\r\n"));
     expect(replies(e.feed(enc.encode("garbage\r\n")))[0]).toBe("i1 BAD expected DONE");
     expect(e.isIdling()).toBe(false);
+  });
+});
+
+describe("MULTIAPPEND (RFC 3502)", () => {
+  /**
+   * ★요지는 편의가 아니라 **원자성**이다(§3: 전부 아니면 전무). 엔진의 몫은 그 계약을
+   * **한 요청**으로 넘기는 것까지다 — 통마다 나눠 보내면 백엔드가 원자성을 만들 수 없다.
+   */
+  test("여러 메시지가 한 요청으로 간다", () => {
+    const e = authed();
+    const a = "From: a@x\r\n\r\none\r\n";
+    const b = "From: b@x\r\n\r\ntwo\r\n";
+    const cmd = `p1 APPEND Drafts (\\Seen) {${a.length}+}\r\n${a} (\\Draft) {${b.length}+}\r\n${b}\r\n`;
+    const req = backendReq(e.feed(enc.encode(cmd))) as { items: { flags: string[] }[] } | null;
+    expect(req).not.toBe(null);
+    expect(req!.items).toHaveLength(2);
+    expect(req!.items[0]!.flags).toEqual(["\\Seen"]);
+    expect(req!.items[1]!.flags).toEqual(["\\Draft"]);
+  });
+
+  /** APPENDUID의 uid-set은 **넣은 순서**를 뜻한다(RFC 3502 §4.3). */
+  test("APPENDUID가 uid 집합을 낸다", () => {
+    const e = authed();
+    const a = "From: a@x\r\n\r\none\r\n";
+    const b = "From: b@x\r\n\r\ntwo\r\n";
+    e.feed(enc.encode(`p1 APPEND Drafts {${a.length}+}\r\n${a} {${b.length}+}\r\n${b}\r\n`));
+    const out = replies(e.backendResult({ kind: "appended", uidvalidity: 55, uid: 42, uids: [42, 43] }));
+    expect(out).toEqual(["p1 OK [APPENDUID 55 42:43] APPEND completed"]);
+  });
+
+  test("CAPABILITY가 MULTIAPPEND·OBJECTID를 광고한다", () => {
+    const e = authed();
+    const caps = replies(e.feed(enc.encode("c1 CAPABILITY\r\n")))[0] ?? "";
+    expect(caps.split(" ").includes("MULTIAPPEND")).toBe(true);
+    expect(caps.split(" ").includes("OBJECTID")).toBe(true);
   });
 });

@@ -21,6 +21,7 @@ import {
   type ScramStoredKeys,
 } from "@ionosphere/core";
 import { ImapEngine, type ImapAction, type ImapBackendRequest, type ImapBackendResponse } from "./engine.ts";
+import * as zlib from "node:zlib";
 
 export interface ImapBackend {
   /**
@@ -86,6 +87,14 @@ export interface ImapServerOptions {
 
 /** RFC 9051 §5.4 — 최소 30분 유휴 타임아웃. */
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+/**
+ * COMPRESS 세션에서 **푼 뒤** 누적 바이트 상한.
+ *
+ * 압축 해제는 증폭이라 작은 입력이 큰 출력이 된다(deflate 폭탄). 리더의 라인·리터럴 상한은
+ * 푼 뒤에 걸리므로 그 앞에서 끊어야 한다. 한 세션이 정상적으로 주고받는 양보다 넉넉하되
+ * 프로세스 메모리를 위협하지 않는 값이다.
+ */
+const MAX_INFLATED_BYTES = 512 * 1024 * 1024;
 const DEFAULT_IDLE_POLL_MS = 15_000;
 
 /**
@@ -260,8 +269,26 @@ export class ImapServer {
 
     socket.setTimeout(IDLE_TIMEOUT_MS);
 
+    /**
+     * COMPRESS=DEFLATE (RFC 4978) 상태. 켜지면 나가는 바이트는 `deflate`를, 들어오는
+     * 바이트는 `inflate`를 거친다.
+     *
+     * ★`Z_SYNC_FLUSH`가 이 기능의 **고전적 버그**다. 스트림 압축은 기본적으로 블록이 찰
+     * 때까지 출력을 모으는데, IMAP은 서버가 한 줄 보내고 클라이언트 응답을 기다리는
+     * 대화형이라 그 버퍼링이 곧 **양쪽이 서로를 기다리는 교착**이 된다. 쓸 때마다 flush해야
+     * 한다 — 압축률을 조금 잃고 프로토콜을 얻는 교환이다.
+     */
+    let deflate: zlib.DeflateRaw | null = null;
+    let inflate: zlib.InflateRaw | null = null;
+
     const write = (bytes: Uint8Array): void => {
-      if (!socket.destroyed) socket.write(bytes);
+      if (socket.destroyed) return;
+      if (deflate === null) {
+        socket.write(bytes);
+        return;
+      }
+      deflate.write(Buffer.from(bytes));
+      deflate.flush(zlib.constants.Z_SYNC_FLUSH);
     };
     const writeText = (text: string): void => write(new TextEncoder().encode(`${text}\r\n`));
 
@@ -276,6 +303,9 @@ export class ImapServer {
             break;
           case "startTls":
             await upgradeTls();
+            break;
+          case "startCompress":
+            startCompress();
             break;
           case "close":
             if (!socket.destroyed) socket.end();
@@ -471,8 +501,42 @@ export class ImapServer {
       safeRun(engine.tlsEstablished());
     };
 
+    /**
+     * 압축을 켠다 — **이 시점 이후의** 바이트에만 적용된다(태그 OK는 이미 평문으로 나갔다).
+     *
+     * ★`inflate`에도 상한이 필요하다. 압축 해제는 **증폭**이라 작은 입력이 큰 출력이 되고
+     * (deflate 폭탄), 상한이 없으면 인증된 사용자 하나가 프로세스 메모리를 채운다.
+     * 리더의 라인·리터럴 상한은 **푼 뒤**에 걸리므로 그 앞에서 끊어야 한다.
+     */
+    const startCompress = (): void => {
+      if (deflate !== null) return;
+      const d = zlib.createDeflateRaw({ level: zlib.constants.Z_DEFAULT_COMPRESSION });
+      const i = zlib.createInflateRaw();
+      d.on("data", (chunk: Buffer) => {
+        if (!socket.destroyed) socket.write(chunk);
+      });
+      // 스트림 오류는 회선을 못 쓰게 만든다 — 되살릴 방법이 없으므로 끊는다.
+      d.on("error", () => socket.destroy());
+      i.on("error", () => socket.destroy());
+      let inflated = 0;
+      i.on("data", (chunk: Buffer) => {
+        inflated += chunk.length;
+        if (inflated > MAX_INFLATED_BYTES) {
+          socket.destroy();
+          return;
+        }
+        safeRun(engine.feed(chunk));
+      });
+      deflate = d;
+      inflate = i;
+    };
+
     const attachData = (s: net.Socket | tls.TLSSocket): void => {
-      s.on("data", (chunk: Buffer) => safeRun(engine.feed(chunk)));
+      s.on("data", (chunk: Buffer) => {
+        // 압축이 켜졌으면 **푼 뒤에** 엔진으로 간다.
+        if (inflate !== null) inflate.write(chunk);
+        else safeRun(engine.feed(chunk));
+      });
     };
     attachData(rawSocket);
     socket.on("timeout", () => {
@@ -484,6 +548,9 @@ export class ImapServer {
     });
     socket.on("close", () => {
       if (idlePoller) clearInterval(idlePoller);
+      // 스트림을 남기면 이벤트 루프에 핸들이 남아 종료가 늦어진다.
+      deflate?.destroy();
+      inflate?.destroy();
     });
 
     safeRun(engine.greeting());
