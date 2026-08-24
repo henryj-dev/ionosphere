@@ -1,0 +1,39 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/claude-hooks/main-tree-guard.py\""
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/claude-hooks/session-start-pull.py\"",
+            "timeout": 90,
+            "statusMessage": "메인 트리 최신화"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/claude-hooks/session-end-cleanup.py\"",
+            "timeout": 120,
+            "statusMessage": "세션 정리 — 메인 pull · 워크트리 회수"
+          }
+        ]
+      }
+    ]
+  }
+}
