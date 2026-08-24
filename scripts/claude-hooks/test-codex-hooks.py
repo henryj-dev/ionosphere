@@ -183,9 +183,13 @@ check("저장소 밖에서는 조용히 통과(rc=0)", rc == 0 and "deny" not in
 #    그래서 `python3 "$CLAUDE_PROJECT_DIR/scripts/..."` 가 `/scripts/...` 로 풀려
 #    `can't open file` + **exit 2** 가 됐다. codex 는 PreToolUse 의 exit 2 를 **거부**로 읽으므로
 #    `git status` 같은 **읽기까지 전부 막혔고**, 세션이 통째로 멈췄다.
-#    ⚠️ 그리고 이 경로는 **`~/.codex/config.toml` 의 신뢰 승인 없이 발화한다**(그 파일의
-#    `[hooks.state]` 에 `.claude/settings.json` 항목이 없는데도 돌았다). 즉 승인이 필요한
-#    `.codex/hooks.json` 보다 **먼저·확실히 도는 층**이다 — 여기가 깨지면 codex 는 못 쓴다.
+#    🔴 **한동안 여기 「이 층은 신뢰 승인 없이 발화한다」고 적혀 있었는데 틀렸다**(2026-08-24
+#    같은 날 정정). 근거로 쓴 것이 `[hooks.state]` 에 항목이 **없다**는 부재였다 — 부재 위에
+#    이론을 지은 것이다. 직접 재니 반대였다: ① 신뢰 항목이 하나도 없는 경로(새 워크트리)에
+#    표식 훅을 넣고 `codex exec` → **안 찍혔다** ② `.codex/hooks.json` 해시를 깨뜨린 레포에서
+#    codex 로 메인 편집 → **그대로 통과했다**(이 층이 돌았다면 막혔어야 한다).
+#    → **`.codex/hooks.json` 을 고치면 그 프로젝트의 codex 가드가 통째로 풀린다.** 파일을
+#      고쳤으면 **재승인까지가 그 작업이다.** matcher 의 codex 툴 이름은 그와 무관하게 필요하다.
 #
 # 그래서 세 훅의 명령은 `${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel)}` 로
 # **스스로 경로를 찾는다.** Claude 에서는 앞의 변수가, codex 에서는 뒤의 git 이 답한다.
