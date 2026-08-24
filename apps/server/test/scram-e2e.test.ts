@@ -7,7 +7,7 @@
  * ★이 파일이 있는 이유: 앞서 스팸 점수 엔진에서 **앱→백엔드 배선 하나를 빠뜨려 게이트가
  * 아예 안 도는데도 단위 테스트는 전부 통과**한 적이 있다. 조립은 조립으로만 확인된다.
  */
-import { afterAll, beforeAll, describe, expect, test } from "@ionosphere/testkit";
+import { afterAll, beforeAll, describe, expect, test, SOCKET_DEADLINE_MS } from "@ionosphere/testkit";
 import { createHash, createHmac, pbkdf2Sync } from "node:crypto";
 import { connect } from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -31,7 +31,7 @@ function talk(port: number, lines: string[]): Promise<string[]> {
     const t = setTimeout(() => {
       s.destroy();
       reject(new Error(`timeout; got=${JSON.stringify(out)}`));
-    }, 8000);
+    }, SOCKET_DEADLINE_MS);
     s.on("data", (d) => {
       buf += d.toString("latin1");
       let nl: number;
@@ -218,7 +218,7 @@ describe("SCRAM end-to-end (submission 587)", () => {
       const t = setTimeout(() => {
         s.destroy();
         reject(new Error(`ehlo timeout; got=${JSON.stringify(out)}`));
-      }, 8000);
+      }, SOCKET_DEADLINE_MS);
       s.on("data", (d) => {
         buf += d.toString("latin1");
         let nl: number;

@@ -8,3 +8,4 @@
  */
 export { describe, test, it, beforeAll, afterAll, beforeEach, afterEach, type TestFn, type DescribeFn } from "./runner.ts";
 export { expect, type Matchers, type AsyncMatchers, type Expectation, type ExpectFn } from "./expect.ts";
+export { SOCKET_DEADLINE_MS } from "./deadline.ts";

@@ -3,7 +3,7 @@
  * greylist는 옵션이라 별도 앱에서 켜서 확인 (기본 앱은 off).
  * SPF-pass 면제는 spam 패키지 단위테스트가 커버 — 여기선 미인증(none) 발신자로 defer를 본다.
  */
-import { afterAll, beforeAll, describe, expect, test } from "@ionosphere/testkit";
+import { afterAll, beforeAll, describe, expect, test, SOCKET_DEADLINE_MS } from "@ionosphere/testkit";
 import { E2E_HOOK_TIMEOUT_MS } from "./helpers.ts";
 import { connect } from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -23,7 +23,7 @@ function relaySend(port: number, from: string, to: string): Promise<string> {
     const msg = `From: ${from}\r\nTo: ${to}\r\nSubject: gl\r\n\r\nhi\r\n.\r\n`;
     const steps = [`EHLO t\r\n`, `MAIL FROM:<${from}>\r\n`, `RCPT TO:<${to}>\r\n`, `DATA\r\n`, msg];
     let stage = -1; let buf = "";
-    const t = setTimeout(() => { s.destroy(); reject(new Error("timeout")); }, 4000);
+    const t = setTimeout(() => { s.destroy(); reject(new Error("timeout")); }, SOCKET_DEADLINE_MS);
     s.on("data", (d) => {
       buf += d.toString("latin1");
       let nl: number;

@@ -2,7 +2,7 @@
  * Phase 2 조립 e2e: 관리 API 도메인 검증 → 발송 게이트(미검증 553 → 검증 후 허용).
  * 실 DNS 미접촉 — 가변 주입 리졸버(검증 토큰을 런타임에 주입).
  */
-import { afterAll, beforeAll, describe, expect, test } from "@ionosphere/testkit";
+import { afterAll, beforeAll, describe, expect, test, SOCKET_DEADLINE_MS } from "@ionosphere/testkit";
 import { E2E_HOOK_TIMEOUT_MS } from "./helpers.ts";
 import { connect } from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -41,7 +41,7 @@ function submitFull(port: number, user: string, pass: string, from: string, to: 
     const steps = [`EHLO t\r\n`, `AUTH PLAIN ${authB64}\r\n`, `MAIL FROM:<${from}>\r\n`, `RCPT TO:<${to}>\r\n`, `DATA\r\n`, msg];
     let stage = -1;
     let buf = "";
-    const t = setTimeout(() => { s.destroy(); reject(new Error("timeout")); }, 4000);
+    const t = setTimeout(() => { s.destroy(); reject(new Error("timeout")); }, SOCKET_DEADLINE_MS);
     s.on("data", (d) => {
       buf += d.toString("latin1");
       let nl: number;
@@ -184,7 +184,7 @@ function authOnly(port: number, user: string, pass: string): Promise<string> {
     const steps = [`EHLO t\r\n`, `AUTH PLAIN ${authB64}\r\n`];
     let stage = -1;
     let buf = "";
-    const t = setTimeout(() => { s.destroy(); reject(new Error("timeout")); }, 4000);
+    const t = setTimeout(() => { s.destroy(); reject(new Error("timeout")); }, SOCKET_DEADLINE_MS);
     s.on("data", (d) => {
       buf += d.toString("latin1");
       let nl: number;
@@ -213,7 +213,7 @@ function relaySend(port: number, from: string, to: string): Promise<string> {
     const steps = [`EHLO t\r\n`, `MAIL FROM:<${from}>\r\n`, `RCPT TO:<${to}>\r\n`, `DATA\r\n`, msg];
     let stage = -1;
     let buf = "";
-    const t = setTimeout(() => { s.destroy(); reject(new Error("timeout")); }, 4000);
+    const t = setTimeout(() => { s.destroy(); reject(new Error("timeout")); }, SOCKET_DEADLINE_MS);
     s.on("data", (d) => {
       buf += d.toString("latin1");
       let nl: number;
@@ -239,7 +239,7 @@ function pop3Count(port: number, user: string, pass: string): Promise<number> {
     const steps = [`USER ${user}\r\n`, `PASS ${pass}\r\n`, `STAT\r\n`];
     let stage = -1;
     let buf = "";
-    const t = setTimeout(() => { s.destroy(); reject(new Error("timeout")); }, 4000);
+    const t = setTimeout(() => { s.destroy(); reject(new Error("timeout")); }, SOCKET_DEADLINE_MS);
     s.on("data", (d) => {
       buf += d.toString("latin1");
       let nl: number;

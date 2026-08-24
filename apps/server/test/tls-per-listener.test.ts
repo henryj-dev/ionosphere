@@ -8,7 +8,7 @@
  * ★검증은 배선이 아니라 **실제 핸드셰이크의 CN**으로 한다. "reloadTls가 호출됐다"는 어떤
  * 인증서를 제시하는지 말해주지 않는다 — 이 파일이 잡으려는 결함이 정확히 그 층에 있다.
  */
-import { afterEach, describe, expect, test } from "@ionosphere/testkit";
+import { afterEach, describe, expect, test, SOCKET_DEADLINE_MS } from "@ionosphere/testkit";
 import * as tls from "node:tls";
 import * as net from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -267,7 +267,7 @@ describe("평문 AUTH 판정 — 리스너별 소스만 준 구성", () => {
       setTimeout(() => {
         c.destroy();
         resolve(buf);
-      }, 3000);
+      }, SOCKET_DEADLINE_MS);
     });
     expect(caps).toContain("LOGINDISABLED");
   });

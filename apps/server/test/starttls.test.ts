@@ -7,7 +7,7 @@
  *
  * MTA-STS enforce는 25번 STARTTLS가 전제이므로 이 판정이 곧 enforce 가능 여부다.
  */
-import { describe, expect, test } from "@ionosphere/testkit";
+import { describe, expect, test, SOCKET_DEADLINE_MS } from "@ionosphere/testkit";
 import { connect } from "node:net";
 import * as tls from "node:tls";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -74,7 +74,7 @@ function ehloCaps(port: number): Promise<string[]> {
     setTimeout(() => {
       sock.destroy();
       reject(new Error("timeout"));
-    }, 5000);
+    }, SOCKET_DEADLINE_MS);
   });
 }
 
@@ -135,7 +135,7 @@ describe("IonosphereApp STARTTLS 배선", () => {
           setTimeout(() => {
             sock.destroy();
             reject(new Error("STARTTLS 업그레이드 타임아웃"));
-          }, 8000);
+          }, SOCKET_DEADLINE_MS);
         });
         expect(proto).toMatch(/^TLSv1\.[23]$/);
       }

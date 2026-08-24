@@ -18,6 +18,7 @@
  *
  * 정상이면 exit 0, 어긋나면 사유를 stderr에 남기고 exit 1.
  */
+import { SOCKET_DEADLINE_MS } from "@ionosphere/testkit";
 import { connect } from "node:net";
 import * as tls from "node:tls";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -93,7 +94,7 @@ function upgrade(port: number, startCmd: string, okMark: string, after: string, 
       if (upgraded) return;
       raw.destroy();
       reject(new Error(`업그레이드 응답 없음(${okMark} 미도달) — STARTTLS/STLS가 광고·수락되지 않는다`));
-    }, 4000);
+    }, SOCKET_DEADLINE_MS);
   });
 }
 

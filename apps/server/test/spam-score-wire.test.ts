@@ -7,7 +7,7 @@
  * ③ ★junk는 **거부가 아니다** — 배달되고 `$Junk` 키워드 + `X-Spam-Status` 헤더가 남는다
  * ④ ★정상 메일은 켜 놔도 그대로 통과한다(오탐이 곧 유실인 자리)
  */
-import { afterAll, beforeAll, describe, expect, test } from "@ionosphere/testkit";
+import { afterAll, beforeAll, describe, expect, test, SOCKET_DEADLINE_MS } from "@ionosphere/testkit";
 import { connect } from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -34,7 +34,7 @@ function send(port: number, from: string, to: string, headers: string[]): Promis
     const t = setTimeout(() => {
       s.destroy();
       reject(new Error("timeout"));
-    }, 6000);
+    }, SOCKET_DEADLINE_MS);
     s.on("data", (d) => {
       buf += d.toString("latin1");
       let nl: number;

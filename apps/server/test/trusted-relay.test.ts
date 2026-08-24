@@ -12,7 +12,7 @@
  *   ② DKIM·DMARC는 그대로 돈다 — 내부 DKIM 회귀를 우리 손으로 못 보게 되면 안 된다.
  *   ③ 기본값은 "아무도 신뢰 안 함"이라 설정 전 동작이 바뀌지 않는다.
  */
-import { afterAll, beforeAll, describe, expect, test } from "@ionosphere/testkit";
+import { afterAll, beforeAll, describe, expect, test, SOCKET_DEADLINE_MS } from "@ionosphere/testkit";
 import { DnsNotFoundError, dkimSign, generateDkimKeyPair, type DnsResolver } from "@ionosphere/mail-auth";
 import { parseMessage } from "@ionosphere/mime";
 import { connect } from "node:net";
@@ -168,7 +168,7 @@ function relaySend(port: number, from: string, to: string): Promise<string> {
     const t = setTimeout(() => {
       s.destroy();
       reject(new Error("timeout"));
-    }, 4000);
+    }, SOCKET_DEADLINE_MS);
     s.on("data", (d) => {
       buf += d.toString("latin1");
       let nl: number;

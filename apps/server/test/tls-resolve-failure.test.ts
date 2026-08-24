@@ -8,7 +8,7 @@
  *     **143/587 평문 AUTH가 열리는 보안 강등**이 생긴다. 그래서 "TLS를 의도했는가"(tlsConfigured)로
  *     판정해 인증서가 없어도 평문 AUTH는 계속 차단한다(fail closed).
  */
-import { afterAll, beforeAll, describe, expect, test } from "@ionosphere/testkit";
+import { afterAll, beforeAll, describe, expect, test, SOCKET_DEADLINE_MS } from "@ionosphere/testkit";
 import { connect, type Socket } from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -55,7 +55,7 @@ function lineExchange(port: number, greetingLines: number, send: string): Promis
     setTimeout(() => {
       sock.destroy();
       reject(new Error("timeout"));
-    }, 5000);
+    }, SOCKET_DEADLINE_MS);
   });
 }
 

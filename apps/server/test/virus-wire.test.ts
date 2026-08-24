@@ -7,7 +7,7 @@
  * ③ 판정 불가가 451이라 **상대가 재시도한다**(메일이 사라지지 않는다)
  * ④ 스캐너가 **원본 바이트**를 받는다 — 우리가 헤더를 얹기 전 것이어야 서명이 맞는다
  */
-import { afterAll, beforeAll, describe, expect, test } from "@ionosphere/testkit";
+import { afterAll, beforeAll, describe, expect, test, SOCKET_DEADLINE_MS } from "@ionosphere/testkit";
 import { connect } from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -35,7 +35,7 @@ function relaySend(port: number, from: string, to: string, body = "hi"): Promise
     const t = setTimeout(() => {
       s.destroy();
       reject(new Error("timeout"));
-    }, 6000);
+    }, SOCKET_DEADLINE_MS);
     s.on("data", (d) => {
       buf += d.toString("latin1");
       let nl: number;
