@@ -400,31 +400,20 @@ export class IonosphereImapBackend implements ImapBackend {
     const wantsDeleted = req.flags.some((f) => f.toLowerCase() === "\\deleted");
     const kwFlags = req.flags.map(flagToKeyword).filter((k): k is string => k !== null);
 
-    for (const r of rows) {
-      const messageId = String(r.message_id);
-      if (req.mode === "set") {
-        // 현재 키워드 전체를 목표 집합으로 교체
-        const { rows: cur } = await this.db.query({
-          sql: "SELECT keyword FROM message_keywords WHERE message_id = ?",
-          params: [messageId],
-        });
-        const current = cur.map((c) => String(c.keyword));
-        const target = new Set(kwFlags);
-        await this.store.setKeywords({
-          accountId,
-          messageId,
-          add: kwFlags,
-          remove: current.filter((k) => !target.has(k)),
-        });
-      } else {
-        await this.store.setKeywords({
-          accountId,
-          messageId,
-          add: req.mode === "add" ? kwFlags : [],
-          remove: req.mode === "remove" ? kwFlags : [],
-        });
-      }
-    }
+    /**
+     * ★한 배치로 처리한다. 예전엔 메시지마다 `setKeywords()`를 불렀고, `mode==="set"`은
+     * 그 위에 현재 키워드 조회를 하나 더 얹었다 — `UID STORE 1:* +FLAGS \Seen`이 1만 통이면
+     * **왕복 2만 번**이고 modseq도 1만 번 소모된다(라이터 큐가 직렬화하므로 그동안 그 계정의
+     * 다른 쓰기가 전부 대기한다). 목표 집합 계산은 스토어가 `replace`로 안에서 한다 —
+     * 조회를 한 번 더 하지 않아도 되는 자리다.
+     */
+    await this.store.setKeywordsBatch({
+      accountId,
+      messageIds: [...new Set(rows.map((r) => String(r.message_id)))],
+      add: req.mode === "remove" ? [] : kwFlags,
+      remove: req.mode === "remove" ? kwFlags : [],
+      ...(req.mode === "set" ? { replace: true } : {}),
+    });
 
     // \Deleted — membership 단위 일괄 처리
     const uids = rows.map((r) => Number(r.uid));
@@ -534,17 +523,22 @@ export class IonosphereImapBackend implements ImapBackend {
         [from.row.id],
       )
     ).sort((a, b) => Number(a.uid) - Number(b.uid));
-    const srcUids: number[] = [];
-    const dstUids: number[] = [];
-    for (const r of rows) {
-      const messageId = String(r.message_id);
-      const result =
-        op === "copy"
-          ? await this.store.copyMessage({ accountId, messageId, toMailboxId: to.row.id })
-          : await this.store.moveMessage({ accountId, messageId, fromMailboxId: from.row.id, toMailboxId: to.row.id });
-      srcUids.push(Number(r.uid));
-      dstUids.push(result.uid);
-    }
+    /**
+     * ★한 배치로 처리한다. 예전엔 메시지마다 스토어를 불렀고, 왕복이 N번인 것보다 나쁜 것은
+     * **원자성이 없다**는 점이었다 — 중간에 실패하면 절반만 복사된 채 `COPYUID`가 나갔다.
+     * RFC 9051 §6.4.7은 COPY가 실패하면 대상 메일함을 원상 복구하라고 한다.
+     */
+    const uidByMessage = new Map(rows.map((r) => [String(r.message_id), Number(r.uid)]));
+    const { pairs } = await this.store.copyOrMoveMessages({
+      accountId,
+      messageIds: rows.map((r) => String(r.message_id)),
+      fromMailboxId: from.row.id,
+      toMailboxId: to.row.id,
+      op,
+    });
+    // COPYUID의 두 uid-set은 **위치로 대응**한다 — 순서가 어긋나면 다른 메시지를 가리킨다.
+    const srcUids = pairs.map((p) => uidByMessage.get(p.messageId)!);
+    const dstUids = pairs.map((p) => p.uid);
     return { kind: "copied", uidvalidity: to.row.uidvalidity, srcUids, dstUids };
   }
 }

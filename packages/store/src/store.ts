@@ -959,6 +959,154 @@ export class Store {
     await this.db.batch(stmts);
   }
 
+  /**
+   * 여러 메시지의 키워드를 **한 배치**로 바꾼다 — `appendMessages`와 같은 그룹 배치 규율.
+   *
+   * ★왜 필요한가(2026-08-23 검수): IMAP `UID STORE 1:* +FLAGS \Seen`이 메시지마다
+   * `setKeywords()`를 불렀다. 1만 통이면 **왕복 2만 번**이고 modseq도 1만 번 소모된다
+   * (라이터 큐가 직렬화하므로 그 시간 동안 그 계정의 다른 쓰기가 전부 대기한다).
+   *
+   * 원자성·불변식은 단건과 같다: modseq 하나를 그룹 전체가 공유하고(§3-3 전역 불변식은
+   * "change_log를 쓴 모든 entity의 state_*"를 요구할 뿐 메시지당 modseq를 요구하지 않는다)
+   * `modseq_claims`도 1행이다. 하나라도 실패하면 배치 전체가 롤백된다.
+   *
+   * 반환은 **실제로 바뀐 메시지 id**다 — 호출자가 응답에 실을 대상을 알아야 하고,
+   * "변화 없음"은 modseq를 소모하지 않는다는 단건의 성질을 그대로 유지한다.
+   */
+  async setKeywordsBatch(input: {
+    accountId: string;
+    messageIds: readonly string[];
+    add: readonly string[];
+    remove: readonly string[];
+    /** true면 `add`를 목표 집합으로 보고 나머지를 전부 지운다(IMAP `STORE FLAGS`). */
+    replace?: boolean;
+  }): Promise<{ changed: string[] }> {
+    if (input.messageIds.length === 0) return { changed: [] };
+    return this.writer.run(input.accountId, () => this.withRetry(() => this.setKeywordsBatchAttempt(input)));
+  }
+
+  private async setKeywordsBatchAttempt(input: {
+    accountId: string;
+    messageIds: readonly string[];
+    add: readonly string[];
+    remove: readonly string[];
+    replace?: boolean;
+  }): Promise<{ changed: string[] }> {
+    const acct = await this.mustGetAccount(input.accountId);
+    const ids = [...new Set(input.messageIds)];
+
+    // 계정 소유 확인 — 인가 축이다. 단건 경로가 하는 검사를 배치가 건너뛰면 안 된다.
+    const ownRows = await queryInChunks(
+      this.db,
+      ids,
+      (ph) => `SELECT id FROM messages WHERE account_id = ? AND id IN (${ph})`,
+      [input.accountId],
+    );
+    const owned = new Set(ownRows.map((r) => String(r.id)));
+    const targets = ids.filter((id) => owned.has(id));
+    if (targets.length === 0) return { changed: [] };
+
+    const curRows = await queryInChunks(
+      this.db,
+      targets,
+      (ph) => `SELECT message_id, keyword FROM message_keywords WHERE message_id IN (${ph})`,
+    );
+    const currentBy = new Map<string, Set<string>>();
+    for (const id of targets) currentBy.set(id, new Set());
+    for (const r of curRows) currentBy.get(String(r.message_id))?.add(String(r.keyword));
+
+    const mmRows = await queryInChunks(
+      this.db,
+      targets,
+      (ph) => `SELECT message_id, mailbox_id FROM message_mailbox WHERE message_id IN (${ph})`,
+    );
+    const mailboxesBy = new Map<string, string[]>();
+    for (const r of mmRows) {
+      const id = String(r.message_id);
+      const arr = mailboxesBy.get(id) ?? [];
+      arr.push(String(r.mailbox_id));
+      mailboxesBy.set(id, arr);
+    }
+
+    const addAll = [...new Set(input.add.map((k) => k.toLowerCase()))];
+    const removeSet = new Set(input.remove.map((k) => k.toLowerCase()));
+    const now = Date.now();
+    const nextModseq = acct.modseq + 1;
+
+    const changed: string[] = [];
+    const keywordRows: unknown[][] = [];
+    /** 메일함별 unread 델타 — 메시지마다 UPDATE를 내지 않고 합산해 한 번에 낸다. */
+    const unreadDelta = new Map<string, number>();
+    const touchedMailboxes = new Set<string>();
+    const removeStmts: Statement[] = [];
+
+    for (const id of targets) {
+      const current = currentBy.get(id) ?? new Set<string>();
+      // `replace`(STORE FLAGS)는 목표 집합 밖을 전부 지운다 — 단건 경로에서 호출자가 하던 계산이다.
+      const target = new Set(addAll);
+      const toRemove = input.replace
+        ? [...current].filter((k) => !target.has(k))
+        : [...removeSet].filter((k) => current.has(k));
+      const toAdd = addAll.filter((k) => !current.has(k) && !(input.replace ? false : removeSet.has(k)));
+      if (toAdd.length === 0 && toRemove.length === 0) continue; // 변화 없음 — modseq 소모하지 않는다
+
+      changed.push(id);
+      for (const k of toAdd) keywordRows.push([input.accountId, id, k]);
+      for (const removeChunk of chunk(toRemove, rowsPerStatement(1) - 1)) {
+        removeStmts.push({
+          sql: `DELETE FROM message_keywords WHERE message_id = ? AND keyword IN (${removeChunk.map(() => "?").join(", ")})`,
+          params: [id, ...removeChunk],
+        });
+      }
+
+      const wasSeen = current.has("$seen");
+      const isSeen = (wasSeen || toAdd.includes("$seen")) && !toRemove.includes("$seen");
+      const delta = wasSeen === isSeen ? 0 : isSeen ? -1 : 1;
+      for (const mbx of mailboxesBy.get(id) ?? []) {
+        touchedMailboxes.add(mbx);
+        if (delta !== 0) unreadDelta.set(mbx, (unreadDelta.get(mbx) ?? 0) + delta);
+      }
+    }
+    if (changed.length === 0) return { changed: [] };
+
+    const stmts: Statement[] = [
+      { sql: "INSERT INTO modseq_claims (account_id, modseq) VALUES (?, ?)", params: [input.accountId, nextModseq] },
+      ...removeStmts,
+      ...multiRowInsertStatements("message_keywords", ["account_id", "message_id", "keyword"], keywordRows),
+    ];
+    for (const idChunk of chunk(changed, rowsPerStatement(1) - 1)) {
+      stmts.push({
+        sql: `UPDATE messages SET modseq = ? WHERE id IN (${idChunk.map(() => "?").join(", ")})`,
+        params: [nextModseq, ...idChunk],
+      });
+    }
+    for (const id of changed) {
+      stmts.push({ sql: CHANGE_LOG_SQL, params: [input.accountId, nextModseq, ENTITY.Email, id, CHANGE_KIND.updated, now] });
+    }
+    for (const mbx of touchedMailboxes) {
+      const delta = unreadDelta.get(mbx) ?? 0;
+      stmts.push({ sql: CHANGE_LOG_SQL, params: [input.accountId, nextModseq, ENTITY.Mailbox, mbx, CHANGE_KIND.updated, now] });
+      stmts.push({
+        sql: `UPDATE mailboxes SET highestmodseq = ?${delta !== 0 ? ", unread_count = unread_count + ?" : ""} WHERE id = ?`,
+        params: delta !== 0 ? [nextModseq, delta, mbx] : [nextModseq, mbx],
+      });
+    }
+    stmts.push(
+      touchedMailboxes.size > 0
+        ? {
+            sql: "UPDATE accounts SET modseq = ?, state_email = ?, state_mailbox = ? WHERE id = ?",
+            params: [nextModseq, nextModseq, nextModseq, input.accountId],
+          }
+        : {
+            sql: "UPDATE accounts SET modseq = ?, state_email = ? WHERE id = ?",
+            params: [nextModseq, nextModseq, input.accountId],
+          },
+    );
+
+    await this.db.batch(stmts);
+    return { changed };
+  }
+
   // ── SetDeleted — \Deleted per-membership (§5-2) ─────────────────────
   async setDeleted(input: SetDeletedInput): Promise<void> {
     return this.writer.run(input.accountId, () => this.withRetry(() => this.setDeletedAttempt(input)));
@@ -1220,6 +1368,180 @@ export class Store {
     }
     await this.db.batch(stmts);
     return { destroyed: isLast };
+  }
+
+  /**
+   * 여러 메시지를 **한 배치**로 복사/이동한다 (IMAP `UID COPY`/`UID MOVE`).
+   *
+   * ★왜 필요한가(2026-08-23 검수): 예전엔 메시지마다 `copyMessage()`/`moveMessage()`를 불렀다.
+   * 왕복이 N번인 것보다 나쁜 것은 **원자성이 없다**는 점이다 — 중간에 실패하면 절반만 복사된
+   * 채로 `COPYUID`가 나갔다. CLAUDE.md §아키텍처("한 논리 연산 = db.batch() 한 번")와
+   * RFC 9051 §6.4.7("COPY가 실패하면 대상 메일함을 원상 복구해야 한다") 양쪽에 어긋난다.
+   *
+   * 대상 uid는 **사전 할당**한다(§1-2: RETURNING 금지). `appendMessages`가 그룹 안에서
+   * uid 커서를 이어 붙이는 것과 같은 방식이다.
+   *
+   * 반환은 `(원본 uid, 새 uid)` 쌍 목록이고 **입력 순서를 지킨다** — `COPYUID`의 두 uid-set이
+   * 위치로 대응하므로 순서가 어긋나면 클라이언트가 다른 메시지를 가리킨다.
+   */
+  async copyOrMoveMessages(input: {
+    accountId: string;
+    messageIds: readonly string[];
+    fromMailboxId: string;
+    toMailboxId: string;
+    op: "copy" | "move";
+  }): Promise<{ pairs: { messageId: string; uid: number }[] }> {
+    if (input.messageIds.length === 0) return { pairs: [] };
+    return this.writer.run(input.accountId, () => this.withRetry(() => this.copyOrMoveBatchAttempt(input)));
+  }
+
+  private async copyOrMoveBatchAttempt(input: {
+    accountId: string;
+    messageIds: readonly string[];
+    fromMailboxId: string;
+    toMailboxId: string;
+    op: "copy" | "move";
+  }): Promise<{ pairs: { messageId: string; uid: number }[] }> {
+    const acct = await this.mustGetAccount(input.accountId);
+    const ids = [...input.messageIds];
+
+    const { rows: toMbxRows } = await this.db.query({
+      sql: "SELECT uidnext FROM mailboxes WHERE id = ? AND account_id = ? AND status = 1",
+      params: [input.toMailboxId, input.accountId],
+    });
+    if (!toMbxRows[0]) throw new StoreError(`target mailbox not found: ${input.toMailboxId}`);
+    let uidCursor = Number(toMbxRows[0].uidnext);
+
+    // 크기·소유 — 계정 스코프로 함께 확인한다(인가 축).
+    const sizeRows = await queryInChunks(
+      this.db,
+      ids,
+      (ph) => `SELECT id, size_bytes FROM messages WHERE account_id = ? AND id IN (${ph})`,
+      [input.accountId],
+    );
+    const sizeBy = new Map(sizeRows.map((r) => [String(r.id), Number(r.size_bytes)]));
+
+    const srcRows = await queryInChunks(
+      this.db,
+      ids,
+      (ph) => `SELECT uid, message_id FROM message_mailbox WHERE mailbox_id = ? AND message_id IN (${ph})`,
+      [input.fromMailboxId],
+    );
+    const srcUidBy = new Map(srcRows.map((r) => [String(r.message_id), Number(r.uid)]));
+
+    // 대상에 이미 있으면 no-op이고 기존 uid를 돌려준다(§5-2 계약 — ux_mm_message 충돌 방지).
+    const dstRows = await queryInChunks(
+      this.db,
+      ids,
+      (ph) => `SELECT uid, message_id FROM message_mailbox WHERE mailbox_id = ? AND message_id IN (${ph})`,
+      [input.toMailboxId],
+    );
+    const existingBy = new Map(dstRows.map((r) => [String(r.message_id), Number(r.uid)]));
+
+    const seenRows = await queryInChunks(
+      this.db,
+      ids,
+      (ph) => `SELECT message_id FROM message_keywords WHERE keyword = '$seen' AND message_id IN (${ph})`,
+    );
+    const seenSet = new Set(seenRows.map((r) => String(r.message_id)));
+
+    const now = Date.now();
+    const nextModseq = acct.modseq + 1;
+    const pairs: { messageId: string; uid: number }[] = [];
+    const stmts: Statement[] = [];
+    const mmRows: unknown[][] = [];
+    const expungedRows: unknown[][] = [];
+    const touched: string[] = [];
+    let addCount = 0;
+    let addBytes = 0;
+    let addUnread = 0;
+    let delCount = 0;
+    let delBytes = 0;
+    let delUnread = 0;
+
+    for (const id of ids) {
+      const size = sizeBy.get(id);
+      const srcUid = srcUidBy.get(id);
+      if (size === undefined || srcUid === undefined) continue; // 소유가 아니거나 원본에 없다
+      const unread = seenSet.has(id) ? 0 : 1;
+
+      const existing = existingBy.get(id);
+      if (existing !== undefined) {
+        // 이미 대상에 있다 — 복사는 no-op. 이동이면 원본 멤버십만 걷어낸다.
+        pairs.push({ messageId: id, uid: existing });
+        if (input.op === "move") {
+          stmts.push({
+            sql: "DELETE FROM message_mailbox WHERE mailbox_id = ? AND uid = ?",
+            params: [input.fromMailboxId, srcUid],
+          });
+          expungedRows.push([input.fromMailboxId, srcUid, nextModseq, now]);
+          delCount += 1;
+          delBytes += size;
+          delUnread += unread;
+          touched.push(id);
+        }
+        continue;
+      }
+
+      const newUid = uidCursor++;
+      pairs.push({ messageId: id, uid: newUid });
+      mmRows.push([input.toMailboxId, newUid, id, now, 0]);
+      addCount += 1;
+      addBytes += size;
+      addUnread += unread;
+      touched.push(id);
+
+      if (input.op === "move") {
+        stmts.push({
+          sql: "DELETE FROM message_mailbox WHERE mailbox_id = ? AND uid = ?",
+          params: [input.fromMailboxId, srcUid],
+        });
+        expungedRows.push([input.fromMailboxId, srcUid, nextModseq, now]);
+        delCount += 1;
+        delBytes += size;
+        delUnread += unread;
+      }
+    }
+
+    if (touched.length === 0) return { pairs };
+
+    const batch: Statement[] = [
+      { sql: "INSERT INTO modseq_claims (account_id, modseq) VALUES (?, ?)", params: [input.accountId, nextModseq] },
+      ...stmts,
+      ...multiRowInsertStatements("message_mailbox", ["mailbox_id", "uid", "message_id", "savedate", "deleted"], mmRows),
+      ...multiRowInsertStatements("expunged", ["mailbox_id", "uid", "modseq", "created_at"], expungedRows),
+    ];
+    for (const idChunk of chunk([...new Set(touched)], rowsPerStatement(1) - 1)) {
+      batch.push({
+        sql: `UPDATE messages SET modseq = ? WHERE id IN (${idChunk.map(() => "?").join(", ")})`,
+        params: [nextModseq, ...idChunk],
+      });
+    }
+    for (const id of new Set(touched)) {
+      // ★destroyed 아님 — 메일함 이동·복사는 Email updated (§7-3)
+      batch.push({ sql: CHANGE_LOG_SQL, params: [input.accountId, nextModseq, ENTITY.Email, id, CHANGE_KIND.updated, now] });
+    }
+    if (addCount > 0) {
+      batch.push({
+        sql: `UPDATE mailboxes SET uidnext = ?, total_count = total_count + ?, total_bytes = total_bytes + ?, unread_count = unread_count + ?, highestmodseq = ? WHERE id = ?`,
+        params: [uidCursor, addCount, addBytes, addUnread, nextModseq, input.toMailboxId],
+      });
+      batch.push({ sql: CHANGE_LOG_SQL, params: [input.accountId, nextModseq, ENTITY.Mailbox, input.toMailboxId, CHANGE_KIND.updated, now] });
+    }
+    if (delCount > 0) {
+      batch.push({
+        sql: `UPDATE mailboxes SET total_count = total_count - ?, total_bytes = total_bytes - ?, unread_count = unread_count - ?, highestmodseq = ? WHERE id = ?`,
+        params: [delCount, delBytes, delUnread, nextModseq, input.fromMailboxId],
+      });
+      batch.push({ sql: CHANGE_LOG_SQL, params: [input.accountId, nextModseq, ENTITY.Mailbox, input.fromMailboxId, CHANGE_KIND.updated, now] });
+    }
+    batch.push({
+      sql: "UPDATE accounts SET modseq = ?, state_email = ?, state_mailbox = ? WHERE id = ?",
+      params: [nextModseq, nextModseq, nextModseq, input.accountId],
+    });
+
+    await this.db.batch(batch);
+    return { pairs };
   }
 
   /** 메시지 전체 파기 (JMAP Email/destroy) — 모든 멤버십 제거 + 메시지 파기. */
