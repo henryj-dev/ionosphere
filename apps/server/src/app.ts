@@ -1,5 +1,5 @@
 /** 올인원 서버 조립 — DB/블롭/스토어/프로토콜 리스너를 한 프로세스로 (PLAN.md §4). */
-import { AuthFailureThrottle, MAX_MESSAGE_BYTES, noopAuditSink, noopLogger, ulid, type AuditSink, type Logger } from "@ionosphere/core";
+import { AuthFailureThrottle, PeerConnectionLimiter, MAX_MESSAGE_BYTES, noopAuditSink, noopLogger, ulid, type AuditSink, type Logger } from "@ionosphere/core";
 import { allMigrations, describeDbSpec, migrate, MTA_QUEUE_STATUS, openDatabase, type DbDriver } from "@ionosphere/db";
 import {
   authenticate,
@@ -503,6 +503,11 @@ export class IonosphereApp {
    * 사고다). 공통 값은 여기서 한 번 만들어 주입한다.
    */
   readonly authThrottle: AuthFailureThrottle;
+  /**
+   * IP 프리픽스별 동시 연결 상한 — `authThrottle`과 **같은 이유로 하나를 공유한다**.
+   * 리스너마다 새로 만들면 "IP당 N개"가 리스너 수만큼 곱해진다.
+   */
+  private readonly peerLimit = new PeerConnectionLimiter();
   db!: DbDriver;
   store!: Store;
   blobs!: BlobStore;
@@ -1004,6 +1009,7 @@ export class IonosphereApp {
     if (smtpListener) {
       this.smtp = new SmtpServer({
         authThrottle: this.authThrottle,
+        peerLimit: this.peerLimit,
         audit: this.audit,
         hostname: this.opts.hostname,
         maxSizeBytes,
@@ -1021,6 +1027,7 @@ export class IonosphereApp {
     if (pop3Listener) {
       this.pop3 = new Pop3Server({
         authThrottle: this.authThrottle,
+        peerLimit: this.peerLimit,
         audit: this.audit,
         hostname: this.opts.hostname,
         backend: new IonospherePop3Backend(this.db, this.store, this.blobs, ctx.log, this.maildropLock),
@@ -1041,6 +1048,7 @@ export class IonosphereApp {
     if (pop3sListener && pop3sTls) {
       this.pop3s = new Pop3Server({
         authThrottle: this.authThrottle,
+        peerLimit: this.peerLimit,
         audit: this.audit,
         hostname: this.opts.hostname,
         backend: new IonospherePop3Backend(this.db, this.store, this.blobs, ctx.log, this.maildropLock),
@@ -1070,6 +1078,7 @@ export class IonosphereApp {
       const imapBackend = new IonosphereImapBackend(this.db, this.store, this.blobs, ctx.log);
       this.imap = new ImapServer({
         authThrottle: this.authThrottle,
+        peerLimit: this.peerLimit,
         audit: this.audit,
         hostname: this.opts.hostname,
         backend: imapBackend,
@@ -1090,6 +1099,7 @@ export class IonosphereApp {
       if (imapsListener && imapsTls) {
         this.imaps = new ImapServer({
           authThrottle: this.authThrottle,
+          peerLimit: this.peerLimit,
           audit: this.audit,
           hostname: this.opts.hostname,
           backend: imapBackend,
@@ -1166,6 +1176,7 @@ export class IonosphereApp {
     if (submissionListener) {
       this.submission = new SmtpServer({
         authThrottle: this.authThrottle,
+        peerLimit: this.peerLimit,
         audit: this.audit,
         hostname: this.opts.hostname,
         maxSizeBytes,
@@ -1185,6 +1196,7 @@ export class IonosphereApp {
     if (smtpsListener && smtpsTls) {
       this.smtps = new SmtpServer({
         authThrottle: this.authThrottle,
+        peerLimit: this.peerLimit,
         audit: this.audit,
         hostname: this.opts.hostname,
         maxSizeBytes,

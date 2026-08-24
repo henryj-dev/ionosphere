@@ -80,6 +80,7 @@ export {
 } from "./scram.ts";
 export { ScramServerSession, type ScramStep, type ScramStoredKeys } from "./scram-session.ts";
 export { applyLegacyEnvAliases, LegacyEnvConflictError } from "./env-legacy.ts";
+export { PeerConnectionLimiter, DEFAULT_MAX_CONNECTIONS_PER_PEER } from "./peer-limit.ts";
 export {
   compileGlob,
   globMatch,

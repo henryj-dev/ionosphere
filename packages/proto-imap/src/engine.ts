@@ -680,14 +680,25 @@ export class ImapEngine {
       if (res.kind === "no") return [ImapEngine.noReply(cmd.tag, verb, res)];
       if (res.kind !== "mailboxes") return [{ kind: "reply", text: `${cmd.tag} NO ${verb} failed` }];
       const actions: ImapAction[] = [];
-      const names = new Set(res.mailboxes.map((m) => m.name));
+      /**
+       * `\HasChildren` 판정용 **부모 경로 집합**.
+       *
+       * ★예전엔 메일함마다 `[...names].some((n) => n.startsWith(m.name + "/"))`였다 —
+       * Set을 배열로 복사하고 전체를 훑으므로 O(N²)이고, 1000개면 100만 연산 + 배열 1000개다.
+       * 각 이름의 조상 경로를 한 번만 모아 두면 판정이 조회 한 번(O(1))이 된다.
+       */
+      const parents = new Set<string>();
+      for (const m of res.mailboxes) {
+        const segs = m.name.split(HIERARCHY_DELIMITER);
+        for (let i = 1; i < segs.length; i++) parents.add(segs.slice(0, i).join(HIERARCHY_DELIMITER));
+      }
       for (const m of res.mailboxes) {
         if (!matches(m.name)) continue;
         if (verb === "LSUB" && m.subscribed === false) continue; // 구독 필터(영속화됨)
         const attrs: string[] = [];
         const special = roleToAttribute(m.role);
         if (special) attrs.push(special);
-        const hasChildren = [...names].some((n) => n.startsWith(m.name + HIERARCHY_DELIMITER));
+        const hasChildren = parents.has(m.name);
         attrs.push(hasChildren ? "\\HasChildren" : "\\HasNoChildren");
         if (returnSubscribed && m.subscribed !== false) attrs.push("\\Subscribed");
         actions.push({

@@ -94,6 +94,9 @@ const AUTH_CACHE_TTL_MS = 30_000;
 /** 동시에 열어 둘 수 있는 EventSource 스트림 수 — 각각이 주기 DB 폴링을 만든다. */
 const MAX_SSE_CONNECTIONS = 256;
 
+/** 인증 결과 캐시 상한 — 넘치면 만료분을 쓸고, 그래도 넘치면 삽입 순서로 버린다. */
+const MAX_AUTH_CACHE = 10_000;
+
 /**
  * 인증 결과.
  *
@@ -396,10 +399,21 @@ export class JmapServer {
     const email = user.toLowerCase();
     this.authCache.set(cacheKey, { accountId: result.accountId, email, expiresAt: now + AUTH_CACHE_TTL_MS });
 
-    // 만료 엔트리는 다음 접근에서 지워지지만, 실패한 키가 쌓이진 않으므로(성공만 넣는다)
-    // 무한 증식하려면 유효 자격증명이 그만큼 있어야 한다. 상한을 하나 더 두어 방어한다.
-    if (this.authCache.size > 10_000) {
+    /**
+     * 상한 방어. 성공만 캐시하므로 무한 증식하려면 유효 자격증명이 그만큼 있어야 하지만,
+     * 상한은 그 가정이 틀렸을 때를 위한 것이다.
+     *
+     * ★예전엔 **만료된 것만** 지웠다. 유효 엔트리가 1만을 넘으면 루프가 아무것도 지우지 않고
+     * 맵은 계속 자란다 — 가드로서 성립하지 않았다. 만료분을 먼저 쓸고, 그래도 넘치면
+     * 삽입 순서로 버린다(Map은 삽입 순서를 보존한다 — `worker.ts mtaStsCache`와 같은 형태).
+     */
+    if (this.authCache.size > MAX_AUTH_CACHE) {
       for (const [k, v] of this.authCache) if (v.expiresAt <= now) this.authCache.delete(k);
+      while (this.authCache.size > MAX_AUTH_CACHE) {
+        const oldest = this.authCache.keys().next();
+        if (oldest.done) break;
+        this.authCache.delete(oldest.value);
+      }
     }
     return { ok: true, accountId: result.accountId, email, credKind: result.credKind, cached: false };
   }

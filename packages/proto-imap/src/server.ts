@@ -12,6 +12,7 @@ import {
   AUDIT_SURFACE,
   AuthFailureThrottle,
   MAX_LISTENER_CONNECTIONS,
+  PeerConnectionLimiter,
   noopAuditSink,
   normalizeIp,
   trackListener,
@@ -50,6 +51,11 @@ export interface ImapServerOptions {
    * 생략 시 자체 인스턴스를 만든다 — 이 서버를 단독으로 쓰는 테스트가 깨지지 않게 하기 위해서다.
    */
   authThrottle?: AuthFailureThrottle;
+  /**
+   * IP 프리픽스별 동시 연결 상한 — 조립층이 만든 **하나**를 모든 리스너가 공유해야 한다.
+   * 전역 상한(MAX_LISTENER_CONNECTIONS)만으로는 한 주소가 혼자 소진할 수 있다.
+   */
+  peerLimit?: PeerConnectionLimiter;
 
   hostname: string;
   backend: ImapBackend;
@@ -134,6 +140,12 @@ export class ImapServer {
   private boundHost: string | undefined = undefined;
   /** IP별 인증 실패 스로틀 — 연결 간에 공유해야 재접속 반복을 막는다. */
   private readonly authThrottle: AuthFailureThrottle;
+  /**
+   * IP 프리픽스별 동시 연결 상한 — **조립층이 하나를 만들어 모든 리스너에 넘긴다.**
+   * 리스너마다 새로 만들면 "IP당 N개"가 리스너 수만큼 곱해진다(authThrottle과 같은 이유).
+   * 생략 시 자체 인스턴스 — 단독 사용 테스트가 깨지지 않게.
+   */
+  private readonly peerLimit: PeerConnectionLimiter;
   /** 접근 감사 싱크 — 미주입 시 no-op(호출부가 `?.`를 쓰지 않게). */
   private readonly audit: AuditSink;
 
@@ -141,6 +153,7 @@ export class ImapServer {
     this.opts = opts;
     // 조립층이 넘긴 공유 인스턴스를 쓴다(M-4). 단독 사용 시에만 자체 인스턴스.
     this.authThrottle = opts.authThrottle ?? new AuthFailureThrottle();
+    this.peerLimit = opts.peerLimit ?? new PeerConnectionLimiter();
     this.audit = opts.audit ?? noopAuditSink;
     this.isTls = opts.tls !== undefined;
     // 암시적 TLS면 그 자재를, 평문이면 STARTTLS용 자재를 든다. 둘 다 핫리로드 대상이다.
@@ -218,6 +231,17 @@ export class ImapServer {
   }
 
   private handleConnection(rawSocket: net.Socket, secure: boolean): void {
+    /**
+     * IP 프리픽스별 동시 연결 상한 — 전역 상한(MAX_LISTENER_CONNECTIONS)만으로는
+     * **한 주소가 혼자 소진**할 수 있어 정상 사용자도 접속하지 못한다(peer-limit.ts).
+     * 자리를 못 잡으면 즉시 끊는다 — 이미 붙은 세션은 건드리지 않는다.
+     */
+    if (!this.peerLimit.tryAcquire(rawSocket.remoteAddress)) {
+      rawSocket.destroy();
+      return;
+    }
+    rawSocket.once("close", () => this.peerLimit.release(rawSocket.remoteAddress));
+
     const engine = new ImapEngine({
       hostname: this.opts.hostname,
       secure,
