@@ -36,3 +36,7 @@ sqlite::memory:*
 # **범위 안** 목록(파서 CPU 고갈 · 미인증 원격 서비스 정지)에 해당한다.
 # 보존이 필요하면 비공개 운영 저장소로 옮길 것.
 docs/AUDIT-*.md
+
+# 에이전트 워크트리 체크아웃(scripts/claude-hooks/enter-worktree.py). 빠지면 체크아웃이
+# 자기 자신을 추적한다.
+.claude/worktrees/

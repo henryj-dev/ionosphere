@@ -122,3 +122,37 @@ IONOSPHERE_HOST="<MX>" ./scripts/live-activate.sh           # env·백업 타이
 호스트의 `nft`로 열 수 없다. **리스너가 떠 있는 것과 닿는 것은 다른 사실이다.**
 
 마이그레이션이 포함된 배포 전에는 DB 백업(`scripts/backup.sh`). 상세는 `docs/STATUS.md` §4.
+
+## 에이전트는 워크트리, 사람은 메인에서 작업
+
+**에이전트**의 `Edit`/`Write`/트리 변경 git 명령은 메인 작업 트리에서 **항상 거부**된다.
+단독 세션이어도 같다. **사람은 메인에서 수정·커밋·push 할 수 있다** — git `pre-commit`은
+에이전트 하네스 환경 변수가 있을 때만 메인 커밋을 막는다.
+
+작업 흐름:
+
+    # 하네스 전용 도구가 있으면 그것을 쓰고, 없으면 모든 에이전트 공통 생성기:
+    python3 scripts/claude-hooks/enter-worktree.py <이름>
+    # 출력된 .claude/worktrees/<이름> 경로에서 작업·커밋
+    ln -s ../../../node_modules node_modules   # 워크트리엔 의존성이 없다 (.claude/worktree-bootstrap.md)
+    npm run verify
+    git fetch origin && git rebase origin/main && git push origin HEAD:main
+
+**대화(작업 사이클)가 끝났다고 선언하려면 이 push까지 끝나 있어야 한다 — 그것이 곧
+「메인 브랜치로 머지」다.** 별도의 병합 절차는 없다. 워크트리에 커밋만 남기고 push를
+미루면 그 사이클은 아직 메인에 반영되지 않은 것이다.
+⚠ **이 저장소는 main 푸시가 곧 라이브 배포다**(3대 자동 배포). push 전에 `npm run verify`가
+통과해 있어야 하고, 마이그레이션이 포함되면 §라이브 배포의 백업 절차를 먼저 밟는다.
+
+메인은 세션 시작·종료에 자동 fast-forward된다 — 다만 이건 안전망일 뿐, **사용자는
+기다리지 않고 언제든 메인 트리에서 직접 `git pull`(ff-only)을 받아도 된다.**
+에이전트가 메인에서 통과하는 것: `Read`·`Grep`·`git status|log|diff|pull|fetch`,
+그리고 `worktree list|remove|prune`·`stash list`·`tag -l` 같은 읽기·회수 계열.
+**임의 `git worktree add`는 계속 거부된다** — 생성기를 거쳐야 소유자가 기록되고
+종료·다음 시작에 자동 회수된다.
+에이전트가 정말 메인에서 해야 하면 `touch .git/claude-main-tree-rescue`
+(30분 TTL, **사용자 승인 후에만**). 사람은 이 파일이 필요 없다.
+
+이 장치가 못 하는 것: 세 층 다 내부 오류 시 **통과**시키고(fail-open),
+`git commit --no-verify`로 우회되며, `core.hooksPath`를 안 세운 클론에서는 git 층이 안 돈다
+(머신마다 한 번 `bash scripts/git-hooks/install.sh`). **경계가 아니라 위생 장치다.**

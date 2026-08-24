@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""메인 작업 트리에서 **에이전트**의 커밋을 막는다 — **도구 중립** 층.
+
+**왜 있나.** Claude 의 `main-tree-guard.py` 는 `PreToolUse` 훅이라 **그 하네스의 툴
+호출에만** 걸린다. codex·Grok·다른 에이전트는 그 층을 안 거칠 수 있다. 2026-08-15
+실측으로 `.git/hooks/` 는 **비어 있었고**(모든 도구에 걸리는 층이 하나도 없었다),
+codex 가 만든 워크트리는 소유자 기록조차 없었다. 이 훅은 **git 자신이 부르므로**
+어느 하네스가 `git commit` 을 하든 걸린다.
+
+막는 이유는 `AGENTS.md` §2-1 과 같다 — 여러 에이전트 세션이 같은 작업 트리를 쓰면
+인덱스가 공유 자원이 되어 남의 미완성 변경이 내 커밋에 딸려 들어간다(2026-08-13~14
+에 네 번). `dispatcher/**`·`dashboard/**` 가 섞이면 **GHA 가 그대로 빌드·배포**한다.
+
+**사람은 통과한다** (2026-08-19). 개발자가 메인에서 직접 수정·커밋·push 하는 것은
+이 훅의 대상이 아니다. 에이전트만 워크트리로 보낸다. 가르는 신호는 **하네스가 툴
+서브프로세스에 심는 환경 변수**다. 접두사로 넓히지 말 것 — `GROK_HOME` 이나
+`CLAUDE_CONFIG_DIR` 는 설치이지, 이번 커밋의 주체가 에이전트라는 뜻이 아니다.
+
+조상 프로세스는 보지 않는다. 검사를 에이전트 세션에서 돌리면 python 의 조상이
+그 하네스라, 「사람 커밋」 픽스처와 「에이전트 커밋」 픽스처를 **구조적으로** 못
+가른다. 변수가 없는 새 하네스는 이 층을 통과한다 — PreToolUse 가 없으면 메인을
+쓸 수 있고, 그때는 변수를 **이 목록에 추가**하는 것이 닫는 방법이다.
+
+⚠️ **한계 — 이것을 「경계」로 읽지 말 것.**
+  1. `git commit --no-verify` 로 우회된다. git 설계상 막을 수 없다.
+  2. `core.hooksPath` 를 이 디렉토리로 설정한 클론에서만 돈다 → `scripts/git-hooks/install.sh`.
+     **설정 안 한 머신에서는 아무 일도 안 일어난다.**
+  3. **커밋 시점에만** 막는다. 에이전트의 편집 자체는 PreToolUse 가드의 몫이다.
+  4. 목록에 없는 하네스는 사람으로 본다.
+
+구제 통로는 가드와 **같은 파일**을 쓴다 — `<git-common-dir>/claude-main-tree-rescue`,
+30분 TTL. 통로를 하나로 두어야 「어느 쪽을 껐더라」가 안 생긴다. 사람이 아니라
+**에이전트가** 메인 잔재를 커밋해야 할 때 쓴다.
+
+fail-open: 내부 오류가 나면 통과시킨다. 훅 버그로 모든 커밋이 막히는 것이 더 나쁘다.
+"""
+import os
+import subprocess
+import sys
+
+RESCUE = "claude-main-tree-rescue"
+RESCUE_TTL = 1800
+
+# 하네스가 툴 서브프로세스에 심는 변수만. 설치/설정 변수는 넣지 않는다.
+AGENT_ENV = (
+    "CLAUDE_PROJECT_DIR",
+    "CLAUDE_CODE",
+    "CLAUDE_SESSION_ID",
+    # 2026-08-23 실측: 위 두 이름은 이 층이 노리는 하네스가 **실제로는 안 심는다.**
+    # Claude Code 의 Bash 툴 서브프로세스에서 `printenv` 로 재면 여덟 개가 전부
+    # 비어 있고, 대신 `CLAUDECODE=1` 과 `CLAUDE_CODE_SESSION_ID` 가 있다. 한 끗
+    # 차이라 목록이 맞는 것처럼 보였고, 그래서 git 층이 Claude 세션을 **사람으로
+    # 분류**하고 있었다 — PreToolUse 가 fail-open 하면 받쳐 줄 것이 없는 상태.
+    # 위 두 개는 남긴다: 다른 빌드가 심을 수 있고, 목록에 더 있어서 손해는 없다.
+    "CLAUDECODE",
+    "CLAUDE_CODE_SESSION_ID",
+    "GROK_AGENT",
+    "GROK_SESSION_ID",
+    "CODEX_THREAD_ID",
+    "CODEX_SANDBOX",
+    "CURSOR_AGENT",
+)
+
+DENY = """\x1b[31m에이전트는 메인 작업 트리에서 커밋할 수 없습니다.\x1b[0m
+
+이 저장소는 여러 에이전트 세션이 같은 작업 트리를 공유합니다. 여기서 커밋하면
+인덱스가 공유 자원이라 남의 미완성 변경이 함께 들어갑니다. CI 가 붙어 있으면
+그것이 그대로 빌드·배포됩니다.
+
+사람은 메인에서 수정·커밋해도 됩니다. 이 거부는 에이전트 하네스 환경({hint})
+에서만 발화합니다.
+
+→ 워크트리에서 작업하십시오:
+     git worktree add .claude/worktrees/<이름> -b <브랜치> {base}
+     cd .claude/worktrees/<이름>
+   끝나면:
+     git fetch origin && git rebase {base} && git push origin HEAD:{branch}
+
+에이전트가 정말 메인에서 해야 하면:  touch "{rescue}"   (30분 후 자동 만료)
+자세한 규칙: AGENTS.md (워크트리 격리)"""
+
+
+def git(*args):
+    r = subprocess.run(("git",) + args, capture_output=True, text=True)
+    return r.returncode, r.stdout.strip()
+
+
+def from_agent():
+    return any(os.environ.get(k) for k in AGENT_ENV)
+
+
+def agent_hint():
+    return ", ".join(k for k in AGENT_ENV if os.environ.get(k)) or "unknown"
+
+
+def main():
+    # 워크트리는 자기 git-dir 을 갖고, 메인 트리만 git-dir == git-common-dir 이다.
+    # ⚠️ 이 판정은 「어느 저장소든 메인 트리」에 참이지만, **git 훅은 자기 저장소에서만
+    #    불리므로** 여기서는 그 오판이 성립하지 않는다(가드 쪽은 세션 cwd 를 받기 때문에
+    #    target/ 남의 저장소까지 걸렸고, 그래서 판정을 좁혀야 했다 — 상황이 다르다).
+    rc1, gd = git("rev-parse", "--path-format=absolute", "--git-dir")
+    rc2, gc = git("rev-parse", "--path-format=absolute", "--git-common-dir")
+    if rc1 or rc2 or not gd or not gc:
+        return 0                                  # 판정 불가 — 통과시킨다(fail-open)
+    if os.path.realpath(gd) != os.path.realpath(gc):
+        return 0                                  # 워크트리다 — 자유 (사람·에이전트)
+
+    rescue = os.path.join(gc, RESCUE)
+    try:
+        import time
+        if time.time() - os.path.getmtime(rescue) < RESCUE_TTL:
+            print("⚠️  구제 모드로 메인 트리에 커밋합니다 (30분 TTL)", file=sys.stderr)
+            return 0
+        os.remove(rescue)                         # 만료된 것은 치운다
+    except Exception:
+        pass
+
+    if not from_agent():
+        return 0                                  # 사람 — 메인 커밋 허용
+
+    # 기준은 **묻는다.** 적어 두면 이식한 클론에서 메세지가 거짓말을 한다. 그리고 묻는
+    # 대상은 `origin/HEAD` 가 아니라 **지금 올라가 있는 브랜치**다 — 기본 브랜치로 적으면
+    # feature 브랜치를 쓰는 레포에서 「그 작업을 버리고 기본 브랜치로 push 하라」가 된다
+    # (2026-08-17 barycenter: 그 브랜치에만 177 커밋, origin 에 없음, 메세지는 `HEAD:main`).
+    # 업스트림이 없으면 로컬 팁에서 딴다. 모르면 자리표시자를 남긴다.
+    # push 대상은 로컬 이름이 아니라 `branch.<n>.merge` 의 원격 쪽 이름이다 — 다를 수 있고
+    # (`push -u origin feat:feat-remote`), 로컬 이름으로 적으면 원격에 갈라진 브랜치를 만든다.
+    # unborn HEAD 에서는 `symbolic-ref` 가 **성공하지만** 그 ref 는 아직 없으므로 따로 본다.
+    rc, _ = git("rev-parse", "--verify", "--quiet", "HEAD")
+    rc, branch = git("symbolic-ref", "--short", "HEAD") if not rc else (1, "")
+    branch = "" if rc else branch
+    if branch:
+        rc, base = git("rev-parse", "--abbrev-ref", "@{u}")
+        base = branch if rc or not base else base
+        rc, merge = git("config", "--get", f"branch.{branch}.merge")
+        if not rc and merge.startswith("refs/heads/"):
+            branch = merge[len("refs/heads/"):]
+    else:
+        rc, base = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+        base = "" if rc else base
+        branch = base.split("/", 1)[1] if "/" in base else ""
+    print(DENY.format(rescue=rescue,
+                      hint=agent_hint(),
+                      base=base or "origin/<기준브랜치>",
+                      branch=branch or "<대상브랜치>"), file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        sys.exit(0)                               # fail-open
