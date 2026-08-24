@@ -68,21 +68,23 @@ function worker(db: DbDriver, port: number, concurrency?: number): MtaWorker {
 }
 
 describe("워커 동시 발송", () => {
-  /**
-   * 서로 다른 도메인 8개 × 각 100ms. 직렬이면 800ms, 병렬이면 그 한참 아래다.
-   * 값을 빡빡하게 잡으면 CI에서 흔들리므로 "직렬보다 확실히 빠르다"만 본다.
-   */
+  /** 서로 다른 도메인 8개 × 각 100ms — 직렬이면 상대가 동시 접속을 하나도 못 본다. */
   test("서로 다른 도메인은 병렬로 처리한다", async () => {
     const db = await freshDb();
     const peer = await startPeer(100);
     for (let d = 0; d < 8; d++) await seed(db, `d${d}.test`, 1);
 
-    const started = Date.now();
     const n = await worker(db, peer.port, 8).tick();
-    const elapsed = Date.now() - started;
 
     expect(n).toBe(8);
-    expect(elapsed < 500).toBe(true); // 직렬이면 800ms 이상이다
+    /**
+     * ★**동시 접속 수**로 본다. 예전엔 월클럭(`elapsed < 500`)으로 판정했는데, 그건 "병렬인가"가
+     * 아니라 "이 머신이 지금 한가한가"를 재는 것이라 전체 스위트를 함께 돌리면 병렬인데도
+     * 임계값을 넘어 실패했다(2026-08-24 실측: 단독 통과, 전체 스위트에서 실패).
+     * 상대 서버가 세는 동시 접속 최고치가 이 테스트가 실제로 주장하려는 성질이고,
+     * 부하와 무관하다 — 바로 아래 "같은 도메인" 테스트가 이미 같은 지표를 쓴다.
+     */
+    expect(peer.peakConcurrent()).toBeGreaterThan(1);
     await db.close();
   });
 

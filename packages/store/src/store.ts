@@ -93,6 +93,12 @@ import { WriterQueue } from "./writer-queue.ts";
 /** Store.search() 기본 결과 상한. */
 const DEFAULT_SEARCH_LIMIT = 50;
 
+/**
+ * COPY 사본의 검색 부산물을 한 배치에 몇 문장까지 실을지. 토큰 하나가 문장 하나라
+ * 큰 메일 여러 통이면 수천 문장이 되고, 그게 한 트랜잭션이면 라이터를 그만큼 붙잡는다.
+ */
+const COPY_ARTIFACT_STATEMENTS_PER_BATCH = 256;
+
 const BLOB_UPSERT_COLUMNS = ["id", "size_bytes", "backend", "status", "generation", "created_at"] as const;
 
 /**
@@ -1407,6 +1413,24 @@ export class Store {
    *
    * 반환은 `(원본 uid, 새 uid)` 쌍 목록이고 **입력 순서를 지킨다** — `COPYUID`의 두 uid-set이
    * 위치로 대응하므로 순서가 어긋나면 클라이언트가 다른 메시지를 가리킨다.
+   *
+   * ## ★COPY는 **독립된 메시지**를 만든다 (2026-08-24, 감사 G2)
+   *
+   * 예전엔 같은 `message_id`로 `message_mailbox` 행만 더했다. 결과가 두 가지로 틀렸다:
+   *  · 사본과 원본이 `message_keywords`를 **공유**해서, 한쪽에서 `\Seen`을 달면 다른 쪽도
+   *    읽음이 됐다. RFC 9051 §6.4.7은 사본이 독립 플래그를 갖기를 요구한다.
+   *  · `ux_mm_message(mailbox_id, message_id)` 때문에 **같은 메일함으로의 COPY가 조용한
+   *    no-op**이었다. 클라이언트는 `COPYUID`로 성공을 받고 사본이 없는 것을 나중에 안다.
+   *
+   * 이제 copy는 `messages` 행을 새로 만들고 키워드·주소·검색 부산물을 복제한다. 블롭은
+   * **공유하되** `blob_refs`에 참조를 하나 더 단다 — 원본을 지워도 사본의 원문이 남아야 한다.
+   *
+   * ★MOVE는 그대로 멤버십 이동이다. 이동은 "같은 메시지가 다른 자리로" 가는 것이라 새 행을
+   * 만들 이유가 없고, 만들면 uid만 바뀌어야 할 자리에서 JMAP `Email` id까지 바뀐다.
+   *
+   * ★JMAP의 `copyMessage()`는 **바꾸지 않았다.** JMAP의 Email 모델에서는 키워드가 메시지의
+   * 속성이고 한 Email이 여러 메일함에 속한다(RFC 8621 §4) — 거기서는 멤버십 추가가 맞다.
+   * 두 표면이 다른 것은 **규격이 다르기 때문**이지 갈라진 것이 아니다.
    */
   async copyOrMoveMessages(input: {
     accountId: string;
@@ -1436,14 +1460,21 @@ export class Store {
     if (!toMbxRows[0]) throw new StoreError(`target mailbox not found: ${input.toMailboxId}`);
     let uidCursor = Number(toMbxRows[0].uidnext);
 
-    // 크기·소유 — 계정 스코프로 함께 확인한다(인가 축).
-    const sizeRows = await queryInChunks(
+    /**
+     * 크기·소유 — 계정 스코프로 함께 확인한다(인가 축).
+     *
+     * copy는 `messages` 행을 새로 만들므로 **모든 컬럼**이 필요하다. move는 크기만 쓰지만
+     * 질의를 둘로 나누면 두 갈래가 서로 다른 스냅샷을 볼 수 있어 한 번에 읽는다.
+     */
+    const srcMsgRows = await queryInChunks(
       this.db,
       ids,
-      (ph) => `SELECT id, size_bytes FROM messages WHERE account_id = ? AND id IN (${ph})`,
+      (ph) => `SELECT id, blob_id, thread_id, size_bytes, received_at, subject, subject_base, msgid_hash, sent_at, preview, has_attachment
+                 FROM messages WHERE account_id = ? AND id IN (${ph})`,
       [input.accountId],
     );
-    const sizeBy = new Map(sizeRows.map((r) => [String(r.id), Number(r.size_bytes)]));
+    const srcMsgBy = new Map(srcMsgRows.map((r) => [String(r.id), r]));
+    const sizeBy = new Map(srcMsgRows.map((r) => [String(r.id), Number(r.size_bytes)]));
 
     const srcRows = await queryInChunks(
       this.db,
@@ -1453,21 +1484,64 @@ export class Store {
     );
     const srcUidBy = new Map(srcRows.map((r) => [String(r.message_id), Number(r.uid)]));
 
-    // 대상에 이미 있으면 no-op이고 기존 uid를 돌려준다(§5-2 계약 — ux_mm_message 충돌 방지).
-    const dstRows = await queryInChunks(
-      this.db,
-      ids,
-      (ph) => `SELECT uid, message_id FROM message_mailbox WHERE mailbox_id = ? AND message_id IN (${ph})`,
-      [input.toMailboxId],
-    );
-    const existingBy = new Map(dstRows.map((r) => [String(r.message_id), Number(r.uid)]));
+    /**
+     * MOVE에서만 의미가 있다 — 이미 대상에 있는 메시지는 원본 멤버십만 걷어내면 된다.
+     *
+     * ★COPY는 이 표를 보지 않는다. 사본이 **새 message_id**를 갖게 된 뒤로는 `ux_mm_message`가
+     * 걸릴 일이 없고, 같은 메일함으로의 COPY도 규격대로 사본을 하나 더 만든다(§6.4.7).
+     * 예전엔 여기서 no-op으로 빠져 클라이언트가 성공을 받고도 사본이 없었다.
+     */
+    const existingBy =
+      input.op === "move"
+        ? new Map(
+            (
+              await queryInChunks(
+                this.db,
+                ids,
+                (ph) => `SELECT uid, message_id FROM message_mailbox WHERE mailbox_id = ? AND message_id IN (${ph})`,
+                [input.toMailboxId],
+              )
+            ).map((r) => [String(r.message_id), Number(r.uid)]),
+          )
+        : new Map<string, number>();
 
-    const seenRows = await queryInChunks(
+    /**
+     * copy는 키워드를 **전부** 복제해야 하고(사본이 원본의 플래그를 그대로 갖고 시작한다,
+     * §6.4.7), move는 `$seen` 여부만 있으면 된다(메일함 unread 카운터). 둘 다 필요하므로
+     * 한 번에 읽어 copy는 전량을, move는 `$seen`만 쓴다.
+     */
+    const kwRows = await queryInChunks(
       this.db,
       ids,
-      (ph) => `SELECT message_id FROM message_keywords WHERE keyword = '$seen' AND message_id IN (${ph})`,
+      (ph) => `SELECT message_id, keyword FROM message_keywords WHERE account_id = ? AND message_id IN (${ph})`,
+      [input.accountId],
     );
-    const seenSet = new Set(seenRows.map((r) => String(r.message_id)));
+    const keywordsBy = new Map<string, string[]>();
+    for (const r of kwRows) {
+      const id = String(r.message_id);
+      const list = keywordsBy.get(id);
+      if (list) list.push(String(r.keyword));
+      else keywordsBy.set(id, [String(r.keyword)]);
+    }
+    const seenSet = new Set(kwRows.filter((r) => String(r.keyword) === "$seen").map((r) => String(r.message_id)));
+
+    // copy는 주소도 복제한다 — 없으면 사본의 ENVELOPE·JMAP Email에서 발신/수신자가 사라진다.
+    const addrRows =
+      input.op === "copy"
+        ? await queryInChunks(
+            this.db,
+            ids,
+            (ph) => `SELECT message_id, kind, pos, name, email FROM message_addresses WHERE account_id = ? AND message_id IN (${ph})`,
+            [input.accountId],
+          )
+        : [];
+    const addrBy = new Map<string, typeof addrRows>();
+    for (const r of addrRows) {
+      const id = String(r.message_id);
+      const list = addrBy.get(id);
+      if (list) list.push(r);
+      else addrBy.set(id, [r]);
+    }
 
     const now = Date.now();
     const nextModseq = acct.modseq + 1;
@@ -1475,7 +1549,18 @@ export class Store {
     const stmts: Statement[] = [];
     const mmRows: unknown[][] = [];
     const expungedRows: unknown[][] = [];
+    /** modseq를 올려 줄 **기존** 메시지들(move 대상). copy의 새 행은 처음부터 nextModseq다. */
     const touched: string[] = [];
+    /** copy가 만드는 새 메시지들 — 아래 배치에서 행·참조·키워드·주소를 함께 넣는다. */
+    const copiedIds: string[] = [];
+    const msgRowsToInsert: unknown[][] = [];
+    const blobRefRows: unknown[][] = [];
+    const copiedKeywordRows: unknown[][] = [];
+    const copiedAddrRows: unknown[][] = [];
+    /** 검색 부산물 복제용 (원본 → 사본). 코어 배치 커밋 뒤에 처리한다(§7-1). */
+    const copySources: { from: string; to: string }[] = [];
+    /** 사본이 계정 사용량에 더하는 바이트 — 사본은 진짜 새 메시지다. */
+    let copyBytes = 0;
     let addCount = 0;
     let addBytes = 0;
     let addUnread = 0;
@@ -1508,14 +1593,16 @@ export class Store {
       }
 
       const newUid = uidCursor++;
-      pairs.push({ messageId: id, uid: newUid });
-      mmRows.push([input.toMailboxId, newUid, id, now, 0]);
       addCount += 1;
       addBytes += size;
       addUnread += unread;
-      touched.push(id);
 
       if (input.op === "move") {
+        // 이동은 **같은 메시지**가 다른 자리로 가는 것이다 — 새 행을 만들면 uid만 바뀌어야 할
+        // 자리에서 JMAP Email id까지 바뀐다.
+        pairs.push({ messageId: id, uid: newUid });
+        mmRows.push([input.toMailboxId, newUid, id, now, 0]);
+        touched.push(id);
         stmts.push({
           sql: "DELETE FROM message_mailbox WHERE mailbox_id = ? AND uid = ?",
           params: [input.fromMailboxId, srcUid],
@@ -1524,14 +1611,68 @@ export class Store {
         delCount += 1;
         delBytes += size;
         delUnread += unread;
+        continue;
       }
+
+      /**
+       * ★COPY — **독립된 메시지**를 만든다(RFC 9051 §6.4.7). 사본은 원본의 플래그를 그대로
+       * 갖고 시작하되 그 뒤로는 따로 움직인다.
+       *
+       * 블롭은 공유하고 `blob_refs`에 참조를 하나 더 단다 — 원본을 지워도 사본의 원문이
+       * 남아야 하고, GC는 참조 수로 판단한다.
+       *
+       * `pairs`의 `messageId`는 **원본** id다 — 호출자가 그것으로 원본 uid를 되찾아
+       * COPYUID의 첫 uid-set을 만든다. 새 id는 여기 밖으로 나가지 않는다.
+       */
+      const src = srcMsgBy.get(id)!;
+      const copyId = ulid();
+      copiedIds.push(copyId);
+      pairs.push({ messageId: id, uid: newUid });
+      mmRows.push([input.toMailboxId, newUid, copyId, now, 0]);
+
+      msgRowsToInsert.push([
+        copyId,
+        input.accountId,
+        String(src.blob_id),
+        String(src.thread_id),
+        nextModseq,
+        size,
+        Number(src.received_at),
+        src.subject == null ? null : String(src.subject),
+        src.subject_base == null ? null : String(src.subject_base),
+        src.msgid_hash == null ? null : String(src.msgid_hash),
+        src.sent_at == null ? null : Number(src.sent_at),
+        src.preview == null ? null : String(src.preview),
+        Number(src.has_attachment),
+        now,
+      ]);
+      blobRefRows.push([String(src.blob_id), input.accountId, REF_KIND.message, copyId, now]);
+      for (const kw of keywordsBy.get(id) ?? []) copiedKeywordRows.push([input.accountId, copyId, kw]);
+      for (const a of addrBy.get(id) ?? []) {
+        copiedAddrRows.push([input.accountId, copyId, Number(a.kind), Number(a.pos), a.name == null ? null : String(a.name), String(a.email)]);
+      }
+      copySources.push({ from: id, to: copyId });
+      copyBytes += size;
     }
 
-    if (touched.length === 0) return { pairs };
+    if (touched.length === 0 && copiedIds.length === 0) return { pairs };
 
     const batch: Statement[] = [
       { sql: "INSERT INTO modseq_claims (account_id, modseq) VALUES (?, ?)", params: [input.accountId, nextModseq] },
       ...stmts,
+      /**
+       * ★순서 — `messages` 행이 `message_mailbox`·`message_keywords`보다 **먼저** 들어가야
+       * 한다. 논리적 외래키(스키마에 FK 제약은 없지만 읽기 경로가 전제한다)이고, 중간 상태를
+       * 다른 세션이 볼 수 있는 드라이버에서는 이 순서가 곧 가시성 순서다.
+       */
+      ...multiRowInsertStatements(
+        "messages",
+        ["id", "account_id", "blob_id", "thread_id", "modseq", "size_bytes", "received_at", "subject", "subject_base", "msgid_hash", "sent_at", "preview", "has_attachment", "created_at"],
+        msgRowsToInsert,
+      ),
+      ...multiRowInsertStatements("blob_refs", ["blob_id", "account_id", "ref_kind", "ref_id", "created_at"], blobRefRows),
+      ...multiRowInsertStatements("message_keywords", ["account_id", "message_id", "keyword"], copiedKeywordRows),
+      ...multiRowInsertStatements("message_addresses", ["account_id", "message_id", "kind", "pos", "name", "email"], copiedAddrRows),
       ...multiRowInsertStatements("message_mailbox", ["mailbox_id", "uid", "message_id", "savedate", "deleted"], mmRows),
       ...multiRowInsertStatements("expunged", ["mailbox_id", "uid", "modseq", "created_at"], expungedRows),
     ];
@@ -1542,8 +1683,13 @@ export class Store {
       });
     }
     for (const id of new Set(touched)) {
-      // ★destroyed 아님 — 메일함 이동·복사는 Email updated (§7-3)
+      // ★destroyed 아님 — 메일함 **이동**은 Email updated (§7-3)
       batch.push({ sql: CHANGE_LOG_SQL, params: [input.accountId, nextModseq, ENTITY.Email, id, CHANGE_KIND.updated, now] });
+    }
+    for (const id of copiedIds) {
+      // ★사본은 **created**다 — 새 Email이므로. updated로 적으면 JMAP 클라이언트가 모르는
+      //   id의 변경을 받고 그 자체로 재동기화를 유발한다.
+      batch.push({ sql: CHANGE_LOG_SQL, params: [input.accountId, nextModseq, ENTITY.Email, id, CHANGE_KIND.created, now] });
     }
     if (addCount > 0) {
       batch.push({
@@ -1559,13 +1705,71 @@ export class Store {
       });
       batch.push({ sql: CHANGE_LOG_SQL, params: [input.accountId, nextModseq, ENTITY.Mailbox, input.fromMailboxId, CHANGE_KIND.updated, now] });
     }
-    batch.push({
-      sql: "UPDATE accounts SET modseq = ?, state_email = ?, state_mailbox = ? WHERE id = ?",
-      params: [nextModseq, nextModseq, nextModseq, input.accountId],
-    });
+    /**
+     * ★사본은 **진짜 새 메시지**라 계정 사용량에 더한다. 예전엔 멤버십만 늘려서 사본이
+     * 쿼터에 잡히지 않았다 — COPY를 반복해 상한을 우회할 수 있었다는 뜻이다.
+     * 블롭은 공유하지만 쿼터는 "메일함에 보이는 메일"의 크기를 세는 값이고, 메일함 단위
+     * `total_bytes`가 예전부터 그렇게 세어 왔다(사본도 더했다).
+     */
+    if (copiedIds.length > 0) {
+      batch.push({
+        sql: "UPDATE accounts SET modseq = ?, state_email = ?, state_mailbox = ?, used_bytes = used_bytes + ?, message_count = message_count + ? WHERE id = ?",
+        params: [nextModseq, nextModseq, nextModseq, copyBytes, copiedIds.length, input.accountId],
+      });
+    } else {
+      batch.push({
+        sql: "UPDATE accounts SET modseq = ?, state_email = ?, state_mailbox = ? WHERE id = ?",
+        params: [nextModseq, nextModseq, nextModseq, input.accountId],
+      });
+    }
 
     await this.db.batch(batch);
+
+    /**
+     * 검색 부산물 복제 — 코어 배치 **뒤에** 돈다(§7-1: 검색은 eventual consistency 허용이라
+     * 원자적 코어 배치를 불리지 않는다). 실패해도 복사 자체는 성립하고, 사본이 검색에 늦게
+     * 잡힐 뿐이다. 이걸 빼면 사본이 JMAP 검색·조각에서 영영 보이지 않는다.
+     */
+    if (copySources.length > 0) await this.copySearchArtifacts(input.accountId, copySources);
     return { pairs };
+  }
+
+  /** COPY 사본의 `message_text`·`search_index` 복제. 실패는 삼킨다(위 주석의 eventual consistency). */
+  private async copySearchArtifacts(accountId: string, pairs: readonly { from: string; to: string }[]): Promise<void> {
+    try {
+      const fromIds = pairs.map((p) => p.from);
+      const toBy = new Map(pairs.map((p) => [p.from, p.to]));
+      const textRows = await queryInChunks(
+        this.db,
+        fromIds,
+        (ph) => `SELECT message_id, field, content FROM message_text WHERE message_id IN (${ph})`,
+      );
+      const idxRows = await queryInChunks(
+        this.db,
+        fromIds,
+        (ph) => `SELECT message_id, token, field FROM search_index WHERE account_id = ? AND message_id IN (${ph})`,
+        [accountId],
+      );
+      const stmts: Statement[] = [
+        ...multiRowInsertStatements(
+          "message_text",
+          ["message_id", "field", "content"],
+          textRows.map((r) => [toBy.get(String(r.message_id))!, Number(r.field), String(r.content)]),
+        ),
+      ];
+      // insertIgnore는 단일행 SQL만 만든다(§7-6) — 토큰별 개별 문장.
+      const idxSql = this.db.insertIgnore("search_index", ["account_id", "token", "field", "message_id"]);
+      for (const r of idxRows) {
+        stmts.push({ sql: idxSql, params: [accountId, String(r.token), Number(r.field), toBy.get(String(r.message_id))!] });
+      }
+      /**
+       * 문장 수로 나눈다 — 토큰 하나가 문장 하나라(insertIgnore는 단일행만 만든다) 큰 메일
+       * 여러 통을 복사하면 수천 문장이 된다. 한 배치가 라이터를 붙잡는 시간을 묶어 둔다.
+       */
+      for (const c of chunk(stmts, COPY_ARTIFACT_STATEMENTS_PER_BATCH)) await this.db.batch(c);
+    } catch {
+      /* 무시 — 사본이 검색에 늦게 잡힐 뿐, 복사 자체는 이미 커밋됐다 */
+    }
   }
 
   /** 메시지 전체 파기 (JMAP Email/destroy) — 모든 멤버십 제거 + 메시지 파기. */

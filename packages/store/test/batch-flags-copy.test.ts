@@ -180,7 +180,13 @@ describe("copyOrMoveMessages", () => {
     await db.close();
   });
 
-  test("이미 대상에 있으면 no-op이고 기존 uid를 돌려준다(§5-2)", async () => {
+  /**
+   * ★2026-08-24 결정으로 **뒤집힌 테스트**다. 예전엔 같은 대상으로 다시 COPY하면 no-op이고
+   * 기존 uid를 돌려줬는데, 그건 `ux_mm_message(mailbox_id, message_id)` 제약을 피하려던
+   * 구현 사정이었지 규격이 아니다. RFC 9051 §6.4.7에서 COPY는 **사본을 하나 더** 만든다 —
+   * 클라이언트가 `COPYUID`로 성공을 받고 사본이 없는 것이 더 나쁘다.
+   */
+  test("같은 대상으로 다시 COPY하면 사본이 하나 더 생긴다", async () => {
     const { db, store, accountId, mailboxId, target, messageIds } = await setup();
     const first = await store.copyOrMoveMessages({
       accountId, messageIds, fromMailboxId: mailboxId, toMailboxId: target, op: "copy",
@@ -188,8 +194,31 @@ describe("copyOrMoveMessages", () => {
     const again = await store.copyOrMoveMessages({
       accountId, messageIds, fromMailboxId: mailboxId, toMailboxId: target, op: "copy",
     });
-    expect(again.pairs.map((p) => p.uid)).toEqual(first.pairs.map((p) => p.uid));
-    expect(await count(db, "SELECT COUNT(*) AS n FROM message_mailbox WHERE mailbox_id = ?", [target])).toBe(N);
+    // uid는 겹치지 않는다 — 새 사본이므로 uidnext가 이어진다
+    for (const uid of again.pairs.map((p) => p.uid)) {
+      expect(first.pairs.some((p) => p.uid === uid)).toBe(false);
+    }
+    expect(await count(db, "SELECT COUNT(*) AS n FROM message_mailbox WHERE mailbox_id = ?", [target])).toBe(N * 2);
+    expect(await count(db, "SELECT total_count AS n FROM mailboxes WHERE id = ?", [target])).toBe(N * 2);
+    await db.close();
+  });
+
+  /**
+   * ★COPY의 요지 — 사본은 **독립된 메시지**다(§6.4.7). 예전엔 같은 `message_id`로 멤버십만
+   * 더해서 한쪽에 `\Seen`을 달면 다른 쪽도 읽음이 됐다.
+   */
+  test("사본은 원본과 별개의 message_id를 갖는다", async () => {
+    const { db, store, accountId, mailboxId, target, messageIds } = await setup();
+    await store.copyOrMoveMessages({ accountId, messageIds, fromMailboxId: mailboxId, toMailboxId: target, op: "copy" });
+    const { rows } = await db.query({
+      sql: "SELECT message_id FROM message_mailbox WHERE mailbox_id = ?",
+      params: [target],
+    });
+    const copyIds = rows.map((r) => String(r.message_id));
+    expect(copyIds).toHaveLength(N);
+    for (const id of copyIds) expect(messageIds.includes(id)).toBe(false);
+    // 블롭은 공유하되 참조는 각자 — 원본을 지워도 사본의 원문이 남아야 한다
+    expect(await count(db, "SELECT COUNT(*) AS n FROM blob_refs WHERE account_id = ?", [accountId])).toBe(N * 2);
     await db.close();
   });
 });
