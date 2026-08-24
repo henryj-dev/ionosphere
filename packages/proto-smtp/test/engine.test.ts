@@ -61,7 +61,12 @@ describe("greeting/EHLO", () => {
     expect(lines).toContain("250-8BITMIME");
     expect(lines).toContain("250-PIPELINING");
     expect(lines).toContain("250-ENHANCEDSTATUSCODES");
-    expect(lines[lines.length - 1]).toBe("250 SMTPUTF8");
+    expect(lines).toContain("250-SMTPUTF8");
+    // LIMITS(RFC 9422) — 이미 강제하는 값을 말로 알린다. CHUNKING(RFC 3030)은 BDAT다.
+    expect(lines.some((l) => l.startsWith("250-LIMITS RCPTMAX="))).toBe(true);
+    // 마지막 줄만 대시가 없다 — 확장이 늘 때 그 자리가 바뀌므로 이름이 아니라 형식을 본다.
+    expect(lines[lines.length - 1]!.startsWith("250 ")).toBe(true);
+    expect(t).toContain("CHUNKING");
     expect(t).not.toContain("STARTTLS");
   });
 

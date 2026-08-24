@@ -104,7 +104,11 @@ export type DeliverOutcome =
   | { ok: true; queuedId?: string }
   | { ok: false; code: number; enhanced: string; message: string };
 
-type ConnState = "init" | "greeted" | "mail" | "rcpt" | "data";
+/**
+ * `bdat` — CHUNKING(RFC 3030). `data`와 **다른 상태**인 이유: BDAT는 바이트 수를 세어
+ * 읽고 dot-stuffing이 없다. 같은 상태로 합치면 종료 판정 두 가지가 한 루프에 섞인다.
+ */
+type ConnState = "init" | "greeted" | "mail" | "rcpt" | "data" | "bdat";
 type Awaiting = "rcpt" | "deliver" | "tls" | "auth" | "scramKeys" | null;
 
 /** AUTH 커맨드 진행 중(챌린지/응답 왕복) 상태 — {kind:"auth"} 액션 전 단계. */
@@ -261,6 +265,10 @@ export class SmtpEngine {
    * (RFC 3207이 STARTTLS 후 폐기하라는 것은 협상·트랜잭션 상태이지 남용 카운터가 아니다.)
    */
   private rcptCount = 0;
+  /** BDAT에서 아직 읽어야 할 바이트 수. 0이면 청크 경계다. */
+  private bdatRemaining = 0;
+  /** 이 청크가 `LAST`였나 — 다 읽으면 메시지가 끝난다. */
+  private bdatLast = false;
   private errorCount = 0;
   private pendingRcptAddress: string | null = null;
 
@@ -437,6 +445,12 @@ export class SmtpEngine {
 
       if (this.state === "data") {
         const advanced = this.pumpDataLine(actions);
+        if (!advanced) break;
+        continue;
+      }
+
+      if (this.state === "bdat") {
+        const advanced = this.pumpBdat(actions);
         if (!advanced) break;
         continue;
       }
@@ -670,6 +684,9 @@ export class SmtpEngine {
       case "DATA":
         this.handleData(rest, actions);
         return;
+      case "BDAT":
+        this.handleBdat(rest, actions);
+        return;
       case "RSET":
         this.resetTransaction();
         actions.push(reply(250, "2.1.5", "OK"));
@@ -712,8 +729,20 @@ export class SmtpEngine {
     this.heloName = rest; // SPF HELO identity (RFC 7208)
 
     // docs/PROTOCOLS.md §1 "2026 최소 신뢰 EHLO 세트" 순서
-    const caps = ["8BITMIME", "PIPELINING", "ENHANCEDSTATUSCODES", "SMTPUTF8"];
-    const lines = [`250-${this.hostname} Hello ${rest}`, `250-SIZE ${this.maxSizeBytes}`, ...caps.map((c) => `250-${c}`)];
+    const caps = ["8BITMIME", "PIPELINING", "ENHANCEDSTATUSCODES", "SMTPUTF8", "CHUNKING"];
+    const lines = [
+      `250-${this.hostname} Hello ${rest}`,
+      `250-SIZE ${this.maxSizeBytes}`,
+      /**
+       * LIMITS (RFC 9422) — **이미 강제하고 있는 값**을 말로 알린다.
+       *
+       * ★없으면 발신자가 한도를 **부딪혀 보고** 안다. 수신자 100명짜리 메일을 다 보낸 뒤
+       * 452를 받고 나눠서 재시도하는 것보다, 처음부터 나눠 보내는 편이 양쪽에 낫다.
+       * 광고 = 구현이라는 규율의 반대 방향이기도 하다 — 지키는 것을 말하지 않을 이유가 없다.
+       */
+      `250-LIMITS RCPTMAX=${MAX_RCPT_PER_SESSION}`,
+      ...caps.map((c) => `250-${c}`),
+    ];
     if (this.tlsAvailableConfigured && !this.isTls) lines.push("250-STARTTLS");
     // RFC 4954: 평문 회선에는 allowInsecureAuth 없이 광고 금지
         // ★SCRAM을 **앞에** 놓는다. 다수 클라이언트가 광고 순서를 선호도로 읽어서,
@@ -789,6 +818,80 @@ export class SmtpEngine {
     this.pendingRcptAddress = parsed.value.address;
     this.awaiting = "rcpt";
     actions.push({ kind: "rcpt", address: parsed.value.address });
+  }
+
+  /**
+   * BDAT (RFC 3030 §2) — `BDAT <n> [LAST]` 뒤에 **정확히 n바이트**가 온다.
+   *
+   * ★DATA와 달리 dot-stuffing이 없고 종료 마커도 없다. 그래서 발신자가 이스케이프 처리를
+   * 안 해도 되고, 우리도 `CRLF.CRLF`를 스캔하지 않는다 — 큰 첨부에서 그 스캔이 곧 비용이다.
+   *
+   * ★한 메시지가 여러 BDAT로 나뉘고 마지막에 `LAST`가 붙는다. `LAST`가 올 때까지는 응답만
+   * 하고 트랜잭션을 끝내지 않는다.
+   */
+  private handleBdat(rest: string, actions: SmtpAction[]): void {
+    if (this.state !== "rcpt" && this.state !== "bdat") {
+      actions.push(reply(503, "5.5.1", "Need RCPT before BDAT"));
+      return;
+    }
+    const parts = rest.trim().split(/\s+/);
+    const n = Number(parts[0]);
+    if (parts[0] === undefined || !/^\d+$/.test(parts[0]) || !Number.isFinite(n)) {
+      actions.push(reply(501, "5.5.4", "Syntax: BDAT <bytes> [LAST]"));
+      return;
+    }
+    const last = (parts[1] ?? "").toUpperCase() === "LAST";
+    if (parts.length > 2 || (parts.length === 2 && !last)) {
+      actions.push(reply(501, "5.5.4", "Syntax: BDAT <bytes> [LAST]"));
+      return;
+    }
+    /**
+     * ★크기 한도를 **읽기 전에** 본다. BDAT는 발신자가 크기를 미리 말하므로 받아 보고
+     * 판단할 이유가 없다 — DATA에서는 못 하던 것이다. 다만 바이트는 그래도 읽어 버려야
+     * 세션 동기가 유지된다(안 읽으면 그 바이트가 다음 명령으로 해석된다).
+     */
+    if (this.dataSize + n > this.maxSizeBytes) this.dataOverflow = true;
+    this.bdatRemaining = n;
+    this.bdatLast = last;
+    this.state = "bdat";
+    // n === 0이면 읽을 것이 없다 — 아래 펌프가 즉시 경계 처리를 한다.
+  }
+
+  /**
+   * BDAT 청크 바이트 소비. 더 필요한 바이트가 있으면 false.
+   *
+   * ★`dataOverflow`여도 **읽기는 계속한다**. 안 읽으면 그 바이트가 다음 명령 줄로 해석돼
+   * 세션이 어긋난다(그게 프로토콜 혼선의 고전적 원인이다). 누적만 멈춘다.
+   */
+  private pumpBdat(actions: SmtpAction[]): boolean {
+    if (this.bdatRemaining > 0) {
+      if (this.buffer.length === 0) return false;
+      const take = Math.min(this.bdatRemaining, this.buffer.length);
+      const chunk = this.buffer.subarray(0, take);
+      this.buffer = this.buffer.subarray(take);
+      this.bdatRemaining -= take;
+      if (!this.dataOverflow) {
+        this.dataChunks.push(chunk);
+        this.dataSize += take;
+      }
+      if (this.bdatRemaining > 0) return false;
+    }
+
+    // 청크 하나가 끝났다.
+    if (this.dataOverflow) {
+      actions.push(reply(552, "5.3.4", "Message size exceeds limit"));
+      this.resetTransaction();
+      this.state = "greeted";
+      return true;
+    }
+    if (!this.bdatLast) {
+      actions.push(reply(250, "2.0.0", `${this.dataSize} octets received`));
+      // 다음 BDAT 명령을 기다린다 — 상태는 rcpt로 되돌려 명령 줄을 읽게 한다.
+      this.state = "rcpt";
+      return true;
+    }
+    this.finishData(actions);
+    return true;
   }
 
   private handleData(rest: string, actions: SmtpAction[]): void {
@@ -968,6 +1071,12 @@ export class SmtpEngine {
     this.dataChunks = [];
     this.dataSize = 0;
     this.dataOverflow = false;
+    /**
+     * BDAT 상태도 함께 지운다. 안 지우면 RSET 뒤에도 `bdatRemaining`이 남아 다음 명령의
+     * 첫 바이트들이 **청크 데이터로 먹힌다** — 세션이 조용히 어긋나는 형태다.
+     */
+    this.bdatRemaining = 0;
+    this.bdatLast = false;
     if (this.state !== "init") this.state = "greeted";
   }
 }

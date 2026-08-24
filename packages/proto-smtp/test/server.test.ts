@@ -78,7 +78,8 @@ describe("SmtpServer — 소켓 통합", () => {
     socket.write("EHLO client.test\r\n");
     let line = await reader.readLine();
     while (line.startsWith("250-")) line = await reader.readLine();
-    expect(line).toBe("250 SMTPUTF8");
+    // 마지막 확장이 무엇인지는 목록이 늘 때마다 바뀐다 — 이름이 아니라 **형식**을 본다.
+    expect(line).toStartWith("250 ");
 
     socket.write("MAIL FROM:<alice@example.test>\r\n");
     expect(await reader.readLine()).toBe("250 2.1.0 OK");
