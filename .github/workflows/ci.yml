@@ -77,7 +77,7 @@ jobs:
       IONOSPHERE_TEST_PG_URL: postgres://postgres:test@localhost:5432/postgres
       IONOSPHERE_TEST_MYSQL_URL: mysql://root:test@localhost:3306/ionosphere
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}

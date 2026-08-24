@@ -41,7 +41,7 @@ jobs:
     timeout-minutes: 15
     steps:
       # fetch-depth: 0 — 릴리즈 노트 생성이 직전 태그를 찾아야 한다.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
