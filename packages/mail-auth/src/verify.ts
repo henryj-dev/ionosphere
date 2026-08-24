@@ -115,6 +115,8 @@ async function verifyOne(
   field: HeaderField,
   groups: Map<string, HeaderField[]>,
   bodyHash: (mode: DkimCanonMode) => Buffer,
+  /** 정규화된 본문 자체 — `l=`이 있을 때만 쓴다(앞 l 옥텟을 잘라야 하므로). */
+  canonBodyFor: (mode: DkimCanonMode) => string,
   resolveTxt: (name: string) => Promise<string[]>,
 ): Promise<DkimVerifyResult> {
   const colonIdx = field.raw.indexOf(":");
@@ -179,8 +181,53 @@ async function verifyOne(
     return makeResult(domain, selector, "permerror", "bh= 또는 b= base64 디코딩 실패");
   }
 
-  if (!bodyHash(bodyCanon).equals(bhBytes)) {
+  /**
+   * `l=`(본문 길이 제한, RFC 6376 §3.5) — 서명은 **정규화된 본문의 앞 l 옥텟**만 덮는다.
+   *
+   * ★예전엔 이 태그를 읽지 않고 본문 전체를 해싱했다. 그래서 `l=`을 붙인 정상 발신자의
+   * 서명이 **전부 `fail`** 이 됐다(일부 메일링리스트가 쓴다). DKIM `fail`은 DMARC를 fail로
+   * 밀기 때문에 정상 메일이 거절될 수 있다 — `verify.ts` 머리가 기록한 Ed25519 사고
+   * (규격을 지키는 발신자를 우리가 전부 fail로 판정했다)와 **정확히 같은 계열**이다.
+   *
+   * ⚠ 잔여 위험은 그대로다: `l` 뒤의 본문은 서명 밖이라 중간에서 덧붙일 수 있다
+   * (§8.2). 그래서 **우리는 `l=`을 내보내지 않는다**(`sign.ts` — 그쪽 주석에 근거가 있다).
+   * 검증에서 받아 주는 것과 발행하는 것은 다른 결정이다: 받아 주지 않으면 정상 메일이
+   * 죽고, 발행하면 우리 메일이 변조 가능해진다.
+   */
+  const lTag = findTag(tags, "l");
+  let bodyForHash: Buffer;
+  if (lTag === null) {
+    bodyForHash = bodyHash(bodyCanon);
+  } else {
+    const limit = Number(lTag);
+    if (!Number.isInteger(limit) || limit < 0) {
+      return makeResult(domain, selector, "permerror", `잘못된 l= 값: ${lTag}`);
+    }
+    const canon = canonBodyFor(bodyCanon);
+    // 선언한 길이가 실제 본문보다 길면 **본문이 잘려 나간 것**이다 — 통과시키면 안 된다(§3.5).
+    if (limit > canon.length) {
+      return makeResult(domain, selector, "fail", "l=이 본문 길이보다 큼(본문 절단)");
+    }
+    // canon 결과는 latin1 문자열이라 1문자 = 1옥텟이다.
+    bodyForHash = sha256(canon.slice(0, limit));
+  }
+  if (!bodyForHash.equals(bhBytes)) {
     return makeResult(domain, selector, "fail", "본문 해시(bh=) 불일치");
+  }
+
+  /**
+   * `i=`(AUID)는 `d=`와 같거나 그 하위 도메인이어야 한다 — RFC 6376 §6.1.1이 아니면
+   * **서명을 무시하라(MUST)**고 한다. 이 검사가 없으면 `d=`와 무관한 신원을 주장하는 서명이
+   * 통과 판정을 받는다.
+   */
+  const iTag = findTag(tags, "i");
+  if (iTag !== null) {
+    const at = iTag.lastIndexOf("@");
+    const iDomain = (at === -1 ? iTag : iTag.slice(at + 1)).toLowerCase().replace(/\.$/, "");
+    const d = domain.toLowerCase().replace(/\.$/, "");
+    if (iDomain !== d && !iDomain.endsWith(`.${d}`)) {
+      return makeResult(domain, selector, "permerror", `i=가 d=의 하위 도메인이 아님: ${iTag}`);
+    }
   }
 
   const resolved = resolveHeaderSequence(groups, hNames);
@@ -295,11 +342,20 @@ export async function dkimVerify(
 
   // 본문 해시는 (본문, 정규화 모드)에만 의존하고 모드는 relaxed/simple 둘뿐이다. 서명마다
   // 다시 계산하면 25MB 본문 × 서명 수만큼 해싱하게 되므로 모드별로 한 번만 계산해 재사용한다.
+  const canonCache = new Map<DkimCanonMode, string>();
+  const canonBodyFor = (mode: DkimCanonMode): string => {
+    let c = canonCache.get(mode);
+    if (c === undefined) {
+      c = canonBody(body, mode);
+      canonCache.set(mode, c);
+    }
+    return c;
+  };
   const hashCache = new Map<DkimCanonMode, Buffer>();
   const bodyHash = (mode: DkimCanonMode): Buffer => {
     let h = hashCache.get(mode);
     if (!h) {
-      h = sha256(canonBody(body, mode));
+      h = sha256(canonBodyFor(mode));
       hashCache.set(mode, h);
     }
     return h;
@@ -307,7 +363,7 @@ export async function dkimVerify(
 
   const results: DkimVerifyResult[] = [];
   for (const field of sigFields.slice(0, MAX_DKIM_SIGNATURES)) {
-    const result = await verifyOne(field, groups, bodyHash, resolveTxt);
+    const result = await verifyOne(field, groups, bodyHash, canonBodyFor, resolveTxt);
     /**
      * 알고리즘을 여기서 붙이는 이유: `verifyOne`은 실패 경로가 23곳이고 각각 `makeResult`로
      * 즉시 반환한다. 그 전부에 인자를 하나 더 넘기면 변경이 넓어지는데, `a=`는 서명 헤더에서
