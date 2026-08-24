@@ -114,17 +114,39 @@ describe("보존창 스윕", () => {
   });
 
   /**
-   * ★`expunged`는 **일부러 손대지 않는다.** QRESYNC의 VANISHED가 거기서 나오는데 IMAP에는
-   * 하한을 알릴 장치가 없다 — 지우면 오래 떠나 있던 클라이언트가 "삭제된 적 없다"는 답을
-   * 받고 유령 메시지를 영영 들고 있게 된다. 이 테스트는 그 결정을 고정한다.
+   * ★2026-08-24에 **뒤집힌 결정**이다. 예전엔 "IMAP에 하한을 알릴 장치가 없다"는 이유로
+   * 툼스톤을 영영 두었는데, `mailboxes.expunged_floor`(migration 014)가 그 장치이고
+   * `syncSince`가 하한 아래 요청을 차집합으로 답한다(RFC 7162 §3.2.5.2).
+   *
+   * ★순서가 이 테스트의 핵심이다: **floor를 먼저 올리고 그다음에 지운다.** 반대면
+   * "행은 없는데 floor는 낮은" 창이 생기고, 그 사이 QRESYNC가 조용히 "삭제 없음"을
+   * 돌려준다 — 클라이언트는 그것이 전부인 줄 안다.
    */
-  test("expunged 툼스톤은 아무리 오래돼도 지우지 않는다", async () => {
+  test("보존창 밖 expunged 툼스톤을 지우고 floor를 올린다", async () => {
     const db = await fresh();
     await db.batch([
+      { sql: "INSERT INTO mailboxes (id, account_id, parent_id, name, role, status, uidvalidity, uidnext, highestmodseq, total_count, unread_count, total_bytes, sort_order, subscribed, created_at) VALUES ('mbx', 'acc', '', 'INBOX', 'inbox', 1, 1, 10, 9, 0, 0, 0, 0, 1, ?)", params: [NOW] },
+      { sql: "INSERT INTO expunged (mailbox_id, uid, modseq, created_at) VALUES ('mbx', 1, 5, ?)", params: [NOW - 3650 * DAY] },
+      { sql: "INSERT INTO expunged (mailbox_id, uid, modseq, created_at) VALUES ('mbx', 2, 9, ?)", params: [NOW] }, // 보존창 안 — 남는다
+    ]);
+    const r = await runRetention(db, { now: NOW });
+    expect(r.expunged).toBe(1);
+    expect(r.expungedFloorsAdvanced).toBe(1);
+    expect(await n(db, "SELECT COUNT(*) AS n FROM expunged")).toBe(1);
+    // floor는 **지운 행의 최대 modseq**여야 한다(컷오프 시각이 아니라) — 그래야 틈이 없다
+    expect(await n(db, "SELECT expunged_floor AS n FROM mailboxes WHERE id = 'mbx'")).toBe(5);
+    await db.close();
+  });
+
+  /** 단조 증가 — 동시에 다른 스윕이 더 올려 뒀다면 되돌리지 않는다. */
+  test("expunged_floor는 뒤로 가지 않는다", async () => {
+    const db = await fresh();
+    await db.batch([
+      { sql: "INSERT INTO mailboxes (id, account_id, parent_id, name, role, status, uidvalidity, uidnext, highestmodseq, total_count, unread_count, total_bytes, sort_order, subscribed, expunged_floor, created_at) VALUES ('mbx', 'acc', '', 'INBOX', 'inbox', 1, 1, 10, 9, 0, 0, 0, 0, 1, 100, ?)", params: [NOW] },
       { sql: "INSERT INTO expunged (mailbox_id, uid, modseq, created_at) VALUES ('mbx', 1, 5, ?)", params: [NOW - 3650 * DAY] },
     ]);
     await runRetention(db, { now: NOW });
-    expect(await n(db, "SELECT COUNT(*) AS n FROM expunged")).toBe(1);
+    expect(await n(db, "SELECT expunged_floor AS n FROM mailboxes WHERE id = 'mbx'")).toBe(100);
     await db.close();
   });
 

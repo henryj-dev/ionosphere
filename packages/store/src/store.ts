@@ -174,6 +174,8 @@ function mapMailboxRow(row: Record<string, unknown>): MailboxRow {
     unreadCount: Number(row.unread_count),
     totalBytes: Number(row.total_bytes),
     subscribed: Number(row.subscribed ?? 1) === 1,
+    // 이 컬럼을 안 실어 온 질의도 있으므로 0(=아직 안 지웠다)로 떨어뜨린다.
+    expungedFloor: Number(row.expunged_floor ?? 0),
   };
 }
 
@@ -2031,7 +2033,7 @@ export class Store {
 
   async listMailboxes(accountId: string): Promise<MailboxRow[]> {
     const { rows } = await this.db.query({
-      sql: `SELECT id, account_id, parent_id, name, role, status, uidvalidity, uidnext, highestmodseq, total_count, unread_count, total_bytes, subscribed
+      sql: `SELECT id, account_id, parent_id, name, role, status, uidvalidity, uidnext, highestmodseq, total_count, unread_count, total_bytes, subscribed, expunged_floor
             FROM mailboxes WHERE account_id = ? AND status = 1 ORDER BY sort_order, name`,
       params: [accountId],
     });

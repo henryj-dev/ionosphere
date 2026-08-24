@@ -24,7 +24,7 @@ import {
   scramKeysFor,
   scramAuthorize,
 } from "@ionosphere/store";
-import type { ImapBackend, ImapBackendRequest, ImapBackendResponse, ImapFetchData, ImapMailbox } from "@ionosphere/proto-imap";
+import type { ImapBackend, ImapBackendRequest, ImapBackendResponse, ImapFetchData, ImapMailbox, SeqRange } from "@ionosphere/proto-imap";
 import { toAppendAddresses } from "./addresses.ts";
 
 const DELIM = "/";
@@ -458,10 +458,20 @@ export class IonosphereImapBackend implements ImapBackend {
   private async syncSince(accountId: string, req: Extract<ImapBackendRequest, { kind: "syncSince" }>): Promise<ImapBackendResponse> {
     const found = await this.findByPath(accountId, req.name);
     if (!found) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
-    const { rows: vanishedRows } = await this.db.query({
-      sql: "SELECT uid FROM expunged WHERE mailbox_id = ? AND modseq > ? ORDER BY uid",
-      params: [found.row.id, req.sinceModseq],
-    });
+    /**
+     * ★툼스톤 보존창 **밖**이면 `expunged`로는 답할 수 없다(migration 014의 `expunged_floor`).
+     * 그때 그냥 "삭제 없음"으로 답하면 클라이언트가 유령 메시지를 영영 들고 있게 된다 —
+     * 조용히 틀린 답이라 사용자가 알아차릴 방법도 없다.
+     *
+     * RFC 7162 §3.2.5.2가 이 상황의 답을 이미 두었다: 클라이언트가 준 known-uids에서 **현재
+     * 존재하는 uid를 빼면** 사라진 uid가 정확히 나온다. known-uids가 없으면 규격이 정한 대로
+     * `1:uidnext-1`로 간주한다. 툼스톤 없이도 정확하고, UIDVALIDITY를 올려 **모든**
+     * 클라이언트의 캐시를 버리게 만들 이유가 없다(한 세션의 부재를 전원이 갚는 셈이 된다).
+     */
+    const vanished =
+      req.sinceModseq >= found.row.expungedFloor
+        ? await this.vanishedFromTombstones(found.row.id, req.sinceModseq)
+        : await this.vanishedByDifference(found.row, req.knownUids ?? null);
     const { rows: changedRows } = await this.db.query({
       sql: `SELECT mm.uid AS uid FROM message_mailbox mm JOIN messages m ON m.id = mm.message_id
             WHERE mm.mailbox_id = ? AND m.modseq > ? ORDER BY mm.uid`,
@@ -475,7 +485,53 @@ export class IonosphereImapBackend implements ImapBackend {
         for (const m of fetched.messages) changed.push({ uid: m.uid, flags: m.flags, modseq: m.modseq });
       }
     }
-    return { kind: "sync", vanished: vanishedRows.map((r) => Number(r.uid)), changed };
+    return { kind: "sync", vanished, changed };
+  }
+
+  /** 보존창 안 — 툼스톤이 곧 답이다(정확하고 작다). */
+  private async vanishedFromTombstones(mailboxId: string, sinceModseq: number): Promise<number[]> {
+    const { rows } = await this.db.query({
+      sql: "SELECT uid FROM expunged WHERE mailbox_id = ? AND modseq > ? ORDER BY uid",
+      params: [mailboxId, sinceModseq],
+    });
+    return rows.map((r) => Number(r.uid));
+  }
+
+  /**
+   * 보존창 밖 — 후보 집합에서 현재 존재하는 uid를 뺀다 (RFC 7162 §3.2.5.2).
+   *
+   * ★비용은 후보 집합의 크기에 비례한다. known-uids를 준 클라이언트(실제 QRESYNC 구현은
+   * 대부분 준다)는 자기가 아는 만큼만 후보가 되므로 작고, 안 준 경우에만 `1:uidnext-1`로
+   * 커진다. 그 경로는 "보존창을 넘겨 떠나 있었고 known-uids도 안 준" 드문 조합이고,
+   * 와이어로는 `formatUidSet`이 범위로 압축한다.
+   */
+  private async vanishedByDifference(row: MailboxRow, knownUids: readonly SeqRange[] | null): Promise<number[]> {
+    const { rows } = await this.db.query({
+      sql: "SELECT uid FROM message_mailbox WHERE mailbox_id = ?",
+      params: [row.id],
+    });
+    const present = new Set(rows.map((r) => Number(r.uid)));
+
+    const out: number[] = [];
+    // known-uids 없음 → 규격이 정한 기본값 `1:<uidnext-1>`.
+    const ranges: readonly SeqRange[] = knownUids ?? [{ from: 1, to: Math.max(0, row.uidnext - 1) }];
+    /**
+     * `*`는 "가장 큰 것"이다(RFC 9051 §6.4.8). 여기서는 `uidnext-1`로 닫는다 —
+     * 열어 두면 존재하지 않는 uid를 무한히 세게 된다.
+     */
+    const maxUid = Math.max(0, row.uidnext - 1);
+    const bound = (v: number | "*"): number => (v === "*" ? maxUid : v);
+    for (const r of ranges) {
+      // 시퀀스셋은 `5:1`처럼 뒤집혀 올 수 있다(§9 seq-range는 순서를 강제하지 않는다).
+      const a = bound(r.from);
+      const b = bound(r.to);
+      const to = Math.min(Math.max(a, b), maxUid);
+      for (let uid = Math.max(1, Math.min(a, b)); uid <= to; uid++) {
+        if (!present.has(uid)) out.push(uid);
+      }
+    }
+    out.sort((a, b) => a - b);
+    return out;
   }
 
   private async appendMessage(

@@ -308,4 +308,9 @@ export interface MailboxRow {
   totalBytes: number;
   /** IMAP SUBSCRIBE 상태 (SCHEMA §5-1 subscribed, 기본 1). */
   subscribed: boolean;
+  /**
+   * "이 modseq 아래의 삭제는 `expunged`로 답할 수 없다"는 하한(migration 014).
+   * 보존 스윕이 툼스톤을 지우기 **전에** 올린다. 0이면 아직 아무것도 안 지웠다.
+   */
+  expungedFloor: number;
 }

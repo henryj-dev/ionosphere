@@ -101,7 +101,9 @@ export class MailboxReaper {
       if (this.retention) {
         try {
           const r = await runRetention(this.retention.db, this.retention);
-          if (r.changeLog > 0 || r.threadRefs > 0 || r.queue > 0 || r.floorsAdvanced > 0 || r.vacationSent > 0) {
+          // 하나라도 움직였으면 남긴다 — 항목이 늘 때 여기를 고치는 것을 잊지 않도록
+          // 값의 합으로 판정한다(이름을 하나씩 나열하다 `expunged`를 빠뜨릴 뻔했다).
+          if (Object.values(r).some((v) => v > 0)) {
             this.log.info("보존창 스윕", { ...r });
           }
         } catch (err) {

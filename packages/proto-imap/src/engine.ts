@@ -85,7 +85,20 @@ export type ImapBackendRequest =
    */
   | { kind: "storeFlags"; name: string; uids: readonly number[]; mode: "set" | "add" | "remove"; flags: readonly string[]; unchangedSince?: number }
   /** QRESYNC — sinceModseq 이후 삭제(uid 툼스톤)·변경(flags) 델타. */
-  | { kind: "syncSince"; name: string; sinceModseq: number }
+  | {
+      kind: "syncSince";
+      name: string;
+      sinceModseq: number;
+      /**
+       * QRESYNC 세 번째 인자의 known-uids (RFC 7162 §3.2.5). 클라이언트가 "내가 아는 uid는
+       * 이것들"이라고 알려 주는 값이다.
+       *
+       * ★백엔드가 툼스톤 보존창 **밖**의 요청을 받았을 때 이 값이 답을 가능하게 한다:
+       * 여기서 현재 존재하는 uid를 빼면 사라진 uid가 정확히 나온다(§3.2.5.2). 없으면
+       * 백엔드가 `1:uidnext-1`로 간주한다 — RFC가 정한 기본값이다.
+       */
+      knownUids?: readonly SeqRange[];
+    }
   /** EXPUNGE — \Deleted 영구 삭제. uids 지정 시 그 UID들만(UIDPLUS UID EXPUNGE). */
   | { kind: "expunge"; name: string; uids: readonly number[] | null }
   /** APPEND — internalDateMs null이면 현재 시각(백엔드 결정). */
@@ -823,7 +836,7 @@ export class ImapEngine {
       return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} expects mailbox name` }];
     }
     // SELECT 파라미터(RFC 7162): (CONDSTORE) 또는 (QRESYNC (uv modseq [known-uids]))
-    let qresync: { uidvalidity: number; modseq: number } | null = null;
+    let qresync: { uidvalidity: number; modseq: number; knownUids: SeqRange[] | null } | null = null;
     const params = cmd.args[1];
     if (params !== undefined) {
       if (params.kind !== "list") return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} invalid parameters` }];
@@ -843,7 +856,17 @@ export class ImapEngine {
           if (!uv || !ms || !/^\d+$/.test(uv) || !/^\d+$/.test(ms)) {
             return [{ kind: "reply", text: `${cmd.tag} BAD invalid QRESYNC parameters` }];
           }
-          qresync = { uidvalidity: Number(uv), modseq: Number(ms) };
+          /**
+           * ★세 번째 인자 known-uids를 **이제 읽는다**(RFC 7162 §3.2.5). 예전엔 문법으로만
+           * 받아 주고 버렸는데, 툼스톤 보존창이 생긴 뒤로는 이 값이 "보존창 밖 요청에도
+           * 정확히 답할 수 있는" 유일한 근거다. 못 읽으면 `1:uidnext-1`로 간주된다.
+           *
+           * 네 번째 인자(seq-match-data)는 아직 쓰지 않는다 — 그건 최적화이고, 없어도
+           * 답의 정확성은 known-uids만으로 성립한다.
+           */
+          const knownText = args.items[2] ? valueText(args.items[2]) : null;
+          const knownUids = knownText !== null ? parseSequenceSet(knownText) : null;
+          qresync = { uidvalidity: Number(uv), modseq: Number(ms), knownUids };
         } else {
           return [{ kind: "reply", text: `${cmd.tag} BAD unknown ${verb} parameter` }];
         }
@@ -901,7 +924,9 @@ export class ImapEngine {
         const since = qresync.modseq;
         return [
           ...actions,
-          ...this.callBackend({ kind: "syncSince", name: m.name, sinceModseq: since }, (sync) => {
+          ...this.callBackend(
+            { kind: "syncSince", name: m.name, sinceModseq: since, ...(qresync.knownUids ? { knownUids: qresync.knownUids } : {}) },
+            (sync) => {
             if (sync.kind !== "sync") return [tagged];
             const out: ImapAction[] = [];
             if (sync.vanished.length > 0) {

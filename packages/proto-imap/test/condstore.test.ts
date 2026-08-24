@@ -104,6 +104,33 @@ describe("QRESYNC", () => {
     expect(out[out.length - 1]).toContain("s1 OK [READ-WRITE]");
   });
 
+  /**
+   * ★세 번째 인자 known-uids는 예전엔 문법으로만 받고 **버렸다**. 툼스톤 보존창이 생긴 뒤로는
+   * 이 값이 "보존창 밖 요청에도 정확히 답할 수 있는" 유일한 근거라(RFC 7162 §3.2.5.2)
+   * 백엔드까지 흘러야 한다.
+   */
+  test("SELECT (QRESYNC (uv modseq known-uids)) — known-uids가 백엔드로 간다", () => {
+    const e = authed();
+    e.feed(enc.encode("e0 ENABLE QRESYNC\r\n"));
+    const first = e.feed(enc.encode("s1 SELECT INBOX (QRESYNC (100 40 1:5,9))\r\n"));
+    expect(backendReq(first)).toEqual({ kind: "selectMailbox", name: "INBOX" });
+    const selectOut = e.backendResult({ kind: "selected", mailbox: BOX, uids: [3, 7, 9], firstUnseenSeq: null });
+    expect(backendReq(selectOut)).toEqual({
+      kind: "syncSince",
+      name: "INBOX",
+      sinceModseq: 40,
+      knownUids: [{ from: 1, to: 5 }, { from: 9, to: 9 }],
+    });
+  });
+
+  test("known-uids가 없으면 요청에 실리지 않는다", () => {
+    const e = authed();
+    e.feed(enc.encode("e0 ENABLE QRESYNC\r\n"));
+    e.feed(enc.encode("s1 SELECT INBOX (QRESYNC (100 40))\r\n"));
+    const selectOut = e.backendResult({ kind: "selected", mailbox: BOX, uids: [3, 7, 9], firstUnseenSeq: null });
+    expect(backendReq(selectOut)).toEqual({ kind: "syncSince", name: "INBOX", sinceModseq: 40 });
+  });
+
   test("QRESYNC 미ENABLE 상태의 SELECT 파라미터 → BAD", () => {
     const e = authed();
     expect(replies(e.feed(enc.encode("s1 SELECT INBOX (QRESYNC (100 40))\r\n")))[0]).toBe("s1 BAD QRESYNC not enabled");
