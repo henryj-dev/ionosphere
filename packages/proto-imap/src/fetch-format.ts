@@ -10,7 +10,7 @@
  *   비ASCII는 UTF-8 리터럴로 방출 — 모던 클라이언트 호환에 문제 없음.
  * - BODY[1.1](비multipart 파트 하위 경로) 등 병적 경로는 관용 해석.
  */
-import { parseMessage, parseStructure, type MimePartInfo, type ParsedAddress } from "@ionosphere/mime";
+import { base64Decode, parseMessage, parseStructure, quotedPrintableDecode, type MimePartInfo, type ParsedAddress } from "@ionosphere/mime";
 
 // ── 와이어 문자열 유틸 ─────────────────────────────────────────────────────────
 
@@ -32,6 +32,20 @@ export function wireToBytes(wire: string): Uint8Array {
 /** 리터럴 임베드 — `{n}\r\n` + 바이트(latin1 표현). */
 export function literalWire(bytes: Uint8Array): string {
   return `{${bytes.length}}\r\n${bytesToWire(bytes)}`;
+}
+
+/**
+ * BINARY 응답용 리터럴 — NUL이 있으면 **literal8**(`~{n}`, RFC 3516 §4.3).
+ *
+ * ★일반 리터럴 문법에는 NUL을 실을 수 없다. 그래서 RFC 3516이 literal8을 만들었고,
+ * 우리가 이걸 쓸 수 있는 것은 `BINARY`를 광고했을 때뿐이다 — 광고하지 않은 서버가
+ * `~{n}`을 보내면 클라이언트 파서가 그 줄에서 멈춘다.
+ *
+ * NUL이 없으면 일반 리터럴로 낸다. 옛 클라이언트가 literal8을 못 읽는 경우가 있어
+ * **필요할 때만** 쓰는 쪽이 안전하다.
+ */
+export function binaryLiteralWire(bytes: Uint8Array): string {
+  return `${bytes.includes(0) ? "~" : ""}{${bytes.length}}\r\n${bytesToWire(bytes)}`;
 }
 
 const QUOTED_SAFE = /^[\x20-\x7e]*$/;
@@ -231,4 +245,57 @@ export function extractSection(raw: Uint8Array, spec: SectionSpec): Uint8Array |
       return filterHeaderFields(raw.subarray(m.start, m.bodyStart), spec.fields, spec.sub === "HEADER.FIELDS.NOT");
     }
   }
+}
+
+// ── BINARY[파트] 추출 (RFC 3516 / RFC 9051 §6.4.5) ─────────────────────────────
+
+/**
+ * 전송 인코딩을 푼 결과. `unknown-cte`는 **오류가 아니라 사실**이다 — 서버가 풀 수 없는
+ * 인코딩이라는 뜻이고, 엔진이 이걸 받아 `NO [UNKNOWN-CTE]`로 옮긴다(RFC 3516 §4.2).
+ */
+export type BinaryContent = { kind: "bytes"; bytes: Uint8Array } | { kind: "unknown-cte" };
+
+/**
+ * Content-Transfer-Encoding 해제.
+ *
+ * ★디코더는 `@ionosphere/mime`의 것을 그대로 쓴다. 여기서 다시 구현하면 base64의 관용
+ * 처리(알파벳 외 문자 무시·불완전 꼬리 버림)가 본문 표시와 `BINARY[]`에서 갈리고,
+ * 그러면 같은 첨부가 IMAP 인출과 JMAP 본문에서 다른 바이트로 나온다.
+ */
+function decodeCte(bytes: Uint8Array, encoding: string): BinaryContent {
+  switch (encoding.trim().toLowerCase()) {
+    // 7bit/8bit/binary는 "인코딩 없음"의 다른 이름이다.
+    case "":
+    case "7bit":
+    case "8bit":
+    case "binary":
+      return { kind: "bytes", bytes };
+    case "base64":
+      return { kind: "bytes", bytes: base64Decode(bytesToWire(bytes)) };
+    case "quoted-printable":
+      return { kind: "bytes", bytes: quotedPrintableDecode(bytesToWire(bytes)) };
+    default:
+      return { kind: "unknown-cte" };
+  }
+}
+
+/**
+ * `BINARY[경로]` 바이트 — 존재하지 않는 파트는 null(FETCH 응답에서 NIL).
+ *
+ * ★`BINARY[x]`는 **`BODY[x]`의 디코드판**이다. 그래서 빈 경로(메시지 전체)는 `BODY[]`와
+ * 같이 헤더를 그대로 두고 본문만 푼다 — 헤더까지 base64로 풀려 하면 아무 의미가 없다.
+ * 파트 경로는 `BODY[n]`이 MIME 헤더 없는 본문이므로 그 본문만 푼다.
+ */
+export function extractBinary(raw: Uint8Array, path: readonly number[]): BinaryContent | null {
+  const root = parseStructure(raw);
+  const target = resolvePath(root, path);
+  if (!target) return null;
+  const decoded = decodeCte(raw.subarray(target.bodyStart, target.end), target.encoding);
+  if (decoded.kind === "unknown-cte" || path.length > 0) return decoded;
+
+  const headers = raw.subarray(root.start, root.bodyStart);
+  const out = new Uint8Array(headers.length + decoded.bytes.length);
+  out.set(headers, 0);
+  out.set(decoded.bytes, headers.length);
+  return { kind: "bytes", bytes: out };
 }

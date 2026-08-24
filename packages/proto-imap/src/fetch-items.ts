@@ -27,7 +27,17 @@ export type FetchItem =
       partial: { start: number; count: number } | null;
       /** 응답에 쓸 라벨 — partial은 `<start>`만 표기(RFC 규정). */
       label: string;
-    };
+    }
+  /** BINARY[파트] (RFC 3516) — 전송 인코딩을 **푼** 내용. partial은 푼 뒤 기준. */
+  | {
+      kind: "binary";
+      peek: boolean;
+      path: number[];
+      partial: { start: number; count: number } | null;
+      label: string;
+    }
+  /** BINARY.SIZE[파트] (RFC 3516) — 푼 뒤의 바이트 수. */
+  | { kind: "binarySize"; path: number[]; label: string };
 
 /** 실패(BAD 대상) 시 null. */
 export function parseFetchItems(values: readonly ImapValue[]): FetchItem[] | null {
@@ -111,6 +121,30 @@ function parseSingleItem(text: string, fields: string[] | null): FetchItem | Fet
     }
   }
 
+  // BINARY[...] / BINARY.PEEK[...] / BINARY.SIZE[...] (RFC 3516)
+  const b = /^(BINARY|BINARY\.PEEK|BINARY\.SIZE)\[([^\]]*)\](<(\d+)\.(\d+)>)?$/i.exec(text);
+  if (b && b[2] !== undefined) {
+    // BINARY에는 HEADER.FIELDS가 없다 — 필드 리스트가 붙어 왔다면 문법 오류다.
+    if (fields !== null) return null;
+    const which = (b[1] ?? "").toUpperCase();
+    const path = parseBinaryPath(b[2]);
+    if (path === null) return null;
+    const inner = path.join(".");
+    if (which === "BINARY.SIZE") {
+      // ABNF에 `BINARY.SIZE`용 partial이 없다(RFC 3516 §5) — 크기에 부분은 무의미하다.
+      if (b[4] !== undefined) return null;
+      return { kind: "binarySize", path, label: `BINARY.SIZE[${inner}]` };
+    }
+    const bpartial = b[4] !== undefined && b[5] !== undefined ? { start: Number(b[4]), count: Number(b[5]) } : null;
+    return {
+      kind: "binary",
+      peek: which === "BINARY.PEEK",
+      path,
+      partial: bpartial,
+      label: `BINARY[${inner}]${bpartial ? `<${bpartial.start}>` : ""}`,
+    };
+  }
+
   // BODY[...] / BODY.PEEK[...]
   const m = /^(BODY|BODY\.PEEK)\[([^\]]*)\](<(\d+)\.(\d+)>)?$/i.exec(text);
   if (!m || m[2] === undefined) return null;
@@ -158,4 +192,22 @@ function parseSectionSpec(inner: string, fields: string[] | null): SectionSpec |
     default:
       return null;
   }
+}
+
+/**
+ * `section-binary = "[" [section-part] "]"` (RFC 3516 §5) — **파트 번호만** 온다.
+ *
+ * ★`BINARY[HEADER]`가 문법 오류인 이유가 여기다: ABNF가 `BODY[...]`의 `section-spec`이
+ * 아니라 `section-part`를 쓴다. 헤더에는 전송 인코딩이 없으니 "푼 내용"이라는 말 자체가
+ * 성립하지 않는다. 관용으로 받아 주면 클라이언트가 `BODY[HEADER]`와 같은 것을 기대하게 되고
+ * 그건 우리가 지킬 수 없는 약속이다.
+ */
+function parseBinaryPath(inner: string): number[] | null {
+  if (inner.length === 0) return [];
+  const path: number[] = [];
+  for (const seg of inner.split(".")) {
+    if (!/^[1-9]\d*$/.test(seg)) return null;
+    path.push(Number(seg));
+  }
+  return path;
 }

@@ -38,7 +38,9 @@ describe("ImapEngine — 인사말/기본 명령", () => {
     const e = engine();
     const caps = replies(feed(e, "a1 CAPABILITY\r\n"));
     // capability 목록은 증분마다 자라므로 핵심만 검사 (정확일치는 유지비만 큼)
-    expect(caps[0]).toStartWith("* CAPABILITY IMAP4rev1 LITERAL- SASL-IR");
+    // rev2를 광고하면서도 rev1을 **먼저** 낸다 — 둘 다 지원하는 서버는 rev1로 시작하고
+    // 클라이언트의 `ENABLE IMAP4rev2`로 전환한다(RFC 9051 §6.3.1).
+    expect(caps[0]).toStartWith("* CAPABILITY IMAP4rev1 IMAP4rev2 LITERAL- SASL-IR");
     expect(caps[0]).toContain("AUTH=PLAIN");
     expect(caps[0]).toContain("AUTH=XOAUTH2");
     expect(caps[0]).toContain("AUTH=OAUTHBEARER");

@@ -26,6 +26,8 @@ import { formatUidSet, matchSequenceSet, parseSequenceSet, type SeqRange } from 
 import { evaluateSearch, parseSearchProgram, searchNeedsRaw } from "./search-criteria.ts";
 import { parseFetchItems, type FetchItem } from "./fetch-items.ts";
 import {
+  binaryLiteralWire,
+  extractBinary,
   extractSection,
   formatBodyStructure,
   formatEnvelope,
@@ -259,15 +261,23 @@ type Pending =
   /** 백엔드 요청 대기 — resume이 응답을 액션으로 변환(명령별 continuation). */
   | { kind: "backend"; resume: (res: ImapBackendResponse) => ImapAction[] };
 
-const BASE_CAPABILITIES = ["IMAP4rev1", "LITERAL-", "SASL-IR", "ID", "ENABLE", "NAMESPACE", "CHILDREN", "SPECIAL-USE", "UNSELECT", "UIDPLUS", "MOVE", "IDLE", "CONDSTORE", "QRESYNC", "ESEARCH", "LIST-STATUS", "QUOTA", "QUOTA=RES-STORAGE", "QUOTA=RES-MESSAGE"] as const;
+const BASE_CAPABILITIES = ["IMAP4rev1", "IMAP4rev2", "LITERAL-", "SASL-IR", "ID", "ENABLE", "NAMESPACE", "CHILDREN", "SPECIAL-USE", "UNSELECT", "UIDPLUS", "MOVE", "IDLE", "CONDSTORE", "QRESYNC", "ESEARCH", "SEARCHRES", "BINARY", "LIST-STATUS", "QUOTA", "QUOTA=RES-STORAGE", "QUOTA=RES-MESSAGE"] as const;
 
 /**
  * 쿼터 루트 이름 — 이 저장소의 쿼터는 **계정 단위**라 루트가 하나뿐이다(RFC 9208 §3.1이
  * 허용하는 형태). 빈 문자열이 관례적인 "전체" 루트다.
  */
 const QUOTA_ROOT = "";
-/** ENABLE로 옵트인 가능한 확장(RFC 5161). QRESYNC는 CONDSTORE를 함의(RFC 7162). */
-const ENABLABLE = ["CONDSTORE", "QRESYNC"] as const;
+/**
+ * ENABLE로 옵트인 가능한 확장(RFC 5161). QRESYNC는 CONDSTORE를 함의(RFC 7162).
+ *
+ * ★`IMAP4rev2`도 여기 있다(RFC 9051 §6.3.1). 둘 다 광고하는 서버는 **rev1 모드로 시작**하고
+ * 클라이언트가 `ENABLE IMAP4rev2`를 보내야 rev2 시맨틱으로 바뀐다. 이 저장소의 엔진은
+ * 내부적으로 이미 rev2로 짜여 있지만(\Recent 없음·UTF-8 메일함 이름), **응답 모양**이
+ * 다른 것들 — SEARCH가 ESEARCH로 나가고 SELECT에서 RECENT·UNSEEN이 사라지는 것 —
+ * 은 rev1 클라이언트를 깨뜨리므로 ENABLE 전에는 내지 않는다.
+ */
+const ENABLABLE = ["CONDSTORE", "QRESYNC", "IMAP4rev2"] as const;
 
 export class ImapEngine {
   private readonly hostname: string;
@@ -292,6 +302,16 @@ export class ImapEngine {
   /** `queued`가 붙들고 있는 총 바이트 — 상한 없이 두면 리터럴 상한을 지켜도 같은 메모리를 먹는다. */
   private queuedBytes = 0;
   private readonly enabled = new Set<string>();
+  /**
+   * SEARCHRES(RFC 5182)의 검색 결과 변수 `$` — **UID로** 담는다.
+   *
+   * ★seq로 담으면 안 된다. EXPUNGE 한 번에 뒤쪽 번호가 전부 밀려 저장된 집합이 조용히
+   * 다른 메시지를 가리키게 되고, 그 상태로 `STORE $ +FLAGS \Deleted`가 오면 **엉뚱한 메일을
+   * 지운다**. UID는 밀리지 않으므로 사라진 것만 조회 시 빠진다(RFC 5182 §2.1의 요구와 같다).
+   *
+   * SELECT/EXAMINE 성공 시 비운다(§2.1) — 메일함이 바뀌면 그 번호들은 의미가 없다.
+   */
+  private savedSearch: number[] = [];
   /** 인증 후 복원할 리터럴 상한(APPEND 기준). 인증 전에는 훨씬 작은 값으로 리더를 조인다. */
   private readonly authedMaxLiteralBytes: number;
 
@@ -845,10 +865,17 @@ export class ImapEngine {
         lastSyncModseq: m.highestmodseq,
       };
       this.state = "selected";
+      this.savedSearch = []; // SEARCHRES 리셋(RFC 5182 §2.1) — 메일함이 바뀌면 `$`는 무의미하다
+      const rev2 = this.enabled.has("IMAP4rev2");
       const actions: ImapAction[] = [
         { kind: "reply", text: flagsLine(keywords) },
         { kind: "reply", text: `* ${res.uids.length} EXISTS` },
-        { kind: "reply", text: "* 0 RECENT" }, // rev2 시맨틱 — \Recent 미지원
+        /**
+         * ★rev1에게는 `RECENT`를 **보내야** 한다 — 옛 클라이언트 중에 SELECT 응답에서 이 줄을
+         * 기다리는 것이 있다. 우리는 \Recent를 지원하지 않으므로 값은 늘 0이다.
+         * rev2는 이 응답 자체를 없앴으므로(RFC 9051 §7.3) ENABLE한 클라이언트에겐 보내지 않는다.
+         */
+        ...(rev2 ? [] : [{ kind: "reply" as const, text: "* 0 RECENT" }]),
         { kind: "reply", text: `* OK [UIDVALIDITY ${m.uidvalidity}] UIDs valid` },
         { kind: "reply", text: `* OK [UIDNEXT ${m.uidnext}] predicted next UID` },
         { kind: "reply", text: `* OK [HIGHESTMODSEQ ${m.highestmodseq}] modseq` },
@@ -860,7 +887,9 @@ export class ImapEngine {
             : "* OK [PERMANENTFLAGS ()] read-only",
         },
       ];
-      if (res.firstUnseenSeq !== null) {
+      // rev2는 SELECT의 `[UNSEEN]` 응답 코드를 없앴다(RFC 9051 §7.1 — 클라이언트가
+      // SEARCH UNSEEN으로 직접 구하라는 취지). rev1에게는 그대로 보낸다.
+      if (!rev2 && res.firstUnseenSeq !== null) {
         actions.push({ kind: "reply", text: `* OK [UNSEEN ${res.firstUnseenSeq}] first unseen` });
       }
       const tagged: ImapAction = {
@@ -929,7 +958,7 @@ export class ImapEngine {
       case "EXPUNGE": {
         // UIDPLUS UID EXPUNGE — uid 집합 내 \Deleted만
         const setText = rest.args[0] ? valueText(rest.args[0]) : null;
-        const ranges = setText !== null ? parseSequenceSet(setText) : null;
+        const ranges = setText !== null ? this.resolveSetArg(setText, true) : null;
         if (!ranges) return [{ kind: "reply", text: `${cmd.tag} BAD UID EXPUNGE expects sequence set` }];
         return this.requireSelected(cmd, () => this.cmdExpunge(rest, ranges));
       }
@@ -944,7 +973,7 @@ export class ImapEngine {
     const view = this.selected;
     if (!view) return [{ kind: "reply", text: `${cmd.tag} BAD command requires a selected mailbox` }];
     const setText = cmd.args[0] ? valueText(cmd.args[0]) : null;
-    const ranges = setText !== null ? parseSequenceSet(setText) : null;
+    const ranges = setText !== null ? this.resolveSetArg(setText, uidMode) : null;
     // CONDSTORE 수정자(RFC 7162): 마지막 인자가 (CHANGEDSINCE n) 리스트
     let itemArgs = cmd.args.slice(1);
     let changedSince: number | null = null;
@@ -971,8 +1000,17 @@ export class ImapEngine {
       return [{ kind: "reply", text: `${cmd.tag} OK ${verb} completed` }];
     }
 
-    const needRaw = items.some((it) => it.kind === "envelope" || it.kind === "body" || it.kind === "bodystructure" || it.kind === "section");
-    const markSeen = view.readWrite && items.some((it) => it.kind === "section" && !it.peek);
+    const needRaw = items.some(
+      (it) =>
+        it.kind === "envelope" ||
+        it.kind === "body" ||
+        it.kind === "bodystructure" ||
+        it.kind === "section" ||
+        it.kind === "binary" ||
+        it.kind === "binarySize",
+    );
+    // BINARY도 BODY[]와 같이 \Seen을 세운다(RFC 3516 — .PEEK만 예외).
+    const markSeen = view.readWrite && items.some((it) => (it.kind === "section" || it.kind === "binary") && !it.peek);
 
     /**
      * ★배치로 나눠 가져온다. 예전엔 메일함 **전체** uid를 한 요청에 실어, 백엔드가 그만큼의
@@ -983,19 +1021,31 @@ export class ImapEngine {
      * 세션 뷰는 SELECT 시점 스냅샷이고 사라진 uid는 예전부터 조용히 생략됐다(아래 `!data`).
      */
     const batchSize = needRaw ? FETCH_BATCH_RAW : FETCH_BATCH_META;
-    const emit = (batch: readonly { seq: number; uid: number }[], res: ImapBackendResponse): ImapAction[] => {
-      if (res.kind !== "messages") return [];
+    /**
+     * 배치 하나를 응답 줄로. `unknownCte`가 서면 **명령 전체가 실패**한다 —
+     * 풀 수 없는 인코딩은 부분 성공으로 넘길 수 없다(RFC 3516 §4.2가 NO를 요구한다).
+     */
+    const emit = (
+      batch: readonly { seq: number; uid: number }[],
+      res: ImapBackendResponse,
+    ): { actions: ImapAction[]; unknownCte: boolean } => {
+      if (res.kind !== "messages") return { actions: [], unknownCte: false };
       const byUid = new Map(res.messages.map((m) => [m.uid, m]));
       const actions: ImapAction[] = [];
       for (const t of batch) {
         const data = byUid.get(t.uid);
         if (!data) continue; // 스냅샷 이후 사라진 메시지 — 조용히 생략(EXPUNGE는 별도 흐름)
         if (changedSince !== null && data.modseq <= changedSince) continue; // CONDSTORE 필터
+        const parts: string[] = [];
+        for (const it of items) {
+          const wire = this.fetchItemWire(it, t.uid, data);
+          if (wire === null) return { actions, unknownCte: true };
+          parts.push(wire);
+        }
         if (items.some((it) => it.kind === "flags")) actions.push(...this.ensureFlagsAnnounced(data.flags));
-        const parts = items.map((it) => this.fetchItemWire(it, t.uid, data));
         actions.push({ kind: "replyBinary", bytes: wireToBytes(`* ${t.seq} FETCH (${parts.join(" ")})\r\n`) });
       }
-      return actions;
+      return { actions, unknownCte: false };
     };
 
     /** 배치 하나를 요청하고, 응답을 흘린 뒤 다음 배치를 이어 건다(꼬리 연쇄). */
@@ -1006,7 +1056,11 @@ export class ImapEngine {
         (res) => {
           if (res.kind === "no") return [ImapEngine.noReply(cmd.tag, verb, res)];
           if (res.kind !== "messages") return [{ kind: "reply", text: `${cmd.tag} NO ${verb} failed` }];
-          const actions = emit(batch, res);
+          const { actions, unknownCte } = emit(batch, res);
+          if (unknownCte) {
+            actions.push({ kind: "reply", text: `${cmd.tag} NO [UNKNOWN-CTE] ${verb} cannot decode section` });
+            return actions;
+          }
           const next = offset + batchSize;
           if (next < targets.length) return [...actions, ...fetchFrom(next)];
           actions.push({ kind: "reply", text: `${cmd.tag} OK ${verb} completed` });
@@ -1077,7 +1131,7 @@ export class ImapEngine {
       return [{ kind: "reply", text: `${cmd.tag} NO [READ-ONLY] mailbox is read-only` }];
     }
     const setText = cmd.args[0] ? valueText(cmd.args[0]) : null;
-    const ranges = setText !== null ? parseSequenceSet(setText) : null;
+    const ranges = setText !== null ? this.resolveSetArg(setText, uidMode) : null;
     const dest = this.mailboxArg(cmd, 1);
     if (!ranges || dest === null || cmd.args.length !== 2) {
       return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} invalid arguments` }];
@@ -1132,7 +1186,7 @@ export class ImapEngine {
       return [{ kind: "reply", text: `${cmd.tag} NO [READ-ONLY] mailbox is read-only` }];
     }
     const setText = cmd.args[0] ? valueText(cmd.args[0]) : null;
-    const ranges = setText !== null ? parseSequenceSet(setText) : null;
+    const ranges = setText !== null ? this.resolveSetArg(setText, uidMode) : null;
     // CONDSTORE 수정자(RFC 7162 §3.1.3): STORE set (UNCHANGEDSINCE n) item flags
     let argIdx = 1;
     let unchangedSince: number | null = null;
@@ -1341,6 +1395,32 @@ export class ImapEngine {
     return actions;
   }
 
+  /**
+   * 시퀀스셋 인자 해석 — `$`(SEARCHRES, RFC 5182)를 저장된 검색 결과로 편다.
+   *
+   * ★저장은 UID인데 사용처는 seq일 수도 UID일 수도 있다(§2.4: `UID SEARCH`로 저장한 `$`를
+   * 비UID `FETCH`에 쓰는 것이 허용된다). 그래서 **쓰는 시점에** 모드에 맞춰 옮긴다 —
+   * 저장 시점에 옮겨 두면 그 사이의 EXPUNGE가 번호를 밀어 틀린 집합이 된다.
+   *
+   * 뷰에 없는 UID(그 사이 사라진 것)는 조용히 빠진다. 그게 §2.1이 요구하는 동작이다.
+   */
+  private resolveSetArg(text: string, uidMode: boolean): SeqRange[] | null {
+    if (text !== "$") return parseSequenceSet(text);
+    const view = this.selected;
+    if (!view) return null;
+    const numbers: number[] = [];
+    for (const uid of this.savedSearch) {
+      if (uidMode) {
+        if (view.uids.includes(uid)) numbers.push(uid);
+        continue;
+      }
+      const i = view.uids.indexOf(uid);
+      if (i !== -1) numbers.push(i + 1);
+    }
+    numbers.sort((a, b) => a - b);
+    return numbers.map((n) => ({ from: n, to: n }));
+  }
+
   /** SEARCH / UID SEARCH (RFC 9051 §6.4.4) — rev1 고전 응답(`* SEARCH n...`). */
   private cmdSearch(cmd: ParsedCommand, uidMode: boolean): ImapAction[] {
     const verb = uidMode ? "UID SEARCH" : "SEARCH";
@@ -1353,13 +1433,20 @@ export class ImapEngine {
       esearch = new Set();
       for (const o of cmd.args[1].items) {
         const t = valueText(o)?.toUpperCase();
-        if (t !== "MIN" && t !== "MAX" && t !== "COUNT" && t !== "ALL") {
+        if (t !== "MIN" && t !== "MAX" && t !== "COUNT" && t !== "ALL" && t !== "SAVE") {
           return [{ kind: "reply", text: `${cmd.tag} BAD unknown RETURN option` }];
         }
         esearch.add(t);
       }
       if (esearch.size === 0) esearch.add("ALL"); // RETURN () == RETURN (ALL) — RFC 4731
       critArgs = cmd.args.slice(2);
+    } else if (this.enabled.has("IMAP4rev2")) {
+      /**
+       * ★rev2에서는 RETURN이 없어도 **ESEARCH로** 답한다(RFC 9051 §6.4.4 — 고전
+       * `* SEARCH n n n` 응답이 rev2에서 사라졌다). rev1 클라이언트는 ESEARCH를 못 읽으므로
+       * ENABLE 전에는 절대 이 갈래로 오면 안 된다.
+       */
+      esearch = new Set(["ALL"]);
     }
     const program = parseSearchProgram(critArgs);
     if (!program.ok) {
@@ -1373,8 +1460,10 @@ export class ImapEngine {
       ];
     }
     if (view.uids.length === 0) {
+      if (esearch?.has("SAVE")) this.savedSearch = [];
+      const line = ImapEngine.searchReply(cmd.tag, uidMode, esearch, []);
       return [
-        { kind: "reply", text: ImapEngine.searchReply(cmd.tag, uidMode, esearch, []) },
+        ...(line === null ? [] : [{ kind: "reply" as const, text: line }]),
         { kind: "reply", text: `${cmd.tag} OK ${verb} completed` },
       ];
     }
@@ -1392,6 +1481,8 @@ export class ImapEngine {
      */
     const batchSize = needRaw ? FETCH_BATCH_RAW : FETCH_BATCH_META;
     const hits: number[] = [];
+    /** SAVE용 — `$`는 UID로 담는다(위 `savedSearch` 주석). hits와 같은 순서·같은 길이다. */
+    const hitUids: number[] = [];
     const searchFrom = (offset: number): ImapAction[] => {
       const batchUids = view.uids.slice(offset, offset + batchSize);
       return this.callBackend(
@@ -1410,12 +1501,17 @@ export class ImapEngine {
               maxSeq,
               maxUid,
             );
-            if (matched) hits.push(uidMode ? uid : i + 1);
+            if (matched) {
+              hits.push(uidMode ? uid : i + 1);
+              hitUids.push(uid);
+            }
           });
           const next = offset + batchSize;
           if (next < view.uids.length) return searchFrom(next);
+          if (esearch?.has("SAVE")) this.savedSearch = ImapEngine.savedFor(esearch, hitUids);
+          const line = ImapEngine.searchReply(cmd.tag, uidMode, esearch, hits);
           return [
-            { kind: "reply", text: ImapEngine.searchReply(cmd.tag, uidMode, esearch, hits) },
+            ...(line === null ? [] : [{ kind: "reply" as const, text: line }]),
             { kind: "reply", text: `${cmd.tag} OK ${verb} completed` },
           ];
         },
@@ -1424,9 +1520,32 @@ export class ImapEngine {
     return searchFrom(0);
   }
 
-  /** SEARCH 응답 — 고전(`* SEARCH n...`) 또는 ESEARCH(RFC 4731). hits는 seq/uid(모드별). */
-  private static searchReply(tag: string, uidMode: boolean, esearch: Set<string> | null, hits: readonly number[]): string {
+  /**
+   * `$`에 담을 UID들 (RFC 5182 §2.1의 표).
+   *
+   * SAVE가 MIN/MAX와만 함께 오면 **그 한두 통만** 담고, ALL이나 COUNT가 섞이면 전부 담는다.
+   * hitUids는 오름차순이라 MIN은 첫 원소, MAX는 마지막 원소다.
+   */
+  private static savedFor(esearch: Set<string>, hitUids: readonly number[]): number[] {
+    if (hitUids.length === 0) return [];
+    const minMaxOnly = (esearch.has("MIN") || esearch.has("MAX")) && !esearch.has("ALL") && !esearch.has("COUNT");
+    if (!minMaxOnly) return [...hitUids];
+    const out = new Set<number>();
+    if (esearch.has("MIN")) out.add(hitUids[0]!);
+    if (esearch.has("MAX")) out.add(hitUids[hitUids.length - 1]!);
+    return [...out].sort((a, b) => a - b);
+  }
+
+  /**
+   * SEARCH 응답 — 고전(`* SEARCH n...`) 또는 ESEARCH(RFC 4731). hits는 seq/uid(모드별).
+   *
+   * ★SAVE만 있으면 **아무 응답도 내지 않는다**(RFC 5182 §2.2: "In absence of any other
+   * SEARCH result option, the SAVE result option also suppresses any SEARCH response").
+   * 그래서 반환형이 `| null`이다.
+   */
+  private static searchReply(tag: string, uidMode: boolean, esearch: Set<string> | null, hits: readonly number[]): string | null {
     if (esearch === null) return `* SEARCH${hits.length > 0 ? " " + hits.join(" ") : ""}`;
+    if (esearch.has("SAVE") && esearch.size === 1) return null;
     const parts = [`(TAG "${tag}")`];
     if (uidMode) parts.push("UID");
     // MIN/MAX/ALL은 매칭 없으면 생략, COUNT는 항상(RFC 4731 §3.1)
@@ -1440,7 +1559,7 @@ export class ImapEngine {
   }
 
   /** FETCH 항목 하나의 와이어 문자열(latin1) — fetch-format.ts 규약. */
-  private fetchItemWire(it: FetchItem, uid: number, data: ImapFetchData): string {
+  private fetchItemWire(it: FetchItem, uid: number, data: ImapFetchData): string | null {
     const raw = data.raw ?? new Uint8Array(0);
     switch (it.kind) {
       case "flags":
@@ -1465,6 +1584,20 @@ export class ImapEngine {
           bytes = bytes.subarray(it.partial.start, it.partial.start + it.partial.count);
         }
         return `${it.label} ${bytes === null ? "NIL" : literalWire(bytes)}`;
+      }
+      case "binary": {
+        const got = extractBinary(raw, it.path);
+        if (got === null) return `${it.label} NIL`; // 없는 파트 — 섹션과 같은 규약
+        if (got.kind === "unknown-cte") return null; // 호출자가 NO [UNKNOWN-CTE]로 옮긴다
+        // ★partial은 **푼 뒤** 기준이다(RFC 3516 §4.2) — 인코딩된 바이트로 자르면 쓰레기가 나온다.
+        const bytes = it.partial ? got.bytes.subarray(it.partial.start, it.partial.start + it.partial.count) : got.bytes;
+        return `${it.label} ${binaryLiteralWire(bytes)}`;
+      }
+      case "binarySize": {
+        const got = extractBinary(raw, it.path);
+        if (got === null) return `${it.label} 0`; // 없는 파트는 0(크기 항목에 NIL은 문법상 못 온다)
+        if (got.kind === "unknown-cte") return null;
+        return `${it.label} ${got.bytes.length}`;
       }
     }
   }
@@ -1763,11 +1896,27 @@ export class ImapEngine {
     if (this.state === "not-authenticated") {
       return [{ kind: "reply", text: `${cmd.tag} BAD ENABLE not allowed before authentication` }];
     }
-    const known: readonly string[] = ENABLABLE;
+    /**
+     * ★선택 상태에서는 거부한다(RFC 5161 §3.1: "only be used in the authenticated state,
+     * before any mailbox is selected"). 예전엔 받아 줬는데, `IMAP4rev2`가 ENABLE 대상이 된
+     * 지금은 그게 위험하다 — SELECT 도중에 켜지면 그 세션의 SEARCH 응답 모양이 중간에
+     * `* SEARCH`에서 `* ESEARCH`로 바뀐다. 클라이언트는 그 전환을 알 방법이 없다.
+     */
+    if (this.state === "selected") {
+      return [{ kind: "reply", text: `${cmd.tag} BAD ENABLE not allowed with a mailbox selected` }];
+    }
+    /**
+     * ★대소문자 무시로 맞추되 **정본 철자로 되돌린다.** 예전엔 `toUpperCase()` 한 값을 그대로
+     * 비교했는데, CONDSTORE·QRESYNC가 전부 대문자라 드러나지 않았다. `IMAP4rev2`를 넣자마자
+     * `IMAP4REV2`가 되어 목록에 없는 이름이 됐고, ENABLE이 조용히 아무것도 안 켰다 —
+     * 클라이언트는 `* ENABLED`(빈 줄)를 받고 rev1로 계속 간다.
+     */
     const accepted: string[] = [];
     for (const arg of cmd.args) {
-      const name = valueText(arg)?.toUpperCase();
-      if (name && known.includes(name) && !this.enabled.has(name)) {
+      const text = valueText(arg);
+      if (text === null) continue;
+      const name = ENABLABLE.find((n) => n.toUpperCase() === text.toUpperCase());
+      if (name && !this.enabled.has(name)) {
         this.enabled.add(name);
         if (name === "QRESYNC") this.enabled.add("CONDSTORE"); // 함의(RFC 7162)
         accepted.push(name);
