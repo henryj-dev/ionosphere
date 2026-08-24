@@ -102,3 +102,4 @@ export {
   sweepVacationSent,
   type VacationResponseRow,
 } from "./vacation-store.ts";
+export { sendableAddresses, type IdentityInput } from "./jmap-store.ts";

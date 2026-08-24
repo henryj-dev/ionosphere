@@ -26,12 +26,17 @@ import {
   createSubmission,
   getEmailsForJmap,
   getMessageTextForSnippets,
+  createIdentity,
+  deleteIdentity,
   getIdentities,
+  sendableAddresses,
+  updateIdentity,
   getSubmissions,
   getThreadsForJmap,
   jmapChanges,
   jmapState,
   queryEmails,
+  type IdentityInput,
 } from "./jmap-store.ts";
 import { tenantUsage } from "./usage-store.ts";
 import type { AccountSnapshot, StoreInternals } from "./internals.ts";
@@ -2004,6 +2009,23 @@ export class Store {
 
   getIdentities(accountId: string): Promise<{ id: string; email: string; name: string | null; replyTo: string | null; textSignature: string; htmlSignature: string }[]> {
     return getIdentities(this.internals, accountId);
+  }
+
+  /** 이 계정이 보낼 수 있는 주소들 — `Identity/set`이 이 목록으로 막는다(jmap-store.ts 주석). */
+  sendableAddresses(accountId: string): Promise<Set<string>> {
+    return sendableAddresses(this.internals, accountId);
+  }
+
+  createIdentity(accountId: string, v: IdentityInput): Promise<string> {
+    return createIdentity(this.internals, accountId, v);
+  }
+
+  updateIdentity(accountId: string, id: string, v: IdentityInput): Promise<boolean> {
+    return updateIdentity(this.internals, accountId, id, v);
+  }
+
+  deleteIdentity(accountId: string, id: string): Promise<boolean> {
+    return deleteIdentity(this.internals, accountId, id);
   }
 
   async getAccountTenantId(accountId: string): Promise<string | null> {

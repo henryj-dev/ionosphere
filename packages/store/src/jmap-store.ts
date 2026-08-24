@@ -387,3 +387,77 @@ export async function getMessageTextForSnippets(
   }
   return out;
 }
+
+
+// ── Identity/set (RFC 8621 §6) ────────────────────────────────────────────────
+
+/**
+ * 이 계정이 **보낼 수 있는 주소**들 — 계정 대표 주소 + 이 계정으로 라우팅되는 알리아스.
+ *
+ * ★`Identity/set`이 이 목록으로 막는다. 없으면 사용자가 남의 주소로 신원을 만들 수 있고,
+ * 발송 게이트(`enqueueMessage`의 §8 도메인 검증)가 나중에 막더라도 그때는 **이미 보낸 줄
+ * 아는 상태**다 — 실패는 만들 때 나야 원인이 보인다.
+ */
+export async function sendableAddresses(s: StoreInternals, accountId: string): Promise<Set<string>> {
+  const out = new Set<string>();
+  const { rows: acc } = await s.db.query({ sql: "SELECT email FROM accounts WHERE id = ?", params: [accountId] });
+  if (acc[0]) out.add(String(acc[0].email).toLowerCase());
+  /**
+   * ★목적지는 `address_targets`에 있다(migration 006에서 팬아웃됐다). `addresses.account_id`를
+   * 보면 **없는 컬럼**이라 조회가 통째로 실패한다 — 한 주소가 여러 계정으로 갈 수 있게
+   * 바뀐 것이 그 변경의 요지였다.
+   */
+  const { rows } = await s.db.query({
+    sql: `SELECT a.localpart AS localpart, d.name AS domain
+            FROM address_targets t
+            JOIN addresses a ON a.id = t.address_id
+            JOIN domains d ON d.id = a.domain_id
+           WHERE t.account_id = ?`,
+    params: [accountId],
+  });
+  for (const r of rows) out.add(`${String(r.localpart)}@${String(r.domain)}`.toLowerCase());
+  return out;
+}
+
+export interface IdentityInput {
+  email: string;
+  name: string | null;
+  replyTo: string | null;
+  textSignature: string;
+  htmlSignature: string;
+}
+
+export async function createIdentity(s: StoreInternals, accountId: string, v: IdentityInput): Promise<string> {
+  const id = ulid();
+  await s.db.batch([
+    {
+      sql: `INSERT INTO identities (id, account_id, email, name, reply_to, text_sig, html_sig, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      params: [id, accountId, v.email.toLowerCase(), v.name, v.replyTo, v.textSignature, v.htmlSignature, Date.now()],
+    },
+  ]);
+  return id;
+}
+
+/** 통째로 덮어쓴다 — 호출자(`/set`)가 patch를 현재 값 위에 얹어 완성한 뒤 넘긴다. */
+export async function updateIdentity(s: StoreInternals, accountId: string, id: string, v: IdentityInput): Promise<boolean> {
+  const r = await s.db.batch([
+    {
+      sql: `UPDATE identities SET email = ?, name = ?, reply_to = ?, text_sig = ?, html_sig = ?
+             WHERE id = ? AND account_id = ?`,
+      params: [v.email.toLowerCase(), v.name, v.replyTo, v.textSignature, v.htmlSignature, id, accountId],
+    },
+  ]);
+  return (r[0]?.changes ?? 0) > 0;
+}
+
+/**
+ * 신원 삭제.
+ *
+ * ★계정 스코프를 **WHERE에** 둔다(id만으로 지우지 않는다). 삭제 대상 id는 클라이언트가
+ * 주는 값이라, 스코프가 빠지면 남의 신원을 지울 수 있다.
+ */
+export async function deleteIdentity(s: StoreInternals, accountId: string, id: string): Promise<boolean> {
+  const r = await s.db.batch([{ sql: "DELETE FROM identities WHERE id = ? AND account_id = ?", params: [id, accountId] }]);
+  return (r[0]?.changes ?? 0) > 0;
+}

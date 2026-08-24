@@ -22,6 +22,8 @@ const AUTH = "Basic " + Buffer.from("you@test.local:pw-qv").toString("base64");
 const USING = [
   "urn:ietf:params:jmap:core",
   "urn:ietf:params:jmap:mail",
+  // Identity는 submission 모듈 소속이다 — using에 없으면 unknownMethod가 된다.
+  "urn:ietf:params:jmap:submission",
   "urn:ietf:params:jmap:quota",
   "urn:ietf:params:jmap:vacationresponse",
 ];
@@ -235,5 +237,75 @@ describe("VacationResponse가 배달 경로의 게이트를 탄다", () => {
     const v = (body(r).list as Record<string, unknown>[])[0]!;
     expect(v.isEnabled).toBe(true); // 설정은 켜져 있다
     expect(v.toDate).toBe("2020-01-02T00:00:00.000Z"); // 창은 이미 지났다
+  });
+});
+
+describe("Identity/set (RFC 8621 §6.3)", () => {
+  /**
+   * ★주소 소유 검사가 이 메서드의 핵심이다. 없으면 남의 주소로 신원을 만들 수 있고,
+   * 발송 게이트가 나중에 막더라도 그때는 **이미 보낸 줄 아는** 상태다.
+   */
+  test("보낼 수 없는 주소로는 만들 수 없다", async () => {
+    const r = await jmapCall([["Identity/set", { accountId, create: { i1: { email: "someone@elsewhere.test" } } }, "c0"]]);
+    const notCreated = body(r).notCreated as Record<string, { type: string }>;
+    expect(notCreated.i1?.type).toBe("forbidden");
+  });
+
+  test("자기 주소로는 만들 수 있다", async () => {
+    const r = await jmapCall([
+      ["Identity/set", { accountId, create: { i1: { email: "you@test.local", name: "Me" } } }, "c0"],
+      ["Identity/get", { accountId, ids: null }, "c1"],
+    ]);
+    const created = body(r, 0).created as Record<string, { id: string }>;
+    expect(created.i1?.id).toBeTruthy();
+    const list = body(r, 1).list as Record<string, unknown>[];
+    expect(list.some((i) => i.name === "Me")).toBe(true);
+  });
+
+  test("부분 갱신이 나머지를 지우지 않는다", async () => {
+    const c = await jmapCall([["Identity/set", { accountId, create: { i: { email: "you@test.local", name: "Keep", textSignature: "sig" } } }, "c0"]]);
+    const id = (body(c).created as Record<string, { id: string }>).i!.id;
+    const r = await jmapCall([
+      ["Identity/set", { accountId, update: { [id]: { textSignature: "new" } } }, "c0"],
+      ["Identity/get", { accountId, ids: [id] }, "c1"],
+    ]);
+    const got = (body(r, 1).list as Record<string, unknown>[])[0]!;
+    expect(got.name).toBe("Keep");
+    expect(got.textSignature).toBe("new");
+  });
+
+  test("email을 남의 주소로 바꾸는 것도 막는다", async () => {
+    const c = await jmapCall([["Identity/set", { accountId, create: { i: { email: "you@test.local" } } }, "c0"]]);
+    const id = (body(c).created as Record<string, { id: string }>).i!.id;
+    const r = await jmapCall([["Identity/set", { accountId, update: { [id]: { email: "someone@elsewhere.test" } } }, "c0"]]);
+    expect((body(r).notUpdated as Record<string, { type: string }>)[id]?.type).toBe("forbidden");
+  });
+
+  test("삭제할 수 있다", async () => {
+    const c = await jmapCall([["Identity/set", { accountId, create: { i: { email: "you@test.local" } } }, "c0"]]);
+    const id = (body(c).created as Record<string, { id: string }>).i!.id;
+    const r = await jmapCall([["Identity/set", { accountId, destroy: [id] }, "c0"]]);
+    expect(body(r).destroyed).toEqual([id]);
+  });
+
+  test("없는 id는 notUpdated/notDestroyed", async () => {
+    const r = await jmapCall([
+      ["Identity/set", { accountId, update: { nope: { name: "x" } } }, "c0"],
+      ["Identity/set", { accountId, destroy: ["nope"] }, "c1"],
+    ]);
+    expect((body(r, 0).notUpdated as Record<string, { type: string }>).nope?.type).toBe("notFound");
+    expect((body(r, 1).notDestroyed as Record<string, { type: string }>).nope?.type).toBe("notFound");
+  });
+});
+
+describe("Blob/copy (RFC 8620 §6.3)", () => {
+  /** 계정이 하나뿐이라 늘 거절이다 — 중요한 것은 그 거절이 **규격이 정한** 것이라는 점이다. */
+  test("같은 계정이면 invalidArguments, 다른 계정이면 fromAccountNotFound", async () => {
+    const same = await jmapCall([["Blob/copy", { accountId, fromAccountId: accountId, blobIds: [] }, "c0"]]);
+    expect(name(same)).toBe("error");
+    expect(body(same).type).toBe("invalidArguments");
+
+    const other = await jmapCall([["Blob/copy", { accountId, fromAccountId: "other", blobIds: [] }, "c0"]]);
+    expect(body(other).type).toBe("fromAccountNotFound");
   });
 });

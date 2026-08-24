@@ -178,6 +178,12 @@ export function buildMailModule(db: DbDriver, store: Store, blobs: BlobStore): C
       "Email/copy": (args, ctx) => emailCopy(args, ctx.accountId),
       // RFC 8620 §5.6 — 델타를 계산할 수 없다는 것을 **규격의 말로** 알린다(standard.ts 주석).
       "SearchSnippet/get": (args, ctx) => searchSnippetGet(args, ctx.accountId, store),
+      /**
+       * `Blob/copy`(RFC 8620 §6.3) — **계정 간** 블롭 복사. `Email/copy`와 같은 이유로
+       * 우리 세션에서는 늘 거절이지만, 그 거절이 **규격이 정한 거절**인 것이 중요하다
+       * (`emailCopy` 주석 참조).
+       */
+      "Blob/copy": (args, ctx) => emailCopy(args, ctx.accountId),
       "Email/queryChanges": (args, ctx) => standardQueryChanges(args, ctx.accountId),
       "Mailbox/queryChanges": (args, ctx) => standardQueryChanges(args, ctx.accountId),
       "Thread/get": (args, ctx) => standardGet(args, ctx.accountId, threadGetSource),
@@ -470,6 +476,7 @@ export function buildSubmissionModule(db: DbDriver, store: Store, blobs: BlobSto
     capability: SUBMISSION_CAPABILITY,
     methods: {
       "Identity/get": (args, ctx) => identityGet(args, ctx.accountId),
+      "Identity/set": (args, ctx) => standardSet(args, ctx.accountId, ctx, buildIdentitySetSource(store)),
       "Identity/changes": async (args, ctx) => {
         const acc = requireAccountId(args, ctx.accountId);
         if (typeof args.sinceState !== "string") throw new MethodError("invalidArguments");
@@ -1191,6 +1198,78 @@ export function buildVacationModule(db: DbDriver, store: Store): CapabilityModul
     methods: {
       "VacationResponse/get": (args, ctx) => standardGet(args, ctx.accountId, getSource),
       "VacationResponse/set": (args, ctx) => standardSet(args, ctx.accountId, ctx, setSource),
+    },
+  };
+}
+
+
+/**
+ * `Identity/set` (RFC 8621 §6.3).
+ *
+ * ★핵심은 **주소 소유 검사**다. 없으면 사용자가 남의 주소로 신원을 만들 수 있다. 발송
+ * 게이트(`enqueueMessage`의 §8 도메인 검증)가 나중에 막긴 하지만, 그때는 사용자가 이미
+ * 보낸 줄 아는 상태다 — 실패는 **만들 때** 나야 원인이 보인다.
+ *
+ * ★기본 신원은 **합성**이다(`getIdentities`가 신원 행이 없으면 계정 주소로 하나를 만든다).
+ * 그건 DB에 없으므로 수정·삭제 대상이 아니고, 그 사실을 `notFound`로 알린다 —
+ * 조용히 성공시키면 사용자가 바꿨다고 믿는다.
+ */
+function buildIdentitySetSource(store: Store): SetSource {
+  const str = (raw: unknown, field: string, allowNull: boolean): string | null => {
+    if (raw === null || raw === undefined) {
+      if (allowNull) return null;
+      throw new SetItemError("invalidProperties", { properties: [field] });
+    }
+    if (typeof raw !== "string") throw new SetItemError("invalidProperties", { properties: [field] });
+    return raw;
+  };
+
+  const requireOwned = async (accountId: string, email: string): Promise<void> => {
+    const allowed = await store.sendableAddresses(accountId);
+    if (!allowed.has(email.toLowerCase())) {
+      /**
+       * ★`forbidden`이지 `invalidProperties`가 아니다. 주소 형식이 틀린 게 아니라 **권한이
+       * 없는** 것이고, 클라이언트가 그 둘을 다르게 표시해야 사용자가 무엇을 고칠지 안다.
+       */
+      throw new SetItemError("forbidden", { description: `보낼 수 없는 주소입니다: ${email}` });
+    }
+  };
+
+  return {
+    state: async (accountId) => (await store.jmapState(accountId)).submission,
+    create: async (accountId, props) => {
+      const email = str(props.email, "email", false)!;
+      await requireOwned(accountId, email);
+      const v = {
+        email,
+        name: str(props.name, "name", true),
+        replyTo: str(props.replyTo, "replyTo", true),
+        textSignature: str(props.textSignature, "textSignature", true) ?? "",
+        htmlSignature: str(props.htmlSignature, "htmlSignature", true) ?? "",
+      };
+      const id = await store.createIdentity(accountId, v);
+      // 서버가 정하는 값(RFC 8621 §6.1: mayDelete는 서버 소관)도 함께 돌려준다.
+      return { id, serverProps: { ...v, mayDelete: true } };
+    },
+    update: async (accountId, id, patch) => {
+      const all = await store.getIdentities(accountId);
+      const cur = all.find((i) => i.id === id);
+      if (!cur) throw new SetItemError("notFound");
+      // 패치는 현재 값 **위에** 얹는다 — 통째로 덮으면 서명만 바꾸려다 이름이 지워진다.
+      const v = {
+        email: "email" in patch ? str(patch.email, "email", false)! : cur.email,
+        name: "name" in patch ? str(patch.name, "name", true) : cur.name,
+        replyTo: "replyTo" in patch ? str(patch.replyTo, "replyTo", true) : cur.replyTo,
+        textSignature: "textSignature" in patch ? (str(patch.textSignature, "textSignature", true) ?? "") : cur.textSignature,
+        htmlSignature: "htmlSignature" in patch ? (str(patch.htmlSignature, "htmlSignature", true) ?? "") : cur.htmlSignature,
+      };
+      if (v.email.toLowerCase() !== cur.email.toLowerCase()) await requireOwned(accountId, v.email);
+      // 합성 기본 신원은 DB에 없다 — 바꿨다고 믿게 두지 않는다.
+      if (!(await store.updateIdentity(accountId, id, v))) throw new SetItemError("notFound");
+      return null;
+    },
+    destroy: async (accountId, id) => {
+      if (!(await store.deleteIdentity(accountId, id))) throw new SetItemError("notFound");
     },
   };
 }
