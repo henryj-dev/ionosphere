@@ -4,10 +4,26 @@
  *   "enc$v1$<saltB64>$<ivB64>$<tagB64>$<dataB64>"  (암호화)
  *   "plain$<원문>"                                  (마스터키 미설정 — 호출자가 경고 책임)
  */
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes, scrypt as scryptCb, scryptSync } from "node:crypto";
+
+const KDF = { N: 16384, r: 8, p: 1 } as const;
 
 function deriveKey(passphrase: string, salt: Buffer): Buffer {
-  return scryptSync(passphrase, salt, 32, { N: 16384, r: 8, p: 1 });
+  return scryptSync(passphrase, salt, 32, KDF);
+}
+
+/**
+ * 비동기 키 유도 — libuv 스레드풀에서 돈다.
+ *
+ * ★왜 필요한가: `scryptSync`는 실측 **85.7ms** 동안 이벤트 루프를 통째로 막는다. 이 저장소는
+ * 같은 위험을 이미 두 곳에 적어 뒀지만(`store/auth.ts` scryptAsync · `core/scram.ts` pbkdf2)
+ * 그 교훈이 봉인 해제 경로로는 전파되지 않았다. 전 프로토콜이 단일 프로세스라 그동안
+ * 25·587·993·995가 함께 멈춘다.
+ */
+function deriveKeyAsync(passphrase: string, salt: Buffer): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    scryptCb(passphrase, salt, 32, KDF, (err, key) => (err ? reject(err) : resolve(key)));
+  });
 }
 
 /**
@@ -41,19 +57,52 @@ export function seal(plaintext: string, passphrase: string | undefined): SealRes
   };
 }
 
-/** 잘못된 키/손상 데이터는 throw — 비밀 복호 실패를 조용히 넘기지 않는다. */
-export function open(sealed: string, passphrase: string | undefined): string {
-  if (sealed.startsWith("plain$")) return sealed.slice("plain$".length);
+/** 봉인 문자열을 뜯는다 — 형식 검증은 동기·비동기가 공유해야 갈라지지 않는다. */
+function parseSealed(
+  sealed: string,
+  passphrase: string | undefined,
+): { plain: string } | { salt: Buffer; iv: Buffer; tag: Buffer; data: Buffer; passphrase: string } {
+  if (sealed.startsWith("plain$")) return { plain: sealed.slice("plain$".length) };
   const parts = sealed.split("$");
   if (parts.length !== 6 || parts[0] !== "enc" || parts[1] !== "v1") {
     throw new Error("secretbox: unknown format");
   }
   if (!passphrase) throw new Error("secretbox: master key required to open encrypted secret");
-  const salt = Buffer.from(parts[2]!, "base64");
-  const iv = Buffer.from(parts[3]!, "base64");
-  const tag = Buffer.from(parts[4]!, "base64");
-  const data = Buffer.from(parts[5]!, "base64");
-  const decipher = createDecipheriv("aes-256-gcm", deriveKey(passphrase, salt), iv);
+  return {
+    salt: Buffer.from(parts[2]!, "base64"),
+    iv: Buffer.from(parts[3]!, "base64"),
+    tag: Buffer.from(parts[4]!, "base64"),
+    data: Buffer.from(parts[5]!, "base64"),
+    passphrase,
+  };
+}
+
+function decrypt(key: Buffer, iv: Buffer, tag: Buffer, data: Buffer): string {
+  const decipher = createDecipheriv("aes-256-gcm", key, iv);
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(data), decipher.final()]).toString("utf8");
+}
+
+/**
+ * 잘못된 키/손상 데이터는 throw — 비밀 복호 실패를 조용히 넘기지 않는다.
+ *
+ * ⚠ **이벤트 루프를 85ms 막는다**(scryptSync). 부팅·CLI처럼 한 번 도는 경로에서만 쓸 것.
+ * 요청·메시지마다 도는 경로에서는 `openAsync()`를 쓴다.
+ */
+export function open(sealed: string, passphrase: string | undefined): string {
+  const p = parseSealed(sealed, passphrase);
+  if ("plain" in p) return p.plain;
+  return decrypt(deriveKey(p.passphrase, p.salt), p.iv, p.tag, p.data);
+}
+
+/**
+ * `open()`의 비동기판 — 키 유도가 libuv 스레드풀에서 돈다. 판정·오류는 동기판과 같다.
+ *
+ * 배달·서명처럼 **메시지마다 도는 경로**는 이쪽을 쓴다. DKIM 서명이 통당 두 번(RSA+Ed25519)
+ * 동기 `open()`을 부르던 것이 통당 172ms 정지였다.
+ */
+export async function openAsync(sealed: string, passphrase: string | undefined): Promise<string> {
+  const p = parseSealed(sealed, passphrase);
+  if ("plain" in p) return p.plain;
+  return decrypt(await deriveKeyAsync(p.passphrase, p.salt), p.iv, p.tag, p.data);
 }

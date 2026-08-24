@@ -11,7 +11,7 @@ import {
   MAX_RECEIVED_HOPS,
   MAX_RELAY_TARGETS,
   noopLogger,
-  open,
+  openAsync,
   ulid,
   type Logger,
   type MaildropLock,
@@ -1429,13 +1429,49 @@ export class IonosphereSmtpBackend implements SmtpBackend {
 }
 
 /** dkim_keys 조회 + secretbox 복호 → MtaWorker DkimHook (SCHEMA §9-2). */
+/**
+ * 복호된 개인키 캐시 상한. 도메인마다 키가 1~2개이므로 256이면 실사용 배포를 덮고,
+ * 넘치면 삽입 순서로 버린다(`mta/worker.ts mtaStsCache`와 같은 형태).
+ */
+const MAX_DKIM_KEY_CACHE = 256;
+
 export class StoreDkimHook implements DkimHook {
   private readonly db: DbDriver;
   private readonly masterKey: string | undefined;
+  /**
+   * 봉인 문자열 → 복호 결과. **키는 봉인 문자열 자체**라 무효화가 필요 없다 —
+   * 키를 회전하면 새 행이 생기고 그 값은 다른 문자열이다(같은 평문이라도 salt·iv가 다르다).
+   *
+   * ★값이 아니라 **Promise**를 담는다. 같은 도메인으로 동시에 여러 통이 나가면 전부 캐시
+   * 미스로 들어와 scrypt를 각자 도는데, Promise를 캐시하면 첫 하나만 돌고 나머지는 붙는다.
+   */
+  private readonly keyCache = new Map<string, Promise<string>>();
 
   constructor(db: DbDriver, masterKey: string | undefined) {
     this.db = db;
     this.masterKey = masterKey;
+  }
+
+  /**
+   * 봉인된 개인키를 연다 — **메시지마다 도는 경로라 캐시와 비동기 KDF가 둘 다 필요하다.**
+   *
+   * ★실측(2026-08-23): `scryptSync(N=16384)`가 85.7ms. 이중 서명이 규약이라(RSA+Ed25519)
+   * 발송 한 통이 172ms 동안 이벤트 루프를 막았고, 수신 포워딩의 ARC 봉인이 86ms를 더했다.
+   * 큐 100건 드레인 = 17초 무응답. 전 프로토콜이 단일 프로세스라 그동안 IMAP·POP3도 멈춘다.
+   */
+  private openKey(sealed: string): Promise<string> {
+    const hit = this.keyCache.get(sealed);
+    if (hit) return hit;
+    const pending = openAsync(sealed, this.masterKey);
+    // 실패는 캐시하지 않는다 — 마스터키를 고친 뒤 재시작 없이 회복되어야 한다.
+    pending.catch(() => this.keyCache.delete(sealed));
+    this.keyCache.set(sealed, pending);
+    while (this.keyCache.size > MAX_DKIM_KEY_CACHE) {
+      const oldest = this.keyCache.keys().next();
+      if (oldest.done) break;
+      this.keyCache.delete(oldest.value);
+    }
+    return pending;
   }
 
   async selectorFor(domain: string): Promise<readonly DkimKeyLookup[]> {
@@ -1466,11 +1502,14 @@ export class StoreDkimHook implements DkimHook {
             ORDER BY k.algo DESC, k.selector ASC`,
       params: [domain.toLowerCase()],
     });
-    return rows.map((row) => ({
-      selector: String(row.selector),
-      privateKey: open(String(row.private_key), this.masterKey),
-      algorithm: Number(row.algo) === 1 ? ("ed25519-sha256" satisfies DkimAlgorithm) : "rsa-sha256",
-    }));
+    // 키가 여럿이면 복호도 병렬로 — 스레드풀에서 도는 일이라 직렬로 기다릴 이유가 없다.
+    return await Promise.all(
+      rows.map(async (row) => ({
+        selector: String(row.selector),
+        privateKey: await this.openKey(String(row.private_key)),
+        algorithm: Number(row.algo) === 1 ? ("ed25519-sha256" satisfies DkimAlgorithm) : "rsa-sha256",
+      })),
+    );
   }
 }
 

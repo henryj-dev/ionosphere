@@ -32,7 +32,7 @@ export {
   parseSaslPlain,
   type SaslOAuthCreds,
 } from "./sasl.ts";
-export { open, seal } from "./secretbox.ts";
+export { open, openAsync, seal } from "./secretbox.ts";
 export { trackListener, type ListenerShutdown } from "./listener-shutdown.ts";
 export { hardenHttpListener, type HardenableHttpServer } from "./http-listener.ts";
 export { buildReceivedHeader, headerSafeToken, rfc5322Date, type ReceivedInfo, type ReceivedTransport } from "./received.ts";
