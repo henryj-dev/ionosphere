@@ -53,6 +53,18 @@ export interface InboundAuthResult {
   codes: { spf: number | null; dkim: number; dmarc: number };
   /** 요약 (로그용·점수 엔진 입력). spf가 없으면 평가하지 않은 것 — `none`으로 채우지 않는다. */
   summary: { spf?: string; dkim: string; dmarc: string };
+  /** DMARC 집계 리포트용 원자료 — `summary`보다 상세하다(위 반환부 주석). */
+  dmarcReport: {
+    policyDomain: string;
+    headerFrom: string;
+    disposition: string;
+    dkimAligned: boolean;
+    spfAligned: boolean;
+    dkimResult: string;
+    spfResult: string;
+    dkimDomain: string | null;
+    spfDomain: string | null;
+  };
   /**
    * RFC 7208 §9.1 Received-SPF 헤더 한 줄(필드명 포함). A-R보다 정보가 많다(§9.2).
    * SPF를 돌리지 않았으면 **없다** — 검사하지 않은 판정을 헤더로 주장할 수 없다.
@@ -185,6 +197,24 @@ export async function runInboundAuth(
     authResults,
     codes,
     summary: { ...(spf ? { spf: spf.result } : {}), dkim: dkimOutcome, dmarc: dmarc.result },
+    /**
+     * DMARC 집계 리포트(RFC 7489 §7.2)용 원자료.
+     *
+     * ★`summary`로는 부족하다. 리포트는 **정렬**(alignment)과 **인증 결과**를 따로 적어야
+     * 하고(§7.2의 `policy_evaluated` vs `auth_results`), 어느 도메인이 서명했는지도 실어야
+     * 상대가 원인을 좁힌다. 그 값들은 여기서만 알 수 있다.
+     */
+    dmarcReport: {
+      policyDomain: dmarc.orgDomain ?? fromDomain,
+      headerFrom: fromDomain,
+      disposition: dmarc.disposition,
+      dkimAligned: dmarc.alignment.dkim,
+      spfAligned: dmarc.alignment.spf,
+      dkimResult: dkimOutcome,
+      spfResult: spf?.result ?? "none",
+      dkimDomain: dkim.find((d) => d.result === "pass")?.domain ?? dkim[0]?.domain ?? null,
+      spfDomain: spf?.domain ?? null,
+    },
     ...(spf
       ? {
           receivedSpf: buildReceivedSpf({

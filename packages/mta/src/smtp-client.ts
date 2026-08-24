@@ -88,6 +88,14 @@ export interface SmtpClientResult {
   rcptResults: Map<string, RcptOutcome>;
   /** DANE를 적용했다면 그 판정(운영 로그·메트릭용). 미적용이면 undefined. */
   dane?: "match" | "mismatch";
+  /**
+   * 이 세션이 TLS 위에서 돌았나 — TLS-RPT(RFC 8460)가 세는 값이다.
+   *
+   * ★상대에게 유용한 것은 "메일이 배달됐나"가 아니라 "TLS가 정책대로 동작했나"다.
+   * 그래서 SMTP 응답 코드와 **따로** 들고 나간다 — 5xx로 거절된 메일도 TLS는 정상이었다는
+   * 사실이 상대의 정책 진단에 쓸모 있다.
+   */
+  tlsUsed?: boolean;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -522,6 +530,7 @@ export async function sendSmtp(opts: SmtpClientOptions): Promise<SmtpClientResul
     }
     let caps = parseCaps(ehlo.lines);
 
+    let tlsUsed = false;
     if ((tlsMode === "opportunistic" || tlsMode === "required") && caps.has("STARTTLS")) {
       socket.write("STARTTLS\r\n");
       const startTlsReply = await reader.read();
@@ -552,6 +561,7 @@ export async function sendSmtp(opts: SmtpClientOptions): Promise<SmtpClientResul
           return result;
         }
         caps = parseCaps(ehlo.lines);
+        tlsUsed = true;
       } else if (tlsMode === "required") {
         // required인데 STARTTLS 거부 — 평문 진행 금지, 재시도 대상(deferred)
         const result: SmtpClientResult = {
@@ -715,6 +725,7 @@ export async function sendSmtp(opts: SmtpClientOptions): Promise<SmtpClientResul
       rcptResults,
       // 여기까지 왔다면 DANE 대조를 통과한 것이다(불일치는 위에서 이미 돌아갔다).
       ...(daneActive ? { dane: "match" as const } : {}),
+      tlsUsed,
     };
   } catch (err) {
     socket.destroy();

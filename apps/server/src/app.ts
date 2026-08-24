@@ -1,5 +1,5 @@
 /** 올인원 서버 조립 — DB/블롭/스토어/프로토콜 리스너를 한 프로세스로 (PLAN.md §4). */
-import { AuthFailureThrottle, PeerConnectionLimiter, MAX_MESSAGE_BYTES, noopAuditSink, noopLogger, ulid, type AuditSink, type Logger } from "@ionosphere/core";
+import { AuthFailureThrottle, PeerConnectionLimiter, MAX_MESSAGE_BYTES, noopAuditSink, noopLogger, rfc5322Date, ulid, type AuditSink, type Logger } from "@ionosphere/core";
 import { allMigrations, describeDbSpec, migrate, MTA_QUEUE_STATUS, openDatabase, type DbDriver } from "@ionosphere/db";
 import {
   authenticate,
@@ -8,6 +8,7 @@ import {
   FsBlobStore,
   LayeredBlobStore,
   putBlob,
+  recordTlsRptRow,
   scramAuthorize,
   scramKeysFor,
   Store,
@@ -37,6 +38,7 @@ import { resolveListener, type ListenerName, type ListenerOverrides, type Resolv
 import { LmtpServer } from "@ionosphere/proto-lmtp";
 import type { CertSource, SealedCertSource, TlsMaterial } from "@ionosphere/tls";
 import { MailboxReaper } from "./reaper.ts";
+import type { ReportSender } from "./reports.ts";
 import { BlobGcWorker } from "./blob-gc.ts";
 import { AuditFileSink } from "./audit-sink.ts";
 import { AuditShipper, type AuditS3Target } from "./audit-shipper.ts";
@@ -341,6 +343,16 @@ export interface IonosphereAppOptions {
   runReaper?: boolean;
   /** 리퍼 폴링 주기(ms). 기본 5분. 테스트는 짧게. */
   reaperIntervalMs?: number;
+  /**
+   * 대외 리포트(DMARC 집계 · TLS-RPT) 발송.
+   *
+   * ★opt-in이다. 켜면 수신 파이프라인이 DMARC 결과를, MTA 워커가 TLS 결과를 집계하고
+   * 하루 한 번 상대 도메인의 `rua`로 보낸다. 끄면 집계도 하지 않는다 — 보내지 않을
+   * 값을 쌓는 것은 순수 비용이다.
+   *
+   * `contactEmail`은 리포트의 `<email>`·`contact-info`에 그대로 실린다(공개된다).
+   */
+  reports?: { contactEmail: string; retentionDays?: number };
   /**
    * 블롭 GC 수위 — "off" | "mark"(기본, 파일 삭제 없음) | "sweep"(파일 삭제).
    * 삭제는 되돌릴 수 없으므로 기본은 관측만 한다. 상세는 @ionosphere/store BlobGcMode 주석.
@@ -684,7 +696,7 @@ export class IonosphereApp {
     await this.startInbound(ctx);      // 25 릴레이 · POP3 · LMTP
     await this.startAccess(ctx);       // IMAP 143/993 · JMAP · ManageSieve
     await this.startSubmission(ctx);   // 587 · 465 · MTA 워커
-    this.startWorkers(log);            // 웹훅 · 메일함 리퍼
+    this.startWorkers(log, ctx);       // 웹훅 · 메일함 리퍼 · 대외 리포트
     await this.startManagement(ctx);   // 관리 API · autoconfig · 메트릭 · 443 프론트
     this.watchCertRenewal(log);        // 인증서 갱신 → 무중단 교체
 
@@ -942,6 +954,11 @@ export class IonosphereApp {
       ...(this.opts.virusScanner ? { virusScanner: this.opts.virusScanner } : {}),
       ...(this.opts.virusScanOptions ? { virusScanOptions: this.opts.virusScanOptions } : {}),
       ...(this.opts.spamScore !== undefined ? { spamScore: this.opts.spamScore } : {}),
+      /**
+       * DMARC 집계 카운터 — 리포트를 **보낼 때만** 쌓는다. 보내지 않는 구성에서 집계만
+       * 하면 아무도 안 보는 테이블이 커지는 것뿐이다(`message_text`가 그랬다).
+       */
+      ...(this.opts.reports ? { reportDmarc: true } : {}),
       ...(this.metrics ? { onDelivered: (n: number) => this.metrics!.received.inc({}, n) } : {}),
       ...(this.opts.srsSecret
         ? {
@@ -1218,6 +1235,17 @@ export class IonosphereApp {
         logger: ctx.log,
         ehloName: this.opts.hostname,
         /**
+         * TLS-RPT 집계 — DMARC 카운터와 같은 플래그로 켠다. 두 리포트를 따로 켜게 하면
+         * "하나만 켜 놓고 왜 다른 게 안 오지"가 생긴다.
+         */
+        ...(this.opts.reports
+          ? {
+              tlsReport: async (policyDomain: string, policyType: string, receivingMx: string, resultType: string) => {
+                await recordTlsRptRow(this.db, { policyDomain, policyType, receivingMx, resultType });
+              },
+            }
+          : {}),
+        /**
          * DSN 발송 — 워커가 "무엇을 보낼지"를 정하고 여기서 저장·적재만 한다
          * (`DsnHook` 주석: @ionosphere/mta가 store에 의존하면 의존 방향이 뒤집힌다).
          *
@@ -1324,7 +1352,63 @@ export class IonosphereApp {
    * 빈 큐 폴링이 무해해 셋 다 기본 기동한다 — 단 블롭 GC는 기본 수위가 "mark"라
    * 파일을 지우지 않는다(BlobGcMode 주석: 삭제는 되돌릴 수 없어 단계적으로 올린다).
    */
-  private startWorkers(log: Logger): void {
+  /**
+   * 대외 리포트를 **MTA 큐에 넣는** 통로.
+   *
+   * ★시스템 발송이다(`envFrom: "null-sender"`). 리포트에 대한 바운스를 받아 그 바운스에
+   * 또 리포트를 보내는 고리를 끊는 것이 목적이다 — DSN·vacation과 같은 규율이다.
+   *
+   * ★첨부는 gzip 바이너리라 base64로 싣는다. 파일명은 규격이 정한 형식 그대로여서
+   * 받는 쪽이 파일명만으로 분류한다(RFC 7489 §7.2.1.1 / RFC 8460 §5.1).
+   */
+  private reportSender(): ReportSender {
+    return {
+      send: async (m: Parameters<ReportSender["send"]>[0]) => {
+        const boundary = `=_ionosphere_report_${ulid()}`;
+        const b64 = Buffer.from(m.body).toString("base64").replace(/(.{76})/g, "$1\r\n");
+        const message = new TextEncoder().encode(
+          [
+            `From: ${this.opts.hostname} report <noreply@${this.opts.hostname}>`,
+            `To: ${m.to}`,
+            `Subject: ${m.subject}`,
+            `Date: ${rfc5322Date(new Date())}`,
+            "MIME-Version: 1.0",
+            // 우리가 보내는 자동 메일이라는 표시 — 상대의 자동 응답기가 답하지 않게 한다.
+            "Auto-Submitted: auto-generated",
+            `Content-Type: multipart/report; report-type=delivery-status; boundary="${boundary}"`,
+            "",
+            `--${boundary}`,
+            "Content-Type: text/plain; charset=utf-8",
+            "",
+            `This is an aggregate report from ${this.opts.hostname}.`,
+            "",
+            `--${boundary}`,
+            `Content-Type: ${m.contentType}; name="${m.filename}"`,
+            "Content-Transfer-Encoding: base64",
+            `Content-Disposition: attachment; filename="${m.filename}"`,
+            "",
+            b64,
+            "",
+            `--${boundary}--`,
+            "",
+          ].join("\r\n"),
+        );
+        const { blobId, size, generation } = await putBlob(this.db, this.blobs, message);
+        await enqueueMessage(this.db, {
+          tenantId: "",
+          blobId,
+          sizeBytes: size,
+          blobGeneration: generation,
+          envFrom: "",
+          rcpts: [m.to],
+          // 시스템 발송이라 귀속 계정이 없다 — `relayPerHour`가 유일한 상한이다.
+          system: { relayPerHour: this.opts.relayPerHour ?? DEFAULT_RELAY_PER_HOUR, envFrom: "null-sender" },
+        });
+      },
+    };
+  }
+
+  private startWorkers(log: Logger, ctx: StartContext): void {
     if (this.opts.runWebhookWorker ?? true) {
       this.webhookWorker = new WebhookWorker({
         db: this.db,
@@ -1345,6 +1429,24 @@ export class IonosphereApp {
          * 기본값(30일·180일·7일)은 `runRetention`이 소유한다 — 여기서 다시 적으면 갈라진다.
          */
         retention: { db: this.db },
+        /**
+         * 대외 리포트 — `rua` 조회와 외부 목적지 승인 확인이 전부 DNS라 리졸버가 필수다.
+         * `ctx.resolver`는 조립층이 항상 만들어 두므로(미주입이면 NodeDnsResolver) 여기서
+         * 없을 수 없다.
+         */
+        ...(this.opts.reports
+          ? {
+              reports: {
+                db: this.db,
+                resolver: ctx.resolver,
+                logger: log,
+                sender: this.reportSender(),
+                reportingDomain: this.opts.hostname,
+                contactEmail: this.opts.reports.contactEmail,
+                ...(this.opts.reports.retentionDays !== undefined ? { retentionDays: this.opts.reports.retentionDays } : {}),
+              },
+            }
+          : {}),
         ...(this.opts.reaperIntervalMs !== undefined ? { intervalMs: this.opts.reaperIntervalMs } : {}),
       });
       this.reaper.start();

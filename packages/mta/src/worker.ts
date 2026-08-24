@@ -11,7 +11,7 @@ import { isLocallyRoutableDomain, lookupBlob, MTA_QUEUE_STATUS, SUPPRESSION_REAS
 import { dkimSign, RELAY_SAFE_SIGNED_HEADERS, type DkimAlgorithm } from "@ionosphere/mail-auth";
 import { buildDsn, DSN_ACTION, enhancedStatusFor, type DsnRecipient } from "./dsn.ts";
 
-import { fetchMtaStsPolicy, mxMatchesPolicy, stsEnforcement, type MtaStsFetchDeps, type MtaStsLookup } from "@ionosphere/mta-sts";
+import { fetchMtaStsPolicy, mxMatchesPolicy, stsEnforcement, TLSRPT_SUCCESS, type MtaStsFetchDeps, type MtaStsLookup } from "@ionosphere/mta-sts";
 import type { SmarthostOptions, SmarthostResolver } from "./smarthost.ts";
 import { suppressionExpiresAt } from "./suppression.ts";
 import { sendSmtp, type SmtpClientResult, type TlsMode } from "./smtp-client.ts";
@@ -157,6 +157,12 @@ export interface MtaWorkerOptions {
    * 관측만(기존 동작). 스마트호스트 릴레이 경로엔 적용 안 함. I/O(DNS TXT/HTTPS)는 주입.
    */
   mtaSts?: MtaStsFetchDeps & { cacheTtlMs?: number };
+  /**
+   * TLS-RPT(RFC 8460) 집계 훅. 주면 발송 세션의 TLS 결과를 센다.
+   *
+   * ★opt-in인 이유: 리포트를 보내지 않는 구성에서 집계만 쌓는 것은 순수 비용이다.
+   */
+  tlsReport?: (policyDomain: string, policyType: string, receivingMx: string, resultType: string) => Promise<void>;
 }
 
 /** mta_queue.status (SCHEMA.md §9-1). */
@@ -351,6 +357,10 @@ export class MtaWorker {
   private readonly dsn: DsnHook | undefined;
   private readonly onResult: ((outcome: DeliveryOutcome) => void) | undefined;
   private readonly mtaSts: (MtaStsFetchDeps & { cacheTtlMs?: number }) | undefined;
+  /** TLS-RPT 집계 훅 — 조립층이 리포트를 켤 때만 준다(위 `recordTls` 주석). */
+  private readonly tlsReport:
+    | ((policyDomain: string, policyType: string, receivingMx: string, resultType: string) => Promise<void>)
+    | undefined;
   /**
    * MTA-STS 조회 캐시. `policy`는 **마지막으로 본문까지 성공한** 조회로, 재조회가 실패했을 때
    * 강제를 유지하는 근거다(RFC 8461 §5 — M-1). `expiresAt`은 재조회 시점만 정한다.
@@ -387,6 +397,7 @@ export class MtaWorker {
     this.dsn = opts.dsn;
     this.onResult = opts.onResult;
     this.mtaSts = opts.mtaSts;
+    this.tlsReport = opts.tlsReport;
   }
 
   /**
@@ -430,6 +441,22 @@ export class MtaWorker {
     }
     this.localDomainCache.set(cacheKey, { value, expiresAt: now + LOCAL_DOMAIN_TTL_MS });
     return value;
+  }
+
+  /**
+   * TLS-RPT(RFC 8460) 집계 카운터 — **실패를 삼킨다.**
+   *
+   * ★리포트는 부가 기능이고, 부가 기능이 발송을 막으면 안 된다. `void`로 띄우는 이유도
+   * 같다 — 카운터 UPDATE 한 번을 기다리느라 발송 왕복이 늘어날 이유가 없다.
+   *
+   * ★리포트를 **보내지 않는** 구성에서는 아무것도 하지 않는다. 집계만 쌓으면 아무도 안 보는
+   * 테이블이 커지는 것뿐이다(`message_text`가 그랬다).
+   */
+  private recordTls(policyDomain: string, policyType: string, receivingMx: string, resultType: string): void {
+    if (!this.tlsReport) return;
+    void this.tlsReport(policyDomain, policyType, receivingMx, resultType).catch((err: unknown) => {
+      this.logger.warn("tlsrpt 집계 실패", { policyDomain, error: errMsg(err) });
+    });
   }
 
   /**
@@ -752,13 +779,22 @@ export class MtaWorker {
 
     // MTA-STS 발신측 강제(opt-in, 스마트호스트 제외) — enforce면 TLS 필수 + MX 일치 강제
     let mxTls: TlsMode = "opportunistic";
+    /** TLS-RPT(RFC 8460)에 적을 정책 종류 — 정책이 없으면 `no-policy-found`다. */
+    let tlsPolicyType: "sts" | "no-policy-found" = "no-policy-found";
     if (this.mtaSts && !smarthost) {
       try {
         const lookup = await this.mtaStsLookup(domain);
         const enforcement = stsEnforcement(lookup);
         if (enforcement.action === "require-tls" && lookup.policy) {
+          tlsPolicyType = "sts";
           const matched = targets.filter((t) => mxMatchesPolicy(t.exchange, lookup.policy!.mx));
           if (matched.length === 0) {
+            /**
+             * ★이 실패야말로 상대가 **알아야 하는** 것이다 — 자기 정책이 자기 MX와 어긋나
+             * 우리 메일이 안 가는데, 아는 것은 우리뿐이고 고칠 수 있는 것은 상대뿐이다.
+             * TLS-RPT가 그 둘을 잇는 유일한 통로다(RFC 8460 §4.3의 `sts-policy-invalid`).
+             */
+            this.recordTls(domain, "sts", targets[0]?.exchange ?? domain, "sts-policy-invalid");
             await this.deferAll(rows, { tenant: "recipient MTA-STS policy mismatch", detail: `MTA-STS(enforce): MX가 정책 mx와 불일치 (${domain})` });
             return;
           }
@@ -766,11 +802,13 @@ export class MtaWorker {
           mxTls = "required"; // STARTTLS 실패 시 발송 실패(다운그레이드 배달 금지)
           this.logger.info("mta-sts enforce", { domain, mx: matched.map((m) => m.exchange) });
         } else if (enforcement.action === "report-only") {
+          tlsPolicyType = "sts";
           this.logger.info("mta-sts testing", { domain });
         }
       } catch (err) {
         // 정책 조회 실패는 발송을 막지 않음(정책 부재와 동일 취급)
         this.logger.warn("mta-sts lookup error", { domain, error: errMsg(err) });
+        this.recordTls(domain, "sts", domain, "sts-policy-fetch-error");
       }
     }
 
@@ -873,6 +911,8 @@ export class MtaWorker {
           // 이 MX는 건너뛴다(다음 MX 시도). 전부 이러면 아래에서 지연 처리된다 — 조작이
           // 의심되는 상대에게 평문/미검증으로 보내는 것보다 늦게 가는 편이 낫다.
           this.logger.warn("tlsa bogus — 이 MX는 건너뛴다", { mx: mx.exchange, reason: tlsa.reason });
+          // DANE 검증 실패 — TLS-RPT의 대표적인 보고 대상이다(§4.3).
+          this.recordTls(domain, "tlsa", mx.exchange, "dane-required");
           lastErr = `TLSA 검증 실패(${mx.exchange}): ${tlsa.reason}`;
           continue;
         }
@@ -897,9 +937,19 @@ export class MtaWorker {
           // 최소 한 개의 SMTP 응답을 받았음 — 이 MX의 판정을 최종으로 채택(다음 MX로 넘어가지 않음)
           result = attempt;
           usedMx = mx;
+          /**
+           * TLS-RPT(RFC 8460) — **세션이 성립한 시점**에 센다.
+           *
+           * ★상대가 알아야 하는 것은 "메일이 배달됐나"가 아니라 "TLS가 우리 정책대로
+           * 동작했나"다. 그래서 SMTP 응답 코드(수신자 거절 등)와 무관하게 세션 성립을 센다 —
+           * 5xx로 거절된 메일도 TLS는 정상이었다는 사실이 상대에게 유용하다.
+           */
+          this.recordTls(domain, tlsPolicyType, mx.exchange, attempt.tlsUsed === false ? "starttls-not-supported" : TLSRPT_SUCCESS);
           break;
         }
-        lastErr = attempt.message; // 연결 자체 실패 — 다음 MX 시도
+        // 연결 자체 실패 — 상대가 왜 우리 메일을 못 받는지의 근거다.
+        this.recordTls(domain, tlsPolicyType, mx.exchange, "validation-failure");
+        lastErr = attempt.message; // 다음 MX 시도
       }
 
       // 청크 단위로 판정한다. 한 청크가 실패해도 이미 성공한 청크의 결과를 되돌리지 않는다.

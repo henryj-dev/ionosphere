@@ -79,7 +79,13 @@ describe("ManageSieve AUTHENTICATE SCRAM-SHA-256", () => {
     const t3 = texts(e.feed(enc(`"${b64(`${wp},p=${p}`)}"\r\n`)));
     // ★OK가 아니라 server-final 리터럴이 와야 한다 — 클라이언트가 서버를 검증한다.
     expect(saslPayload(t3).startsWith("v=")).toBe(true);
-    expect(t3).not.toContain("OK");
+    /**
+     * ★"OK"가 **응답으로** 오면 안 된다는 뜻이지, 페이로드 어딘가에 그 두 글자가 없어야
+     * 한다는 뜻이 아니다. 예전엔 `not.toContain("OK")`였는데, server-final은 난수 기반
+     * base64라 우연히 `OK`를 품는 날이 있었다(2026-08-24 실측) — 시간이 아니라 **난수**로
+     * 흔들리는 플레이크다. 상태 줄만 본다.
+     */
+    expect(t3.split("\n").some((line) => /^OK\b/.test(line.trim()))).toBe(false);
 
     expect(kinds(e.feed(enc('""\r\n')))).toContain("authVerified");
   });

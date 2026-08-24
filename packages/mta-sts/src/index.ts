@@ -17,3 +17,12 @@ export {
   type MtaStsLookup,
   type StsEnforcement,
 } from "./fetch.ts";
+// TLS-RPT 리포트 **생성** — MTA-STS를 강제하면서 리포트를 안 내던 것을 고친다.
+export {
+  buildTlsRptJson,
+  parseTlsRptRua,
+  tlsRptFilename,
+  TLSRPT_SUCCESS,
+  type TlsRptInput,
+  type TlsRptRow,
+} from "./tlsrpt-report.ts";

@@ -5,6 +5,7 @@
  */
 import { noopLogger, type Logger } from "@ionosphere/core";
 import { runRetention, type RetentionOptions, type Store } from "@ionosphere/store";
+import { runReports, type ReportOptions } from "./reports.ts";
 import type { DbDriver } from "@ionosphere/db";
 
 export interface MailboxReaperOptions {
@@ -30,6 +31,14 @@ export interface MailboxReaperOptions {
    * 쓸고 있다. 워커를 하나 더 만들면 주기·재진입 가드가 또 한 벌 생긴다.
    */
   retention?: RetentionOptions & { db: DbDriver };
+  /**
+   * 대외 리포트(DMARC rua · TLS-RPT) 하루 한 번 발송.
+   *
+   * ★리퍼에 붙이는 이유: 이미 도는 주기 작업이라 타이머를 하나 더 만들 이유가 없다.
+   * **하루 한 번**은 `report_sends`가 보장한다(같은 기간을 두 번 보내지 않는다) —
+   * 리퍼 주기(5분)와 무관하게 정확히 한 번이다.
+   */
+  reports?: Omit<ReportOptions, "now">;
 }
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
@@ -41,6 +50,7 @@ export class MailboxReaper {
   private readonly batchSize: number;
   private readonly maildropLock?: { sweepExpired(now?: number, graceMs?: number): Promise<number> };
   private readonly retention?: RetentionOptions & { db: DbDriver };
+  private readonly reports?: Omit<ReportOptions, "now">;
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
 
@@ -51,6 +61,7 @@ export class MailboxReaper {
     this.batchSize = opts.batchSize ?? 50;
     if (opts.maildropLock) this.maildropLock = opts.maildropLock;
     if (opts.retention) this.retention = opts.retention;
+    if (opts.reports) this.reports = opts.reports;
   }
 
   start(): void {
@@ -108,6 +119,19 @@ export class MailboxReaper {
           }
         } catch (err) {
           this.log.warn("보존창 스윕 실패", { error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+      /**
+       * 대외 리포트 — **보존창 스윕 뒤에** 돈다. 스윕이 집계 행을 지우기 전에 보내야
+       * 하는 것이 아니라, 리포트가 자기 보존창을 따로 갖기 때문에 순서는 무관하다.
+       * 실패는 삼킨다 — 리포트가 리퍼의 본 일(파기된 메일함 회수)을 막으면 안 된다.
+       */
+      if (this.reports) {
+        try {
+          const r = await runReports(this.reports);
+          if (r.dmarcSent > 0 || r.tlsrptSent > 0 || r.purged > 0) this.log.info("대외 리포트", { ...r });
+        } catch (err) {
+          this.log.warn("대외 리포트 실패", { error: err instanceof Error ? err.message : String(err) });
         }
       }
       return reaped;

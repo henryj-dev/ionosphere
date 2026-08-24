@@ -103,3 +103,15 @@ export {
   type VacationResponseRow,
 } from "./vacation-store.ts";
 export { sendableAddresses, type IdentityInput } from "./jmap-store.ts";
+// 대외 리포트 집계(DMARC rua · TLS-RPT) — 조합별 카운터(report-store.ts 머리 주석).
+export {
+  claimReportSend,
+  loadDmarcDay,
+  loadTlsRptDay,
+  purgeReportRows,
+  recordDmarcRow,
+  recordTlsRptRow,
+  utcDayStart,
+  type DmarcRowKey,
+  type TlsRptRowKey,
+} from "./report-store.ts";

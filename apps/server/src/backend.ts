@@ -53,6 +53,7 @@ import {
   scramAuthorize,
   claimVacationReply,
   getVacationResponse,
+  recordDmarcRow,
 } from "@ionosphere/store";
 import type { SmtpAuthResult, SmtpBackend, SmtpDsnParams } from "@ionosphere/proto-smtp";
 import type { LmtpBackend, LmtpDelivery, LmtpDeliverEnv } from "@ionosphere/proto-lmtp";
@@ -437,6 +438,8 @@ export interface IonosphereSmtpBackendOptions {
    * accept/junk/reject를 정한다. 임계값은 `@ionosphere/spam` score.ts 기본값.
    */
   spamScore?: SpamScoreOptions | boolean;
+  /** DMARC 집계 리포트 카운터를 남긴다(리포트 발송을 켤 때 함께 켠다 — 위 필드 주석). */
+  reportDmarc?: boolean;
   /** 관측 훅(Phase 5) — 수신 배달 성공 시 반영된 메일함 수만큼 호출. 던져도 무시. */
   onDelivered?: (count: number) => void;
   /**
@@ -486,6 +489,13 @@ export class IonosphereSmtpBackend implements SmtpBackend {
   private readonly virusScanner?: VirusScanner;
   private readonly virusScanOptions?: VirusScanOptions;
   private readonly spamScore?: SpamScoreOptions;
+  /**
+   * DMARC 집계 리포트(RFC 7489 §7.2) 카운터를 남길 것인가.
+   *
+   * ★opt-in이다. 리포트를 **보내지 않는** 구성에서 집계만 쌓으면 그건 아무도 안 보는
+   * 테이블이 커지는 것뿐이다(`message_text`가 그랬다). 조립층이 리포트 작업을 켤 때 함께 켠다.
+   */
+  private readonly reportDmarc: boolean;
   /** submission 프로파일에서만 존재 — SmtpServer가 이 유무로 authOffered를 판정. relay(25)면 미정의. */
   readonly authenticate?: (user: string, pass: string) => Promise<SmtpAuthResult>;
   /**
@@ -531,6 +541,7 @@ export class IonosphereSmtpBackend implements SmtpBackend {
     if (options.virusScanner) this.virusScanner = options.virusScanner;
     if (options.virusScanOptions) this.virusScanOptions = options.virusScanOptions;
     if (options.spamScore) this.spamScore = options.spamScore === true ? {} : options.spamScore;
+    this.reportDmarc = options.reportDmarc === true;
     this.outbound = options.outbound ?? {};
     if (options.onDelivered) this.onDelivered = options.onDelivered;
     if (options.srsSecret) this.srsSecret = options.srsSecret;
@@ -1086,6 +1097,31 @@ export class IonosphereSmtpBackend implements SmtpBackend {
         receivedSpf = auth.receivedSpf;
         authSummary = auth.summary as AuthSummary;
         this.log.info("auth", { from: env.mailFrom, ip: env.clientIp, ...auth.summary });
+        /**
+         * DMARC 집계 리포트(RFC 7489 §7.2) 카운터.
+         *
+         * ★실패를 **삼킨다.** 리포트는 부가 기능이고, 부가 기능이 수신을 막으면 안 된다 —
+         * 그건 이 저장소가 vacation·webhook에서 반복해 택한 방향이다.
+         * ★`none`(정책 없음)은 세지 않는다. 리포트를 보낼 곳도, 볼 사람도 없다.
+         */
+        if (this.reportDmarc && auth.summary.dmarc !== "none") {
+          try {
+            await recordDmarcRow(this.db, {
+              policyDomain: auth.dmarcReport.policyDomain,
+              headerFrom: auth.dmarcReport.headerFrom,
+              sourceIp: env.clientIp,
+              disposition: auth.dmarcReport.disposition,
+              dkimAligned: auth.dmarcReport.dkimAligned,
+              spfAligned: auth.dmarcReport.spfAligned,
+              dkimResult: auth.dmarcReport.dkimResult,
+              spfResult: auth.dmarcReport.spfResult,
+              dkimDomain: auth.dmarcReport.dkimDomain,
+              spfDomain: auth.dmarcReport.spfDomain,
+            });
+          } catch (err) {
+            this.log.warn("dmarc 리포트 집계 실패", { error: err instanceof Error ? err.message : String(err) });
+          }
+        }
       } catch (err) {
         // 검증 자체가 실패해도 배달은 계속 (인증 결과 없이 저장)
         this.log.warn("auth pipeline error", { error: String(err) });

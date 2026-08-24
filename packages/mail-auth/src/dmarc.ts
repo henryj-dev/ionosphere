@@ -37,6 +37,14 @@ export interface DmarcResult {
   /** 실제 적용된 정책 태그 값(p 또는 sp/np로 대체된 값). 정책을 찾지 못했으면 없음. */
   policy?: string;
   alignment: { spf: boolean; dkim: boolean };
+  /**
+   * 정책을 **어느 도메인에서** 찾았나 — 하위 도메인이 조직 도메인 정책을 물려받으면
+   * From 도메인과 다르다.
+   *
+   * ★집계 리포트(RFC 7489 §7.2)의 단위가 이 도메인이다. `rua`도 여기서 읽는다 —
+   * From 도메인으로 보내면 하위 도메인마다 리포트가 갈라져 상대가 전체 그림을 못 본다.
+   */
+  orgDomain?: string;
 }
 
 class DmarcEvalError extends Error {
@@ -281,6 +289,7 @@ export async function checkDmarc(input: DmarcInput, resolver: DnsResolver): Prom
       disposition: passed ? "none" : policyTag,
       policy: policyTag,
       alignment: { spf: spfAligned, dkim: dkimAligned },
+      orgDomain,
     };
   } catch (err) {
     if (err instanceof DmarcEvalError) {

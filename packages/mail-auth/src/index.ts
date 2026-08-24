@@ -16,6 +16,16 @@ export { generateDkimKeyPair, type DkimKeyPair } from "./keys.ts";
 export { DnsNotFoundError, DnsTemporaryError, type DnsMxRecord, type DnsResolver } from "./dns.ts";
 export { checkSpf, parseCidrList, type CidrMatcher, type SpfInput, type SpfResult, type SpfResultValue } from "./spf.ts";
 export { checkDmarc, type DmarcDisposition, type DmarcInput, type DmarcResult } from "./dmarc.ts";
+// DMARC 집계 리포트 **생성** — 받기만 하던 것을 내는 쪽(dmarc-report.ts 머리 주석).
+export {
+  buildDmarcReportXml,
+  dmarcReportFilename,
+  isRuaAuthorized,
+  parseRua,
+  type DmarcReportInput,
+  type DmarcReportRow,
+  type RuaTarget,
+} from "./dmarc-report.ts";
 export {
   buildAuthenticationResults,
   mapToStorageCodes,
