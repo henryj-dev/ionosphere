@@ -133,6 +133,14 @@ export interface MtaWorkerOptions {
     sweepIntervalMs?: number;
   };
   /**
+   * 동시에 여는 발송 연결 수. 기본 8.
+   *
+   * ⚠ **수신 도메인당 1연결은 그대로다** — 같은 도메인의 그룹은 순서대로 돈다. 한 상대에게
+   * 여러 연결을 동시에 여는 것은 정중하지 않고, 상대가 레이트리밋으로 되받으면 우리 큐가
+   * 더 느려진다. 늘리는 것은 **서로 다른 도메인**을 병렬로 처리하는 축이다.
+   */
+  concurrency?: number;
+  /**
    * DSN 발송 훅 — 지정 시 영구 실패·상한 소진에 발신자에게 바운스를 보낸다.
    * **생략하면 DSN을 만들지 않는다**(기존 동작·테스트와 하위호환).
    */
@@ -176,6 +184,17 @@ const MIN_STS_MAX_AGE_S = 300;
 const LOCAL_DOMAIN_TTL_MS = 60_000;
 const MAX_LOCAL_DOMAIN_CACHE = 1024;
 const DEFAULT_ABUSE_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+/**
+ * 동시에 여는 발송 연결 수.
+ *
+ * ★왜 필요한가(2026-08-23 검수): `runTick`이 그룹을 **완전 직렬**로 돌았다. 응답이 느린
+ * 수신 MTA 하나가 그 tick의 나머지를 전부 붙잡고, 리스(5분) 안에 못 끝내면 `runTick` 주석이
+ * 적은 대로 "진행이 통째로 날아간다". 연결 타임아웃이 30초라 느린 상대 10곳이면 5분이다.
+ *
+ * 8인 이유: 소규모 배포의 tick 하나가 다루는 도메인 수는 보통 한 자릿수다. 8이면 느린
+ * 상대 몇이 있어도 나머지가 밀리지 않으면서, 우리가 상대에게 갑자기 몰려가지도 않는다.
+ */
+const DEFAULT_CONCURRENCY = 8;
 /**
  * 지연 통보를 보내는 경과 시간 — RFC 5321 §4.5.4.1("몇 시간 안에 배달하지 못하면 알려라",
  * 관행은 4시간). 한 메시지에 **한 번만** 보낸다(`delay_notified_at`).
@@ -301,6 +320,7 @@ export class MtaWorker {
   private readonly batchSize: number;
   private readonly abuseOptions: AbuseOptions | undefined;
   private readonly abuseSweepIntervalMs: number;
+  private readonly concurrency: number;
   private readonly dsn: DsnHook | undefined;
   private readonly onResult: ((outcome: DeliveryOutcome) => void) | undefined;
   private readonly mtaSts: (MtaStsFetchDeps & { cacheTtlMs?: number }) | undefined;
@@ -336,6 +356,7 @@ export class MtaWorker {
     this.batchSize = opts.batchSize ?? DEFAULT_BATCH_SIZE;
     this.abuseOptions = opts.abuse?.enabled ? opts.abuse : undefined;
     this.abuseSweepIntervalMs = opts.abuse?.sweepIntervalMs ?? DEFAULT_ABUSE_SWEEP_INTERVAL_MS;
+    this.concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
     this.dsn = opts.dsn;
     this.onResult = opts.onResult;
     this.mtaSts = opts.mtaSts;
@@ -559,19 +580,25 @@ export class MtaWorker {
 
     const leaseUntil = now + LEASE_MS;
     const leased: QueueRow[] = [];
-    for (const row of rows) {
-      const id = String(row.id);
-      // §9-4 리스 획득: 단일 조건부 UPDATE, 획득 판정은 영향 행 수 === 1.
-      const result = await this.db.batch([
-        {
-          sql: `UPDATE mta_queue SET status = ${STATUS.inFlight}, lease_until = ?
+    /**
+     * §9-4 리스 획득: 행마다 단일 조건부 UPDATE, 획득 판정은 영향 행 수 === 1.
+     *
+     * ★문장은 행마다지만 **왕복은 한 번**이다. 예전엔 `db.batch()`를 행마다 불러
+     * batchSize(200)만큼 트랜잭션을 열었다 — tick 시작에 200번 왕복이다. 한 배치에 담으면
+     * 결과 배열의 순서가 문장 순서와 같으므로 획득 판정은 그대로 성립한다.
+     */
+    const leaseResults = await this.db.batch(
+      rows.map((row) => ({
+        sql: `UPDATE mta_queue SET status = ${STATUS.inFlight}, lease_until = ?
                 WHERE id = ?
                   AND ((status IN (${STATUS.queued}, ${STATUS.deferred}) AND next_attempt <= ?)
                        OR (status = ${STATUS.inFlight} AND lease_until < ?))`,
-          params: [leaseUntil, id, now, now],
-        },
-      ]);
-      if (result[0]?.changes !== 1) continue; // 경합 패자 — 다른 워커가 선점
+        params: [leaseUntil, String(row.id), now, now],
+      })),
+    );
+    rows.forEach((row, i) => {
+      const id = String(row.id);
+      if (leaseResults[i]?.changes !== 1) return; // 경합 패자 — 다른 워커가 선점
       leased.push({
         id,
         tenantId: String(row.tenant_id),
@@ -583,7 +610,7 @@ export class MtaWorker {
         createdAt: Number(row.created_at),
         delayNotifiedAt: row.delay_notified_at == null ? null : Number(row.delay_notified_at),
       });
-    }
+    });
     if (leased.length === 0) return 0;
 
     // (rcpt_domain, env_from, blob_id) 그룹 — 연결당 rcpt 배칭
@@ -595,9 +622,41 @@ export class MtaWorker {
       else groups.set(key, [row]);
     }
 
+    /**
+     * ★수신 도메인으로 묶어 **도메인 안에서는 순차, 도메인끼리는 병렬**로 돈다.
+     *
+     * 그냥 그룹을 전부 병렬로 돌리면 같은 상대에게 여러 연결을 동시에 열게 된다 —
+     * 정중하지 않고, 상대가 레이트리밋으로 되받으면 큐가 오히려 느려진다. 반대로 전부
+     * 직렬이면(예전) 느린 상대 하나가 tick 전체를 붙잡는다.
+     */
+    const byDomain = new Map<string, QueueRow[][]>();
     for (const groupRows of groups.values()) {
-      await this.processGroup(groupRows);
+      const domain = groupRows[0]?.rcptDomain ?? "";
+      const arr = byDomain.get(domain);
+      if (arr) arr.push(groupRows);
+      else byDomain.set(domain, [groupRows]);
     }
+
+    const lanes = [...byDomain.values()];
+    let cursor = 0;
+    const runLane = async (): Promise<void> => {
+      for (;;) {
+        const lane = lanes[cursor++];
+        if (!lane) return;
+        for (const groupRows of lane) {
+          // 한 그룹의 실패가 다른 도메인의 진행을 막으면 안 된다 — 큐 상태는 안에서 이미 닫힌다.
+          try {
+            await this.processGroup(groupRows);
+          } catch (err) {
+            this.logger.error("group 처리 중 예외 — 이 그룹만 건너뛴다", {
+              domain: groupRows[0]?.rcptDomain,
+              error: errMsg(err),
+            });
+          }
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(this.concurrency, lanes.length) }, runLane));
 
     return leased.length;
   }
