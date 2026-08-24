@@ -80,23 +80,35 @@ function parseDmarcTagMap(text: string): Map<string, string> | null {
  * NXDOMAIN/빈 응답/비-DMARC/모호(2개 이상)/파싱 불가 → null("이 레벨엔 없음"과 동일 취급).
  * DNS 일시 오류만 예외로 던진다(temperror로 상위에 전파).
  */
-async function fetchDmarcTags(domain: string, resolver: DnsResolver): Promise<Map<string, string> | null> {
+async function fetchDmarcTags(domain: string, ctx: DmarcCtx): Promise<Map<string, string> | null> {
+  const cached = ctx.tagCache.get(domain);
+  if (cached !== undefined) return cached;
+  if (++ctx.lookups > MAX_DMARC_LOOKUPS) {
+    throw new DmarcEvalError("temperror", `DNS 조회 한도(${MAX_DMARC_LOOKUPS}) 초과`);
+  }
   let txts: string[];
   try {
-    txts = await resolver.txt(`_dmarc.${domain}`);
+    txts = await ctx.resolver.txt(`_dmarc.${domain}`);
   } catch (err) {
-    if (err instanceof DnsNotFoundError) return null;
+    if (err instanceof DnsNotFoundError) {
+      ctx.tagCache.set(domain, null);
+      return null;
+    }
     if (err instanceof DnsTemporaryError) {
       throw new DmarcEvalError("temperror", `_dmarc.${domain} 조회 실패: ${describeErr(err)}`);
     }
     throw new DmarcEvalError("temperror", `_dmarc.${domain} 조회 실패: ${describeErr(err)}`);
   }
-  if (txts.length === 0) return null;
+  const remember = (v: Map<string, string> | null): Map<string, string> | null => {
+    ctx.tagCache.set(domain, v);
+    return v;
+  };
+  if (txts.length === 0) return remember(null);
   const dmarcTxts = txts.filter((t) => /^\s*v\s*=\s*DMARC1\s*(;|$)/i.test(t));
-  if (dmarcTxts.length !== 1) return null; // 0개 또는 2개 이상 → 이 레벨은 "없음"과 동일
+  if (dmarcTxts.length !== 1) return remember(null); // 0개 또는 2개 이상 → 이 레벨은 "없음"과 동일
   const tags = parseDmarcTagMap(dmarcTxts[0]!);
-  if (!tags || tags.get("v") !== "DMARC1") return null;
-  return tags;
+  if (!tags || tags.get("v") !== "DMARC1") return remember(null);
+  return remember(tags);
 }
 
 function isUsablePolicy(tags: Map<string, string>): boolean {
@@ -107,23 +119,59 @@ function isUsablePolicy(tags: Map<string, string>): boolean {
 const WALK_MAX_STEPS = 10; // SPF의 10-lookup 한도와 동일한 취지의 방어적 상한
 
 /**
+ * 한 번의 DMARC 평가가 낼 수 있는 DNS 질의 총량.
+ *
+ * ★왜 필요한가(2026-08-23 검수): SPF에는 예산(`countLookup`)이 있는데 **DMARC에는 없었다.**
+ * 그리고 조회 대상을 공격자가 정한다 — `From:` 도메인의 라벨 수와 통과한 서명들의 `d=`가
+ * 전부 walk 대상이다. 서명 상한이 10이므로 최악에 200회가 나갈 수 있었다.
+ *
+ * 40인 이유: 정상 평가는 정책 탐색 1~2회 + 정렬 walk 2~4회면 끝난다(대부분 캐시 히트).
+ * 40은 그보다 한 자릿수 크고, 증폭기로 쓰기에는 무의미할 만큼 작다.
+ */
+const MAX_DMARC_LOOKUPS = 40;
+
+/**
+ * 평가 1회의 상태 — 캐시와 예산.
+ *
+ * ★캐시가 **평가 전체를 살아 있어야** 한다. SPF는 이 교훈을 이미 사고로 배웠다
+ * (`spf.ts EvalCtx.pMacroValue`: 캐시가 레코드마다 리셋돼 "예산 10회 정책에 실제 130회").
+ * 여기서도 `isDkimAligned`가 서명마다 `computeOrgDomain(fromDomain)`을 **다시** 계산했다 —
+ * 답은 항상 같은데 매번 물었다.
+ */
+interface DmarcCtx {
+  resolver: DnsResolver;
+  /** 도메인 → 조직 도메인. tree walk 결과. */
+  orgCache: Map<string, string>;
+  /** `_dmarc.<도메인>` 태그 맵. null도 캐시한다("없다"도 답이다). */
+  tagCache: Map<string, Map<string, string> | null>;
+  lookups: number;
+}
+
+/**
  * RFC 9989 DNS Tree Walk로 조직 도메인을 찾는다(정렬 판정·정책탐색 공용).
  * psd=y를 만나면 그 바로 아래 레벨을 조직 도메인으로 확정한다. 끝까지 못 찾으면
  * "마지막 2라벨"을 기본값으로 사용한다(§4.6 폴백 해석 — 위 파일 docblock 참고).
  */
-async function computeOrgDomain(domain: string, resolver: DnsResolver): Promise<string> {
+async function computeOrgDomain(domain: string, ctx: DmarcCtx): Promise<string> {
+  const hit = ctx.orgCache.get(domain);
+  if (hit !== undefined) return hit;
+  const remember = (v: string): string => {
+    ctx.orgCache.set(domain, v);
+    return v;
+  };
+
   const labels = domain.split(".");
-  if (labels.length <= 2) return domain;
+  if (labels.length <= 2) return remember(domain);
   const defaultOrg = labels.slice(-2).join(".");
   const maxSteps = Math.min(labels.length - 1, WALK_MAX_STEPS);
   for (let i = 1; i <= maxSteps; i++) {
     const candidate = labels.slice(i).join(".");
-    const tags = await fetchDmarcTags(candidate, resolver);
+    const tags = await fetchDmarcTags(candidate, ctx);
     if (tags?.get("psd")?.toLowerCase() === "y") {
-      return labels.slice(i - 1).join(".");
+      return remember(labels.slice(i - 1).join("."));
     }
   }
-  return defaultOrg;
+  return remember(defaultOrg);
 }
 
 interface PolicyDiscovery {
@@ -132,14 +180,14 @@ interface PolicyDiscovery {
 }
 
 /** 1) 정확한 fromDomain의 정책을 먼저 찾고, 없으면 2) tree walk로 찾은 조직 도메인의 정책을 찾는다. */
-async function discoverPolicy(fromDomain: string, resolver: DnsResolver): Promise<PolicyDiscovery | null> {
-  const exact = await fetchDmarcTags(fromDomain, resolver);
+async function discoverPolicy(fromDomain: string, ctx: DmarcCtx): Promise<PolicyDiscovery | null> {
+  const exact = await fetchDmarcTags(fromDomain, ctx);
   if (exact && isUsablePolicy(exact)) return { tags: exact, orgDomain: fromDomain };
 
-  const orgDomain = await computeOrgDomain(fromDomain, resolver);
+  const orgDomain = await computeOrgDomain(fromDomain, ctx);
   if (orgDomain === fromDomain) return null; // 이미 조직 도메인 자체 — 더 볼 곳 없음
 
-  const orgTags = await fetchDmarcTags(orgDomain, resolver);
+  const orgTags = await fetchDmarcTags(orgDomain, ctx);
   if (orgTags && isUsablePolicy(orgTags)) return { tags: orgTags, orgDomain };
 
   return null;
@@ -153,7 +201,7 @@ async function isDkimAligned(
   dkimResults: DmarcInput["dkim"],
   fromDomain: string,
   mode: "strict" | "relaxed",
-  resolver: DnsResolver,
+  ctx: DmarcCtx,
 ): Promise<boolean> {
   for (const d of dkimResults) {
     if (d.result !== "pass") continue;
@@ -162,7 +210,7 @@ async function isDkimAligned(
       if (dDomain === fromDomain) return true;
       continue;
     }
-    const [orgD, orgFrom] = await Promise.all([computeOrgDomain(dDomain, resolver), computeOrgDomain(fromDomain, resolver)]);
+    const [orgD, orgFrom] = await Promise.all([computeOrgDomain(dDomain, ctx), computeOrgDomain(fromDomain, ctx)]);
     if (orgD === orgFrom) return true;
   }
   return false;
@@ -172,12 +220,12 @@ async function isSpfAligned(
   spf: DmarcInput["spf"],
   fromDomain: string,
   mode: "strict" | "relaxed",
-  resolver: DnsResolver,
+  ctx: DmarcCtx,
 ): Promise<boolean> {
   if (spf.result !== "pass") return false;
   const spfDomain = normalizeDomain(spf.domain);
   if (mode === "strict") return spfDomain === fromDomain;
-  const [orgSpf, orgFrom] = await Promise.all([computeOrgDomain(spfDomain, resolver), computeOrgDomain(fromDomain, resolver)]);
+  const [orgSpf, orgFrom] = await Promise.all([computeOrgDomain(spfDomain, ctx), computeOrgDomain(fromDomain, ctx)]);
   return orgSpf === orgFrom;
 }
 
@@ -191,8 +239,11 @@ export async function checkDmarc(input: DmarcInput, resolver: DnsResolver): Prom
     return { result: "permerror", disposition: "none", alignment: { spf: false, dkim: false } };
   }
 
+  /** 평가 1회 = 캐시·예산 1개(위 DmarcCtx 주석 — SPF가 사고로 배운 규율). */
+  const ctx: DmarcCtx = { resolver, orgCache: new Map(), tagCache: new Map(), lookups: 0 };
+
   try {
-    const discovery = await discoverPolicy(fromDomain, resolver);
+    const discovery = await discoverPolicy(fromDomain, ctx);
     if (!discovery) {
       return { result: "none", disposition: "none", alignment: { spf: false, dkim: false } };
     }
@@ -220,8 +271,8 @@ export async function checkDmarc(input: DmarcInput, resolver: DnsResolver): Prom
     const aspf = tags.get("aspf")?.trim().toLowerCase() === "s" ? "strict" : "relaxed";
 
     const [dkimAligned, spfAligned] = await Promise.all([
-      isDkimAligned(input.dkim, fromDomain, adkim, resolver),
-      isSpfAligned(input.spf, fromDomain, aspf, resolver),
+      isDkimAligned(input.dkim, fromDomain, adkim, ctx),
+      isSpfAligned(input.spf, fromDomain, aspf, ctx),
     ]);
 
     const passed = dkimAligned || spfAligned;
