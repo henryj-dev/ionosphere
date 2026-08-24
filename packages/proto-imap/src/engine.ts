@@ -137,6 +137,31 @@ interface SelectedView {
 
 const SYSTEM_FLAGS = ["\\Answered", "\\Flagged", "\\Deleted", "\\Seen", "\\Draft"] as const;
 
+/**
+ * 한 번의 백엔드 왕복에 실을 메시지 수 — **원문(raw)이 필요할 때**.
+ *
+ * ★왜 필요한가(2026-08-23 검수): `UID FETCH 1:* BODY[]`와 `SEARCH BODY "x"`가 메일함 **전체**
+ * uid를 한 요청에 실었고, 백엔드가 그만큼의 블롭을 전부 메모리에 올렸다. 5만 통 × 평균 50KB면
+ * 한 배열에 2.5GB다. 전 프로토콜이 단일 프로세스라 그 순간 서비스 전체가 위태로워진다.
+ *
+ * 32인 이유: 원문 크기 상한이 25MB(`MAX_MESSAGE_BYTES`)라 최악은 여전히 크지만, 실사용
+ * 메시지는 수십 KB라 32면 왕복 비용을 흡수하면서 상주 메모리를 수 MB로 묶는다.
+ *
+ * ⚠ 진짜 경계는 **개수가 아니라 바이트**다. 다만 엔진은 가져오기 전에는 크기를 모르고
+ * (`size`는 fetch 결과에 들어 있다), 크기를 먼저 묻는 왕복을 더하면 그것대로 비용이다.
+ * 개수 상한은 그 근사이고, 무한(5만)에서 32로 줄이는 것이 이 값의 목적이다.
+ */
+const FETCH_BATCH_RAW = 32;
+
+/**
+ * 원문이 필요 없을 때(FLAGS·UID·INTERNALDATE 등)의 배치 크기.
+ *
+ * 메타데이터만이라 행당 수십 바이트다. 그래도 상한을 두는 이유는 `IN (?)` 파라미터
+ * 한도(`store/chunk.ts`, D1 100개)와 응답 조립 배열 때문이다 — 저장소가 청크로 나눠 돌더라도
+ * 결과 배열은 한 번에 다 올라온다.
+ */
+const FETCH_BATCH_META = 512;
+
 /** 논리 라인 하나가 붙들고 있는 바이트 — 큐 상한 계산용(텍스트는 latin1이라 1문자=1바이트). */
 function lineBytes(parts: readonly LinePart[]): number {
   let n = 0;
@@ -912,25 +937,47 @@ export class ImapEngine {
     const needRaw = items.some((it) => it.kind === "envelope" || it.kind === "body" || it.kind === "bodystructure" || it.kind === "section");
     const markSeen = view.readWrite && items.some((it) => it.kind === "section" && !it.peek);
 
-    return this.callBackend(
-      { kind: "fetchMessages", name: view.name, uids: targets.map((t) => t.uid), needRaw, markSeen },
-      (res) => {
-        if (res.kind === "no") return [ImapEngine.noReply(cmd.tag, verb, res)];
-        if (res.kind !== "messages") return [{ kind: "reply", text: `${cmd.tag} NO ${verb} failed` }];
-        const byUid = new Map(res.messages.map((m) => [m.uid, m]));
-        const actions: ImapAction[] = [];
-        for (const t of targets) {
-          const data = byUid.get(t.uid);
-          if (!data) continue; // 스냅샷 이후 사라진 메시지 — 조용히 생략(EXPUNGE는 별도 흐름)
-          if (changedSince !== null && data.modseq <= changedSince) continue; // CONDSTORE 필터
-          if (items.some((it) => it.kind === "flags")) actions.push(...this.ensureFlagsAnnounced(data.flags));
-          const parts = items.map((it) => this.fetchItemWire(it, t.uid, data));
-          actions.push({ kind: "replyBinary", bytes: wireToBytes(`* ${t.seq} FETCH (${parts.join(" ")})\r\n`) });
-        }
-        actions.push({ kind: "reply", text: `${cmd.tag} OK ${verb} completed` });
-        return actions;
-      },
-    );
+    /**
+     * ★배치로 나눠 가져온다. 예전엔 메일함 **전체** uid를 한 요청에 실어, 백엔드가 그만큼의
+     * 블롭을 전부 메모리에 올렸다(5만 통 × 50KB = 2.5GB). 응답은 배치마다 바로 흘려보내므로
+     * 상주 메모리가 배치 하나 크기로 묶인다.
+     *
+     * 배치 사이에 다른 세션이 메시지를 지울 수 있지만, 그건 **원래 있던 성질**이다 —
+     * 세션 뷰는 SELECT 시점 스냅샷이고 사라진 uid는 예전부터 조용히 생략됐다(아래 `!data`).
+     */
+    const batchSize = needRaw ? FETCH_BATCH_RAW : FETCH_BATCH_META;
+    const emit = (batch: readonly { seq: number; uid: number }[], res: ImapBackendResponse): ImapAction[] => {
+      if (res.kind !== "messages") return [];
+      const byUid = new Map(res.messages.map((m) => [m.uid, m]));
+      const actions: ImapAction[] = [];
+      for (const t of batch) {
+        const data = byUid.get(t.uid);
+        if (!data) continue; // 스냅샷 이후 사라진 메시지 — 조용히 생략(EXPUNGE는 별도 흐름)
+        if (changedSince !== null && data.modseq <= changedSince) continue; // CONDSTORE 필터
+        if (items.some((it) => it.kind === "flags")) actions.push(...this.ensureFlagsAnnounced(data.flags));
+        const parts = items.map((it) => this.fetchItemWire(it, t.uid, data));
+        actions.push({ kind: "replyBinary", bytes: wireToBytes(`* ${t.seq} FETCH (${parts.join(" ")})\r\n`) });
+      }
+      return actions;
+    };
+
+    /** 배치 하나를 요청하고, 응답을 흘린 뒤 다음 배치를 이어 건다(꼬리 연쇄). */
+    const fetchFrom = (offset: number): ImapAction[] => {
+      const batch = targets.slice(offset, offset + batchSize);
+      return this.callBackend(
+        { kind: "fetchMessages", name: view.name, uids: batch.map((t) => t.uid), needRaw, markSeen },
+        (res) => {
+          if (res.kind === "no") return [ImapEngine.noReply(cmd.tag, verb, res)];
+          if (res.kind !== "messages") return [{ kind: "reply", text: `${cmd.tag} NO ${verb} failed` }];
+          const actions = emit(batch, res);
+          const next = offset + batchSize;
+          if (next < targets.length) return [...actions, ...fetchFrom(next)];
+          actions.push({ kind: "reply", text: `${cmd.tag} OK ${verb} completed` });
+          return actions;
+        },
+      );
+    };
+    return fetchFrom(0);
   }
 
   /** APPEND (RFC 9051 §6.3.12) — [flags] [date-time] literal. UIDPLUS APPENDUID 방출. */
@@ -1295,29 +1342,49 @@ export class ImapEngine {
       ];
     }
     const needRaw = searchNeedsRaw(program.key);
-    return this.callBackend({ kind: "fetchMessages", name: view.name, uids: [...view.uids], needRaw, markSeen: false }, (res) => {
-      if (res.kind === "no") return [ImapEngine.noReply(cmd.tag, verb, res)];
-      if (res.kind !== "messages") return [{ kind: "reply", text: `${cmd.tag} NO ${verb} failed` }];
-      const byUid = new Map(res.messages.map((m) => [m.uid, m]));
-      const maxSeq = view.uids.length;
-      const maxUid = view.uids[view.uids.length - 1] ?? 0;
-      const hits: number[] = [];
-      view.uids.forEach((uid, i) => {
-        const data = byUid.get(uid);
-        if (!data) return;
-        const matched = evaluateSearch(
-          program.key,
-          { seq: i + 1, uid, flags: data.flags, size: data.size, internalDateMs: data.internalDateMs, modseq: data.modseq, raw: data.raw },
-          maxSeq,
-          maxUid,
-        );
-        if (matched) hits.push(uidMode ? uid : i + 1);
-      });
-      return [
-        { kind: "reply", text: ImapEngine.searchReply(cmd.tag, uidMode, esearch, hits) },
-        { kind: "reply", text: `${cmd.tag} OK ${verb} completed` },
-      ];
-    });
+    const maxSeq = view.uids.length;
+    const maxUid = view.uids[view.uids.length - 1] ?? 0;
+    /**
+     * ★SEARCH도 배치로 나눈다. 예전엔 메일함 **전체** uid를 한 요청에 실었고 `needRaw`면
+     * 블롭 전부가 메모리에 올라왔다 — `SEARCH BODY "x"` 한 줄이 5만 통 × 50KB = 2.5GB였다.
+     *
+     * FETCH와 달리 **응답을 배치마다 흘릴 수 없다**: `* SEARCH`는 매칭 전체를 한 줄에 싣고
+     * ESEARCH의 MIN/MAX/COUNT도 전량을 봐야 정해진다. 그래서 배치는 원문의 상주 시간을 줄이고
+     * (배치가 끝나면 그 raw는 버려진다) 누적하는 것은 **매칭된 번호뿐**이다 — 그건 통당
+     * 4바이트라 5만 통이어도 문제가 되지 않는다.
+     */
+    const batchSize = needRaw ? FETCH_BATCH_RAW : FETCH_BATCH_META;
+    const hits: number[] = [];
+    const searchFrom = (offset: number): ImapAction[] => {
+      const batchUids = view.uids.slice(offset, offset + batchSize);
+      return this.callBackend(
+        { kind: "fetchMessages", name: view.name, uids: batchUids, needRaw, markSeen: false },
+        (res) => {
+          if (res.kind === "no") return [ImapEngine.noReply(cmd.tag, verb, res)];
+          if (res.kind !== "messages") return [{ kind: "reply", text: `${cmd.tag} NO ${verb} failed` }];
+          const byUid = new Map(res.messages.map((m) => [m.uid, m]));
+          batchUids.forEach((uid, k) => {
+            const data = byUid.get(uid);
+            if (!data) return;
+            const i = offset + k; // 세션 뷰 인덱스 → seq는 i+1
+            const matched = evaluateSearch(
+              program.key,
+              { seq: i + 1, uid, flags: data.flags, size: data.size, internalDateMs: data.internalDateMs, modseq: data.modseq, raw: data.raw },
+              maxSeq,
+              maxUid,
+            );
+            if (matched) hits.push(uidMode ? uid : i + 1);
+          });
+          const next = offset + batchSize;
+          if (next < view.uids.length) return searchFrom(next);
+          return [
+            { kind: "reply", text: ImapEngine.searchReply(cmd.tag, uidMode, esearch, hits) },
+            { kind: "reply", text: `${cmd.tag} OK ${verb} completed` },
+          ];
+        },
+      );
+    };
+    return searchFrom(0);
   }
 
   /** SEARCH 응답 — 고전(`* SEARCH n...`) 또는 ESEARCH(RFC 4731). hits는 seq/uid(모드별). */
