@@ -64,12 +64,19 @@ import { toAppendAddresses } from "./addresses.ts";
 import { buildVacationReply, decideVacation } from "./vacation.ts";
 
 /** ParsedMessage + 봉투 → Sieve 실행 환경(헤더 소문자 키). */
-function buildSieveEnv(parsed: ParsedMessage, env: { mailFrom: string; rcptTo: readonly string[] }, size: number): SieveEnv {
+function buildSieveEnv(
+  parsed: ParsedMessage,
+  env: { mailFrom: string; rcptTo: readonly string[] },
+  size: number,
+  mailboxes: readonly string[],
+): SieveEnv {
   return {
     headers: parsed.headers,
     envelopeFrom: env.mailFrom,
     envelopeTo: [...env.rcptTo],
     size,
+    // `mailboxexists`(RFC 5490)는 조회가 아니라 **주입**이다 — 평가기는 I/O를 모른다.
+    mailboxes,
   };
 }
 
@@ -89,6 +96,12 @@ function buildMailboxPathMap(rows: readonly { id: string; parentId: string; name
   };
   return new Map(rows.map((r) => [path(r), r.id]));
 }
+
+/**
+ * `fileinto :create`가 만들 수 있는 최대 깊이. 경로가 사용자 스크립트에서 오는 값이라
+ * 상한이 없으면 한 줄로 임의 개수의 메일함을 만들 수 있다 — 배달 경로에서 도는 쓰기다.
+ */
+const MAX_SIEVE_MAILBOX_DEPTH = 8;
 
 /** Sieve imap4flags(IMAP 표기) → 스토어 키워드(소문자 $). */
 function sieveFlagToKeyword(flag: string): string {
@@ -544,9 +557,20 @@ export class IonosphereSmtpBackend implements SmtpBackend {
     const script = await this.store.getActiveSieveScript(accountId);
     if (!script) return fallback;
 
+    /**
+     * ★메일함 목록을 **여기서 한 번** 읽는다. `mailboxexists`(RFC 5490)가 이 값을 보고,
+     * 아래 fileinto 경로 매핑도 같은 값을 쓴다 — 두 번 읽으면 그 사이의 변화로 스크립트가
+     * "있다"고 판정한 메일함이 매핑에서 사라지는 창이 생긴다.
+     *
+     * 스크립트가 없으면 위에서 이미 반환했으므로, 이 조회 비용은 **Sieve를 쓰는 계정만**
+     * 낸다. 그게 이 순서를 고른 이유다.
+     */
+    let rows = await this.store.listMailboxes(accountId);
+    let pathToId = buildMailboxPathMap(rows);
+
     let result;
     try {
-      result = runSieve(script, buildSieveEnv(parsed, env, size));
+      result = runSieve(script, buildSieveEnv(parsed, env, size, [...pathToId.keys()]));
     } catch (err) {
       this.log.warn("sieve error — INBOX fallback", { accountId, error: err instanceof Error ? err.message : String(err) });
       return fallback;
@@ -575,15 +599,33 @@ export class IonosphereSmtpBackend implements SmtpBackend {
     }
     if (result.discarded) return { mailboxIds: [], keywords: [], redirect: [], discard: true, fileintoUsed: false, reject: null, vacation: result.vacation };
 
+    /**
+     * `fileinto :create`(RFC 5490 §3.2) — 없는 대상을 만든다.
+     *
+     * ★`:create` 없이 없는 메일함에 fileinto하면 여전히 INBOX 폴백이다. 그게 규격이고
+     * (§3.2: `:create`가 있을 때만 만든다) 오타 하나로 메일함이 생기지 않게 하는 안전장치이기도
+     * 하다. 만들기가 실패하면 **폴백으로 되돌아간다** — 필터 하나 때문에 배달이 멈추면 안 된다.
+     */
+    for (const name of result.fileintoCreate) {
+      if (pathToId.has(name)) continue;
+      try {
+        await this.ensureMailboxPath(accountId, name, pathToId);
+        rows = await this.store.listMailboxes(accountId);
+        pathToId = buildMailboxPathMap(rows);
+      } catch (err) {
+        this.log.warn("sieve fileinto :create 실패 — INBOX 폴백", {
+          accountId,
+          mailbox: name,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     // fileinto 대상(경로)을 mailboxId로 — 없으면 INBOX 폴백
     const mailboxIds = new Set<string>();
     if (result.keep) mailboxIds.add(inboxId);
-    if (result.fileinto.length > 0) {
-      const rows = await this.store.listMailboxes(accountId);
-      const pathToId = buildMailboxPathMap(rows);
-      for (const name of result.fileinto) {
-        mailboxIds.add(pathToId.get(name) ?? inboxId);
-      }
+    for (const name of result.fileinto) {
+      mailboxIds.add(pathToId.get(name) ?? inboxId);
     }
     // 안전망은 **redirect가 없을 때만**. redirect는 암묵적 keep을 취소하므로(RFC 5228 §4.2),
     // `redirect "x@y";`만 있는 스크립트까지 INBOX에 남기면 "전달만" 규칙이 사본을 남기는 셈이 된다.
@@ -598,6 +640,40 @@ export class IonosphereSmtpBackend implements SmtpBackend {
       // 사용자가 fileinto로 자리를 명시했는가 — junk 재배치가 이걸 존중한다.
       fileintoUsed: result.fileinto.length > 0,
     };
+  }
+
+  /**
+   * `A/B/C` 경로의 메일함을 **조상까지** 만든다 (Sieve `fileinto :create`, RFC 5490 §3.2).
+   *
+   * ★위에서부터 만든다 — `createMailbox`가 parentId를 요구하므로 `A`가 없으면 `A/B`를 만들 수
+   * 없다. 중간에 이미 있는 단계는 건너뛴다.
+   *
+   * ★깊이를 제한한다. 경로는 사용자 스크립트에서 오는 값이라, 제한이 없으면 한 줄로
+   * 임의 개수의 메일함을 만들 수 있다(배달 경로에서 도는 쓰기다).
+   */
+  private async ensureMailboxPath(accountId: string, path: string, pathToId: Map<string, string>): Promise<void> {
+    const segs = path.split("/").filter((x) => x.length > 0);
+    if (segs.length === 0) throw new Error("빈 메일함 경로");
+    if (segs.length > MAX_SIEVE_MAILBOX_DEPTH) {
+      throw new Error(`메일함 깊이 초과(${segs.length} > ${MAX_SIEVE_MAILBOX_DEPTH})`);
+    }
+    let parentId = "";
+    let sofar = "";
+    for (const seg of segs) {
+      sofar = sofar === "" ? seg : `${sofar}/${seg}`;
+      const existing = pathToId.get(sofar);
+      if (existing !== undefined) {
+        parentId = existing;
+        continue;
+      }
+      const created = await this.store.createMailbox({
+        accountId,
+        name: seg,
+        ...(parentId !== "" ? { parentId } : {}),
+      });
+      pathToId.set(sofar, created.mailboxId);
+      parentId = created.mailboxId;
+    }
   }
 
   /** 이 서버가 배달할 수 있는 주소인가(로컬 계정·알리아스·캐치올). 내부 전용 모드 판정에 쓴다. */

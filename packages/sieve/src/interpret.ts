@@ -25,12 +25,33 @@ export interface SieveEnv {
   envelopeFrom: string;
   envelopeTo: string[];
   size: number;
+  /**
+   * 이 계정의 메일함 경로들 — `mailboxexists`(RFC 5490 §3.1) 판정용.
+   *
+   * ★평가기는 순수해야 하므로 조회가 아니라 **주입**이다. 호출자가 안 주면 빈 목록으로 보고
+   * `mailboxexists`는 거짓이 된다 — 있는지 모를 때 "있다"고 답하는 것보다 안전한 쪽이다
+   * (스크립트가 그 결과로 fileinto를 고르는데, 없는 곳으로 보내면 메일이 INBOX로 샌다).
+   */
+  mailboxes?: readonly string[];
+  /**
+   * `subaddress`(RFC 5233)의 구분자. 기본 `+` — 이 저장소의 알리아스 매칭과 같은 값이라야
+   * 스크립트가 보는 `:detail`과 서버가 푸는 태그가 일치한다.
+   */
+  subaddressDelimiter?: string;
 }
 
 /** 실행 결과 — 배달 파이프라인이 해석. keep=INBOX 배달, fileinto=지정 메일함. */
 export interface SieveResult {
   keep: boolean;
   fileinto: string[];
+  /**
+   * `fileinto :create`(RFC 5490 §3.2)로 지정된 대상 — **없으면 만들어 달라**는 요청.
+   *
+   * ★평가기가 직접 만들지 않는다(순수 함수). 없는 메일함에 fileinto하면 지금까지는 조용히
+   * INBOX로 샜는데, 사용자 입장에서는 규칙이 동작하지 않는 것으로 보인다. `:create`는 그
+   * 실패를 없애는 표준 방법이고, **만드는 일은 배달 계층의 몫**이다.
+   */
+  fileintoCreate: string[];
   redirect: string[];
   flags: string[];
   discarded: boolean;
@@ -81,11 +102,33 @@ export interface VacationRequest {
   mime: boolean;
 }
 
-const SUPPORTED_EXTENSIONS = new Set(["fileinto", "envelope", "imap4flags", "copy", "reject", "ereject", "vacation"]);
+/**
+ * `require`로 받아 주는 확장 — **광고의 정본**이기도 하다.
+ *
+ * ★ManageSieve의 `"SIEVE"` 능력줄이 이 목록을 그대로 실어야 한다. 예전엔 그쪽에 손으로 적은
+ * 사본이 있었고, `reject`·`ereject`·`vacation`을 여기 추가했을 때 그 사본이 안 따라와서
+ * **평가기는 받는데 서버는 광고하지 않는** 상태가 됐다. 능력줄을 보고 스크립트를 고르는
+ * 클라이언트에게 그건 "이 서버는 자동 응답을 못 한다"와 같다.
+ *
+ * 순서는 광고에 그대로 나가므로 배열로 둔다(Set은 순서를 약속하지 않는 자료구조로 읽힌다).
+ */
+export const SUPPORTED_EXTENSION_LIST = [
+  "fileinto",
+  "envelope",
+  "imap4flags",
+  "copy",
+  "reject",
+  "ereject",
+  "vacation",
+  "mailbox",
+  "subaddress",
+] as const;
+
+const SUPPORTED_EXTENSIONS: ReadonlySet<string> = new Set(SUPPORTED_EXTENSION_LIST);
 
 interface ExecState {
   env: SieveEnv;
-  result: { keep: boolean; fileinto: string[]; redirect: string[]; flags: Set<string>; canceledImplicit: boolean; explicitKeep: boolean; reject: string | null; vacation: VacationRequest | null };
+  result: { keep: boolean; fileinto: string[]; fileintoCreate: string[]; redirect: string[]; flags: Set<string>; canceledImplicit: boolean; explicitKeep: boolean; reject: string | null; vacation: VacationRequest | null };
   stopped: boolean;
 }
 
@@ -94,7 +137,7 @@ export function runSieve(src: string, env: SieveEnv): SieveResult {
   const cmds = parseSieve(src);
   const state: ExecState = {
     env,
-    result: { keep: false, fileinto: [], redirect: [], flags: new Set(), canceledImplicit: false, explicitKeep: false, reject: null, vacation: null },
+    result: { keep: false, fileinto: [], fileintoCreate: [], redirect: [], flags: new Set(), canceledImplicit: false, explicitKeep: false, reject: null, vacation: null },
     stopped: false,
   };
   execBlock(cmds, state);
@@ -107,11 +150,12 @@ export function runSieve(src: string, env: SieveEnv): SieveResult {
   const keep = r.reject !== null ? false : r.explicitKeep || !r.canceledImplicit;
   if (r.reject !== null) {
     // 거절이면 자동 응답도 하지 않는다 — 받지 않겠다고 해 놓고 답장을 보내는 것은 모순이다.
-    return { keep: false, fileinto: [], redirect: [], flags: [], discarded: false, reject: r.reject, vacation: null };
+    return { keep: false, fileinto: [], fileintoCreate: [], redirect: [], flags: [], discarded: false, reject: r.reject, vacation: null };
   }
   return {
     keep,
     fileinto: [...new Set(r.fileinto)],
+    fileintoCreate: [...new Set(r.fileintoCreate)],
     redirect: [...new Set(r.redirect)],
     flags: [...r.flags],
     discarded: !keep && r.fileinto.length === 0 && r.redirect.length === 0,
@@ -179,6 +223,8 @@ function execAction(cmd: SieveCommand, st: ExecState): void {
       const target = firstStrings(cmd.args)[0];
       if (!target) throw new SieveError("fileinto requires a mailbox");
       r.fileinto.push(target);
+      // `:create`(RFC 5490 §3.2) — 없으면 만들어 달라. 만드는 것은 배달 계층의 몫이다.
+      if (hasTag(cmd.args, "create")) r.fileintoCreate.push(target);
       if (!copy) r.canceledImplicit = true;
       return;
     }
@@ -274,24 +320,39 @@ function evalTest(test: SieveTest, env: SieveEnv): boolean {
     case "address": {
       const match = matchType(test.args);
       const part = addressPart(test.args);
+      const delim = env.subaddressDelimiter ?? "+";
       const strs = stringArgs(test.args);
       const names = strs[0] ?? [];
       const keys = strs[1] ?? [];
-      const values = names.flatMap((nm) => (env.headers.get(nm.toLowerCase()) ?? []).flatMap((h) => extractAddresses(h).map((a) => addrPart(a, part))));
+      const values = names.flatMap((nm) => (env.headers.get(nm.toLowerCase()) ?? []).flatMap((h) => extractAddresses(h).map((a) => addrPart(a, part, delim))));
       return anyMatch(values, keys, match);
     }
     case "envelope": {
       const match = matchType(test.args);
       const part = addressPart(test.args);
+      const delim = env.subaddressDelimiter ?? "+";
       const strs = stringArgs(test.args);
       const fields = (strs[0] ?? []).map((s) => s.toLowerCase());
       const keys = strs[1] ?? [];
       const values: string[] = [];
       for (const f of fields) {
-        if (f === "from") values.push(addrPart(env.envelopeFrom, part));
-        else if (f === "to") for (const t of env.envelopeTo) values.push(addrPart(t, part));
+        if (f === "from") values.push(addrPart(env.envelopeFrom, part, delim));
+        else if (f === "to") for (const t of env.envelopeTo) values.push(addrPart(t, part, delim));
       }
       return anyMatch(values, keys, match);
+    }
+    /**
+     * `mailboxexists`(RFC 5490 §3.1) — 나열한 메일함이 **전부** 있으면 참.
+     *
+     * ★"하나라도"가 아니라 "전부"다. 스크립트가 보통
+     * `if mailboxexists "A" { fileinto "A"; } else { keep; }` 형태라, 일부만 있는데 참이 되면
+     * 없는 곳으로 fileinto해 메일이 INBOX로 샌다.
+     */
+    case "mailboxexists": {
+      const names = stringArgs(test.args).flat();
+      if (names.length === 0) throw new SieveError("mailboxexists requires a mailbox name");
+      const have = new Set(env.mailboxes ?? []);
+      return names.every((n) => have.has(n));
     }
     default:
       throw new SieveError(`unknown test: ${test.name}`);
@@ -425,9 +486,14 @@ function flagArgs(args: readonly SieveArg[]): string[] {
   // setflag/addflag/removeflag [<variable>] <list-of-flags> — 변수 미지원(v1), 문자열 리스트만
   return stringArgs(args).flat().flatMap((s) => s.split(/\s+/).filter((x) => x.length > 0));
 }
-function addressPart(args: readonly SieveArg[]): "all" | "localpart" | "domain" {
+/** `subaddress`(RFC 5233)가 `:user`/`:detail`을 더한다 — localpart를 구분자로 다시 나눈 것. */
+type AddressPart = "all" | "localpart" | "domain" | "user" | "detail";
+
+function addressPart(args: readonly SieveArg[]): AddressPart {
   if (hasTag(args, "localpart")) return "localpart";
   if (hasTag(args, "domain")) return "domain";
+  if (hasTag(args, "user")) return "user";
+  if (hasTag(args, "detail")) return "detail";
   return "all";
 }
 
@@ -441,8 +507,24 @@ function extractAddresses(header: string): string[] {
   }
   return out;
 }
-function addrPart(addr: string, part: "all" | "localpart" | "domain"): string {
+function addrPart(addr: string, part: AddressPart, delimiter: string): string {
   const at = addr.lastIndexOf("@");
   if (part === "all" || at === -1) return addr;
-  return part === "localpart" ? addr.slice(0, at) : addr.slice(at + 1);
+  if (part === "domain") return addr.slice(at + 1);
+  const local = addr.slice(0, at);
+  if (part === "localpart") return local;
+
+  /**
+   * `subaddress`(RFC 5233 §4) — `user+detail@domain`.
+   *
+   * ★구분자가 **없으면** `:user`는 localpart 전체이고 `:detail`은 빈 문자열이 아니라
+   * **없는 값**이다(§4: "if the address does not include a detail sub-part, the :detail
+   * ... is the empty string" — 빈 문자열로 취급한다). 여기서는 빈 문자열로 둔다.
+   *
+   * ★첫 구분자로 자른다. `a+b+c`의 detail은 `b+c`다 — 태그 안에 구분자가 들어가는 형태를
+   * 쓰는 서비스가 있어서, 마지막 것으로 자르면 그런 주소의 태그가 잘린다.
+   */
+  const idx = delimiter.length > 0 ? local.indexOf(delimiter) : -1;
+  if (idx === -1) return part === "user" ? local : "";
+  return part === "user" ? local.slice(0, idx) : local.slice(idx + delimiter.length);
 }

@@ -26,6 +26,7 @@ import { decodeSaslBase64, parseSaslPlain,
   type ScramStoredKeys,
 } from "@ionosphere/core";
 import { ImapLineReader, type LinePart, type ReaderEvent } from "@ionosphere/proto-imap";
+import { SUPPORTED_EXTENSION_LIST } from "@ionosphere/sieve";
 
 export type ManageSieveAction =
   | { kind: "reply"; text: string }
@@ -96,7 +97,9 @@ const PROCESS_SCRAM_DECOY = randomBytes(32);
 
 const CAP_LINES = (hostname: string, authAllowed: boolean, starttlsOffered: boolean, scramOffered: boolean): string[] => [
   `"IMPLEMENTATION" "ionosphere ManageSieve"`,
-  `"SIEVE" "fileinto envelope imap4flags copy"`,
+  // ★목록의 정본은 평가기다(@ionosphere/sieve). 여기 손으로 적으면 확장을 늘릴 때 한쪽만
+  //   고쳐져 "평가기는 받는데 서버는 광고하지 않는" 상태가 된다 — 실제로 그렇게 갈라졌었다.
+  `"SIEVE" "${SUPPORTED_EXTENSION_LIST.join(" ")}"`,
   `"VERSION" "1.0"`,
   // ★광고 = 구현. `starttlsOffered`는 STARTTLS 명령을 실제로 수락할 수 있을 때만 true다
   //   (engine 옵션 tlsAvailable & 아직 평문). 없는 기능을 실으면 클라이언트가 시도하고 실패한 뒤

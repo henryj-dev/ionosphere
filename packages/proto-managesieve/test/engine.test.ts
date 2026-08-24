@@ -1,6 +1,7 @@
 /** ManageSieveEngine — 명령 대화·SASL·리터럴 스크립트·CRUD 액션 테스트. */
 import { describe, expect, test } from "@ionosphere/testkit";
 import { ManageSieveEngine, type ManageSieveAction } from "../src/engine.ts";
+import { SUPPORTED_EXTENSION_LIST } from "@ionosphere/sieve";
 
 const enc = new TextEncoder();
 function engine(): ManageSieveEngine {
@@ -27,7 +28,14 @@ describe("인사말·CAPABILITY", () => {
   test("greeting에 IMPLEMENTATION/SIEVE/SASL + OK", () => {
     const g = texts(engine().greeting());
     expect(g.some((l) => l.includes("IMPLEMENTATION"))).toBe(true);
-    expect(g.some((l) => l.includes('"SIEVE"') && l.includes("fileinto"))).toBe(true);
+    /**
+     * ★능력줄이 **평가기가 실제로 받는 목록**과 같아야 한다. 예전엔 여기 손으로 적은 사본이
+     * 있었고, `vacation`을 평가기에 추가했을 때 사본이 안 따라와 "받기는 하는데 광고하지 않는"
+     * 상태가 됐다. 능력줄로 기능을 판단하는 클라이언트에겐 없는 것과 같다.
+     */
+    const sieveLine = g.find((l) => l.includes('"SIEVE"'));
+    expect(sieveLine).toBeTruthy();
+    for (const ext of SUPPORTED_EXTENSION_LIST) expect(sieveLine!.includes(ext)).toBe(true);
     expect(g.some((l) => l.includes('"SASL" "PLAIN"'))).toBe(true);
     expect(g.at(-1)).toStartWith("OK");
   });
