@@ -213,6 +213,33 @@ interface QueueRow {
   createdAt: number;
   /** 지연 통보를 보낸 시각. null이면 아직 안 보냄 — **중복 통보를 막는 유일한 근거**다. */
   delayNotifiedAt: number | null;
+  /**
+   * DSN `NOTIFY`(RFC 3461 §4.1) 원문 — `NEVER` 또는 `SUCCESS,FAILURE,DELAY` 조합. null이면
+   * 발신자가 말하지 않은 것이고, 그때의 기본은 `FAILURE,DELAY`다(§4.1).
+   */
+  dsnNotify: string | null;
+  /** 원 수신자(§4.2) — 바운스에 실어야 발신자가 알아본다. */
+  dsnOrcpt: string | null;
+  /** 발신자의 봉투 id(§4.3) — 바운스를 자기 발송 기록과 맞추는 열쇠다. */
+  dsnEnvid: string | null;
+  /** `FULL`이면 원문 전체, `HDRS`면 헤더만 바운스에 싣는다(§4.3). */
+  dsnRet: string | null;
+}
+
+/**
+ * 이 수신자에게 이 종류의 DSN을 보내도 되는가 (RFC 3461 §4.1).
+ *
+ * ★말하지 않았으면 기본은 `FAILURE,DELAY`다 — 성공 통보는 **요청해야** 간다(그러지 않으면
+ * 모든 발송에 성공 알림이 되돌아와 받은편지함이 잠긴다).
+ *
+ * ★`NEVER`면 무엇도 보내지 않는다. 이걸 무시하면 메일링리스트가 자기 실패 알림을 되받아
+ * 폭풍이 된다 — 리스트 소프트웨어가 이 파라미터를 쓰는 이유가 정확히 그것이다.
+ */
+export function dsnWanted(notify: string | null, kind: "failure" | "delay" | "success"): boolean {
+  if (notify === null || notify.trim() === "") return kind !== "success";
+  const parts = notify.toUpperCase().split(",");
+  if (parts.includes("NEVER")) return false;
+  return parts.includes(kind.toUpperCase());
 }
 
 function errMsg(err: unknown): string {
@@ -569,6 +596,7 @@ export class MtaWorker {
     const { rows } = await this.db.query({
       sql: `SELECT id, tenant_id, account_id, submission_id, blob_id, env_from, rcpt, rcpt_domain, attempts,
                    created_at, delay_notified_at
+                   , dsn_notify, dsn_orcpt, dsn_envid, dsn_ret
             FROM mta_queue
             WHERE (status IN (${STATUS.queued}, ${STATUS.deferred}) AND next_attempt <= ?)
                OR (status = ${STATUS.inFlight} AND lease_until < ?)
@@ -609,6 +637,10 @@ export class MtaWorker {
         attempts: Number(row.attempts),
         createdAt: Number(row.created_at),
         delayNotifiedAt: row.delay_notified_at == null ? null : Number(row.delay_notified_at),
+        dsnNotify: row.dsn_notify == null ? null : String(row.dsn_notify),
+        dsnOrcpt: row.dsn_orcpt == null ? null : String(row.dsn_orcpt),
+        dsnEnvid: row.dsn_envid == null ? null : String(row.dsn_envid),
+        dsnRet: row.dsn_ret == null ? null : String(row.dsn_ret),
       });
     });
     if (leased.length === 0) return 0;
@@ -970,13 +1002,17 @@ export class MtaWorker {
           via: viaSmarthost ? "smarthost" : "mx",
           suppressed: !viaSmarthost,
         });
-        dsnRows.push({
-          rcpt: row.rcpt,
-          action: DSN_ACTION.failed,
-          status: enhancedStatusFor(code, DSN_ACTION.failed),
-          diagnostic: rejectionText(code, detail),
-          ...(viaSmarthost ? {} : { remoteMta: mx.exchange }),
-        });
+        // ★발신자가 `NOTIFY=NEVER`라고 했으면 실패해도 보내지 않는다(RFC 3461 §4.1).
+        if (dsnWanted(row.dsnNotify, "failure")) {
+          dsnRows.push({
+            rcpt: row.rcpt,
+            action: DSN_ACTION.failed,
+            status: enhancedStatusFor(code, DSN_ACTION.failed),
+            diagnostic: rejectionText(code, detail),
+            ...(viaSmarthost ? {} : { remoteMta: mx.exchange }),
+            ...(row.dsnOrcpt !== null ? { originalRecipient: row.dsnOrcpt } : {}),
+          });
+        }
         this.emitResult("bounced");
         continue;
       }
@@ -1005,13 +1041,16 @@ export class MtaWorker {
           via: viaSmarthost ? "smarthost" : "mx",
           suppressed: !viaSmarthost,
         });
-        dsnRows.push({
-          rcpt: row.rcpt,
-          action: DSN_ACTION.failed,
-          status: enhancedStatusFor(code, DSN_ACTION.failed),
-          diagnostic: `max attempts exhausted: ${rejectionText(code, detail)}`,
-          ...(viaSmarthost ? {} : { remoteMta: mx.exchange }),
-        });
+        if (dsnWanted(row.dsnNotify, "failure")) {
+          dsnRows.push({
+            rcpt: row.rcpt,
+            action: DSN_ACTION.failed,
+            status: enhancedStatusFor(code, DSN_ACTION.failed),
+            diagnostic: `max attempts exhausted: ${rejectionText(code, detail)}`,
+            ...(viaSmarthost ? {} : { remoteMta: mx.exchange }),
+            ...(row.dsnOrcpt !== null ? { originalRecipient: row.dsnOrcpt } : {}),
+          });
+        }
         this.emitResult("bounced");
       } else {
         const next = now + backoffMs(attempts);
@@ -1055,11 +1094,18 @@ export class MtaWorker {
     if (row.delayNotifiedAt !== null) return;
     if (row.envFrom.trim() === "") return; // 이중 바운스 차단 — sendDsn과 같은 규율
     if (now - row.createdAt < DELAY_NOTIFY_AFTER_MS) return;
+    /**
+     * ★`NOTIFY`가 지연을 원하지 않으면 보내지 않는다. 그래도 `delay_notified_at`은 찍지
+     * **않는다** — 이 값은 "보냈다"의 기록이라, 안 보낸 것을 보냈다고 적으면 나중에 설정이
+     * 바뀌어도 영영 통보가 안 간다.
+     */
+    if (!dsnWanted(row.dsnNotify, "delay")) return;
     dsnRows.push({
       rcpt: row.rcpt,
       action: DSN_ACTION.delayed,
       status: "4.4.7", // 큐에 머문 시간 초과(RFC 3463)
       diagnostic: detail,
+      ...(row.dsnOrcpt !== null ? { originalRecipient: row.dsnOrcpt } : {}),
     });
     stmts.push({ sql: "UPDATE mta_queue SET delay_notified_at = ? WHERE id = ?", params: [now, row.id] });
   }

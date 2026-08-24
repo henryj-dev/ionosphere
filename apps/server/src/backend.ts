@@ -54,7 +54,7 @@ import {
   claimVacationReply,
   getVacationResponse,
 } from "@ionosphere/store";
-import type { SmtpAuthResult, SmtpBackend } from "@ionosphere/proto-smtp";
+import type { SmtpAuthResult, SmtpBackend, SmtpDsnParams } from "@ionosphere/proto-smtp";
 import type { LmtpBackend, LmtpDelivery, LmtpDeliverEnv } from "@ionosphere/proto-lmtp";
 import {
   InProcessMaildropLock,
@@ -904,6 +904,8 @@ export class IonosphereSmtpBackend implements SmtpBackend {
     rcptTo: string[];
     raw: Uint8Array;
     authenticatedAs: string | null;
+    /** DSN 확장(RFC 3461) — 제출 경로가 큐까지 나른다(수신 경로는 우리가 최종 목적지라 무관). */
+    dsn?: SmtpDsnParams | undefined;
   }) {
     // 인증된 제출(submission) → 아웃바운드 발송 큐 (SCHEMA §9-1, MTA 워커가 배달)
     if (env.authenticatedAs) {
@@ -1678,6 +1680,8 @@ export class IonosphereSmtpBackend implements SmtpBackend {
     rcptTo: string[];
     raw: Uint8Array;
     authenticatedAs: string | null;
+    /** DSN 확장(RFC 3461) — 제출자가 준 값을 큐까지 나른다. */
+    dsn?: SmtpDsnParams | undefined;
     /** 트레이스 헤더용 — 호출자(deliver)는 원래 넘기고 있었는데 타입이 받지 않았다. */
     heloName?: string | undefined;
     clientIp?: string | undefined;
@@ -1727,6 +1731,8 @@ export class IonosphereSmtpBackend implements SmtpBackend {
           blobGeneration: generation,
           envFrom: env.mailFrom,
           rcpts: env.rcptTo,
+          // ★DSN 파라미터를 큐까지 나른다. 여기서 빠뜨리면 받아 놓고 무시하는 서버가 된다.
+          ...(env.dsn ? { dsn: env.dsn } : {}),
         },
         {
           // 정책은 통째로 전달한다 — 필드를 골라 담으면 새 필드가 늘 때 여기만 빠진다.

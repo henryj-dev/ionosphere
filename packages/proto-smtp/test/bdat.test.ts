@@ -141,3 +141,100 @@ describe("BDAT", () => {
     expect(text(e.feed(enc.encode("DATA\r\n")))).toContain("354");
   });
 });
+
+describe("DSN 확장 파라미터 (RFC 3461)", () => {
+  const deliverAction = (actions: SmtpAction[]): Extract<SmtpAction, { kind: "deliver" }> | null => {
+    const a = actions.find((x) => x.kind === "deliver");
+    return a && a.kind === "deliver" ? a : null;
+  };
+
+  /** 세션을 몰아 DATA까지 보내고 deliver 액션을 돌려준다. */
+  function send(mailParams: string, rcptParams: string): Extract<SmtpAction, { kind: "deliver" }> | null {
+    const e = makeEngine();
+    e.greeting();
+    e.feed(enc.encode("EHLO client.test\r\n"));
+    e.feed(enc.encode(`MAIL FROM:<a@x.test>${mailParams}\r\n`));
+    e.feed(enc.encode(`RCPT TO:<b@y.test>${rcptParams}\r\n`));
+    e.rcptResult({ ok: true });
+    e.feed(enc.encode("DATA\r\n"));
+    return deliverAction(e.feed(enc.encode("From: a@x.test\r\n\r\nbody\r\n.\r\n")));
+  }
+
+  test("EHLO가 DSN을 광고한다", () => {
+    const e = makeEngine();
+    e.greeting();
+    expect(text(e.feed(enc.encode("EHLO client.test\r\n")))).toContain("DSN");
+  });
+
+  test("NOTIFY와 ORCPT가 배달 액션까지 간다", () => {
+    const d = send("", " NOTIFY=FAILURE,DELAY ORCPT=rfc822;orig@z.test")!;
+    expect(d.dsn?.perRcpt?.get("b@y.test")?.notify).toBe("FAILURE,DELAY");
+    expect(d.dsn?.perRcpt?.get("b@y.test")?.orcpt).toBe("rfc822;orig@z.test");
+  });
+
+  test("RET과 ENVID가 배달 액션까지 간다", () => {
+    const d = send(" RET=HDRS ENVID=abc123", "")!;
+    expect(d.dsn?.ret).toBe("HDRS");
+    expect(d.dsn?.envid).toBe("abc123");
+  });
+
+  test("파라미터가 없으면 dsn 자체가 없다", () => {
+    expect(send("", "")!.dsn).toBe(undefined);
+  });
+
+  /** ★§4.1 — `NEVER`는 단독이어야 한다. 섞여 오면 뜻이 모순이라 거절한다. */
+  test("NOTIFY=NEVER를 다른 값과 섞으면 501", () => {
+    const e = makeEngine();
+    e.greeting();
+    e.feed(enc.encode("EHLO client.test\r\n"));
+    e.feed(enc.encode("MAIL FROM:<a@x.test>\r\n"));
+    expect(text(e.feed(enc.encode("RCPT TO:<b@y.test> NOTIFY=NEVER,FAILURE\r\n")))).toContain("501");
+  });
+
+  test("모르는 NOTIFY 값은 501", () => {
+    const e = makeEngine();
+    e.greeting();
+    e.feed(enc.encode("EHLO client.test\r\n"));
+    e.feed(enc.encode("MAIL FROM:<a@x.test>\r\n"));
+    expect(text(e.feed(enc.encode("RCPT TO:<b@y.test> NOTIFY=MAYBE\r\n")))).toContain("501");
+  });
+
+  /**
+   * ★`ENVID`/`ORCPT`는 xtext다. 풀어서 헤더에 싣는데, 제어문자를 풀어 넣으면 **줄 주입**이
+   * 된다 — 그래서 디코딩 단계에서 거절한다.
+   */
+  test("제어문자를 인코딩한 xtext는 501", () => {
+    const e = makeEngine();
+    e.greeting();
+    e.feed(enc.encode("EHLO client.test\r\n"));
+    expect(text(e.feed(enc.encode("MAIL FROM:<a@x.test> ENVID=a+0Db\r\n")))).toContain("501");
+  });
+
+  test("xtext가 풀려서 전달된다", () => {
+    const d = send(" ENVID=a+2Bb", "")!; // `+2B` = '+'
+    expect(d.dsn?.envid).toBe("a+b");
+  });
+
+  test("모르는 RCPT 파라미터는 504", () => {
+    const e = makeEngine();
+    e.greeting();
+    e.feed(enc.encode("EHLO client.test\r\n"));
+    e.feed(enc.encode("MAIL FROM:<a@x.test>\r\n"));
+    expect(text(e.feed(enc.encode("RCPT TO:<b@y.test> NONSENSE=1\r\n")))).toContain("504");
+  });
+
+  /** ★트랜잭션 단위다 — 남기면 다음 메일이 앞 메일의 설정을 물려받는다. */
+  test("RSET이 DSN 파라미터를 지운다", () => {
+    const e = makeEngine();
+    e.greeting();
+    e.feed(enc.encode("EHLO client.test\r\n"));
+    e.feed(enc.encode("MAIL FROM:<a@x.test> ENVID=first\r\n"));
+    e.feed(enc.encode("RSET\r\n"));
+    e.feed(enc.encode("MAIL FROM:<a@x.test>\r\n"));
+    e.feed(enc.encode("RCPT TO:<b@y.test>\r\n"));
+    e.rcptResult({ ok: true });
+    e.feed(enc.encode("DATA\r\n"));
+    const d = deliverAction(e.feed(enc.encode("From: a@x.test\r\n\r\nbody\r\n.\r\n")));
+    expect(d!.dsn).toBe(undefined);
+  });
+});

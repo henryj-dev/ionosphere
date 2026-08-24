@@ -95,7 +95,21 @@ export type SmtpAction =
    * 실패가 성공 경로를 타므로 절대 안 된다.
    */
   | { kind: "authFailed"; user?: string; mechanism: string }
-  | { kind: "deliver"; mailFrom: string; heloName: string; rcptTo: readonly string[]; raw: Uint8Array; authenticatedAs: string | null }
+  | {
+      kind: "deliver";
+      mailFrom: string;
+      heloName: string;
+      rcptTo: readonly string[];
+      raw: Uint8Array;
+      authenticatedAs: string | null;
+      /**
+       * DSN 확장 파라미터(RFC 3461) — 발신자가 준 것만 든다.
+       *
+       * ★수신자별 값(`notify`/`orcpt`)은 **주소로 찾는다**. 배열 위치로 맞추면 백엔드가
+       * 수신자를 재정렬하거나 걸러낸 순간 다른 수신자의 설정이 적용된다.
+       */
+      dsn?: SmtpDsnParams;
+    }
   | { kind: "close" };
 
 export type RcptOutcome = { ok: true } | { ok: false; code: number; enhanced: string; message: string };
@@ -185,11 +199,55 @@ function splitParam(token: string): [string, string | undefined] {
 
 type ParamSyntaxError = { ok: false; code: number; enhanced: string; message: string };
 
+/**
+ * DSN 확장 파라미터(RFC 3461)를 어댑터·백엔드까지 그대로 나른다.
+ *
+ * ★수신자별 값은 **주소로** 찾는다(`perRcpt`). 배열 위치로 맞추면 백엔드가 수신자를
+ * 재정렬하거나 걸러낸 순간 다른 수신자의 설정이 적용된다.
+ */
+export interface SmtpDsnParams {
+  ret?: "FULL" | "HDRS";
+  envid?: string;
+  perRcpt?: ReadonlyMap<string, { notify?: string; orcpt?: string }>;
+}
+
 interface ParsedMailFrom {
   address: string;
   size?: number;
   body?: "8BITMIME" | "7BIT";
   smtputf8: boolean;
+  /** DSN (RFC 3461 §4.3) — 바운스에 원문 전체를 실을지 헤더만 실을지. */
+  ret?: "FULL" | "HDRS";
+  /** DSN 봉투 id(§4.3) — 발신자가 바운스를 자기 발송 기록과 맞추는 열쇠다. */
+  envid?: string;
+}
+
+/**
+ * `xtext` 디코딩 (RFC 3461 §4) — `+XX`가 16진 바이트다.
+ *
+ * ★디코딩을 **해야** 하는 이유: `ENVID`/`ORCPT`는 그대로 DSN 헤더에 실린다. `+0D`·`+0A`가
+ * 든 값을 풀지 않고 넘기면 인코딩된 채로 남아 발신자가 못 알아보고, 반대로 풀기만 하고
+ * 검사하지 않으면 **헤더 줄 주입**이 된다. 그래서 풀고 나서 제어문자를 거른다.
+ */
+function decodeXtext(raw: string): string | null {
+  let out = "";
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i]!;
+    if (ch !== "+") {
+      // xtext의 평문 범위는 `!`(0x21)~`~`(0x7E)에서 `+`와 `=`를 뺀 것이다.
+      if (ch < "!" || ch > "~" || ch === "=") return null;
+      out += ch;
+      continue;
+    }
+    const hex = raw.slice(i + 1, i + 3);
+    if (!/^[0-9A-Fa-f]{2}$/.test(hex)) return null;
+    const code = Number.parseInt(hex, 16);
+    // ★제어문자는 풀어서 넣지 않는다 — 그대로 헤더에 실리면 줄 주입이다.
+    if (code < 0x20 || code === 0x7f) return null;
+    out += String.fromCharCode(code);
+    i += 2;
+  }
+  return out;
 }
 
 /** `FROM:<addr> [SIZE=n] [BODY=8BITMIME|7BIT] [SMTPUTF8]` 파싱 (docs/PROTOCOLS.md §1). */
@@ -218,6 +276,19 @@ function parseMailFromArgs(rest: string): { ok: true; value: ParsedMailFrom } | 
         parsed.body = v;
       } else if (key === "SMTPUTF8") {
         parsed.smtputf8 = true;
+      } else if (key === "RET") {
+        const v = (rawVal ?? "").toUpperCase();
+        if (v !== "FULL" && v !== "HDRS") {
+          return { ok: false, code: 501, enhanced: "5.5.4", message: "Invalid RET parameter" };
+        }
+        parsed.ret = v;
+      } else if (key === "ENVID") {
+        const v = rawVal === undefined ? null : decodeXtext(rawVal);
+        if (v === null || v.length === 0 || v.length > 100) {
+          // §4.4가 100자 상한을 둔다. 넘으면 거절하는 편이 잘라서 다른 값을 만드는 것보다 낫다.
+          return { ok: false, code: 501, enhanced: "5.5.4", message: "Invalid ENVID parameter" };
+        }
+        parsed.envid = v;
       } else {
         return { ok: false, code: 504, enhanced: "5.5.4", message: `Unrecognized MAIL FROM parameter: ${key}` };
       }
@@ -226,13 +297,62 @@ function parseMailFromArgs(rest: string): { ok: true; value: ParsedMailFrom } | 
   return { ok: true, value: parsed };
 }
 
-/** `TO:<addr>` 파싱. 파라미터는 관대하게 무시(RCPT 파라미터는 스코프 밖). */
-function parseRcptToArgs(rest: string): { ok: true; value: { address: string } } | ParamSyntaxError {
+export interface ParsedRcptTo {
+  address: string;
+  /**
+   * DSN `NOTIFY`(RFC 3461 §4.1) — `NEVER` 또는 `SUCCESS`/`FAILURE`/`DELAY`의 조합.
+   *
+   * ★`NEVER`가 **가장 중요하다.** 발신자가 그렇게 말했으면 실패해도 바운스를 보내면 안 된다 —
+   * 무시하면 메일링리스트가 자기 실패 알림을 되받아 폭풍이 된다(리스트 소프트웨어가 이
+   * 파라미터를 쓰는 이유가 정확히 그것이다).
+   */
+  notify?: string;
+  /** 원 수신자(§4.2). 리스트가 여러 번 재작성해도 발신자가 처음 쓴 주소를 바운스에 싣는다. */
+  orcpt?: string;
+}
+
+/** `TO:<addr> [NOTIFY=...] [ORCPT=type;addr]` 파싱 (RFC 3461). */
+function parseRcptToArgs(rest: string): { ok: true; value: ParsedRcptTo } | ParamSyntaxError {
   const m = /^to:\s*<([^>]*)>\s*(.*)$/i.exec(rest);
   if (!m) return { ok: false, code: 501, enhanced: "5.5.4", message: "Syntax: RCPT TO:<address> [params]" };
   const address = m[1] ?? "";
   if (address.length === 0) return { ok: false, code: 501, enhanced: "5.1.3", message: "Bad recipient address syntax" };
-  return { ok: true, value: { address } };
+  const value: ParsedRcptTo = { address };
+
+  const paramsPart = (m[2] ?? "").trim();
+  if (paramsPart.length > 0) {
+    for (const token of paramsPart.split(/\s+/)) {
+      const [rawKey, rawVal] = splitParam(token);
+      const key = rawKey.toUpperCase();
+      if (key === "NOTIFY") {
+        const parts = (rawVal ?? "").toUpperCase().split(",").filter((x) => x.length > 0);
+        if (parts.length === 0) return { ok: false, code: 501, enhanced: "5.5.4", message: "Invalid NOTIFY parameter" };
+        const known = ["NEVER", "SUCCESS", "FAILURE", "DELAY"];
+        if (parts.some((x) => !known.includes(x))) {
+          return { ok: false, code: 501, enhanced: "5.5.4", message: "Invalid NOTIFY parameter" };
+        }
+        // §4.1 — `NEVER`는 **단독**이어야 한다. 섞여 오면 뜻이 모순이라 거절한다.
+        if (parts.includes("NEVER") && parts.length > 1) {
+          return { ok: false, code: 501, enhanced: "5.5.4", message: "NOTIFY=NEVER cannot be combined" };
+        }
+        value.notify = [...new Set(parts)].join(",");
+      } else if (key === "ORCPT") {
+        const raw = rawVal ?? "";
+        const semi = raw.indexOf(";");
+        if (semi <= 0) return { ok: false, code: 501, enhanced: "5.5.4", message: "Invalid ORCPT parameter" };
+        const decoded = decodeXtext(raw.slice(semi + 1));
+        if (decoded === null || decoded.length === 0 || decoded.length > 300) {
+          return { ok: false, code: 501, enhanced: "5.5.4", message: "Invalid ORCPT parameter" };
+        }
+        // 주소 타입(`rfc822`)째로 보관한다 — DSN이 그대로 실어야 하는 형식이다(§6.2).
+        value.orcpt = `${raw.slice(0, semi).toLowerCase()};${decoded}`;
+      } else {
+        // 모르는 파라미터는 **거절한다**. 무시하면 발신자가 요청이 반영된 줄 안다.
+        return { ok: false, code: 504, enhanced: "5.5.4", message: `Unrecognized RCPT TO parameter: ${key}` };
+      }
+    }
+  }
+  return { ok: true, value };
 }
 
 export class SmtpEngine {
@@ -259,6 +379,10 @@ export class SmtpEngine {
   private mailFrom: string | null = null;
   private heloName = "";
   private rcptTo: string[] = [];
+  /** 수신자별 DSN 파라미터 — 주소로 찾는다(위 `deliver` 주석). */
+  private rcptDsn = new Map<string, { notify?: string; orcpt?: string }>();
+  /** MAIL FROM의 DSN 파라미터. */
+  private mailDsn: { ret?: "FULL" | "HDRS"; envid?: string } = {};
   /**
    * 세션 누적 카운터 — **트랜잭션 리셋(RSET·MAIL FROM·DATA 종료)에도, STARTTLS 업그레이드에도
    * 초기화하지 않는다.** 어느 하나로든 리셋되면 그 명령 한 줄이 곧 한도 우회다.
@@ -532,7 +656,25 @@ export class SmtpEngine {
     const mailFrom = this.mailFrom ?? "";
     const rcptTo = [...this.rcptTo];
     this.awaiting = "deliver";
-    actions.push({ kind: "deliver", mailFrom, heloName: this.heloName, rcptTo, raw, authenticatedAs: this.authenticatedAs });
+    /** 실제로 수락된 수신자의 파라미터만 싣는다 — 거절된 수신자 것을 넘길 이유가 없다. */
+    const perRcpt = new Map<string, { notify?: string; orcpt?: string }>();
+    for (const r of rcptTo) {
+      const d = this.rcptDsn.get(r);
+      if (d) perRcpt.set(r, d);
+    }
+    const dsn =
+      this.mailDsn.ret !== undefined || this.mailDsn.envid !== undefined || perRcpt.size > 0
+        ? { ...this.mailDsn, ...(perRcpt.size > 0 ? { perRcpt } : {}) }
+        : undefined;
+    actions.push({
+      kind: "deliver",
+      mailFrom,
+      heloName: this.heloName,
+      rcptTo,
+      raw,
+      authenticatedAs: this.authenticatedAs,
+      ...(dsn ? { dsn } : {}),
+    });
   }
 
   /** AUTH 챌린지/응답 왕복 중 도착한 한 줄(base64 응답 또는 `*` 취소) 처리. */
@@ -729,7 +871,7 @@ export class SmtpEngine {
     this.heloName = rest; // SPF HELO identity (RFC 7208)
 
     // docs/PROTOCOLS.md §1 "2026 최소 신뢰 EHLO 세트" 순서
-    const caps = ["8BITMIME", "PIPELINING", "ENHANCEDSTATUSCODES", "SMTPUTF8", "CHUNKING"];
+    const caps = ["8BITMIME", "PIPELINING", "ENHANCEDSTATUSCODES", "SMTPUTF8", "CHUNKING", "DSN"];
     const lines = [
       `250-${this.hostname} Hello ${rest}`,
       `250-SIZE ${this.maxSizeBytes}`,
@@ -793,6 +935,10 @@ export class SmtpEngine {
       return;
     }
     this.mailFrom = parsed.value.address;
+    this.mailDsn = {
+      ...(parsed.value.ret !== undefined ? { ret: parsed.value.ret } : {}),
+      ...(parsed.value.envid !== undefined ? { envid: parsed.value.envid } : {}),
+    };
     this.rcptTo = [];
     this.state = "mail";
     actions.push(reply(250, "2.1.0", "OK"));
@@ -816,6 +962,13 @@ export class SmtpEngine {
     }
     this.rcptCount += 1;
     this.pendingRcptAddress = parsed.value.address;
+    // 백엔드가 수락하면 아래 `rcptResult`가 rcptTo에 넣는다 — 파라미터는 여기서 잡아 둔다.
+    if (parsed.value.notify !== undefined || parsed.value.orcpt !== undefined) {
+      this.rcptDsn.set(parsed.value.address, {
+        ...(parsed.value.notify !== undefined ? { notify: parsed.value.notify } : {}),
+        ...(parsed.value.orcpt !== undefined ? { orcpt: parsed.value.orcpt } : {}),
+      });
+    }
     this.awaiting = "rcpt";
     actions.push({ kind: "rcpt", address: parsed.value.address });
   }
@@ -1077,6 +1230,9 @@ export class SmtpEngine {
      */
     this.bdatRemaining = 0;
     this.bdatLast = false;
+    // DSN 파라미터도 트랜잭션 단위다 — 남기면 다음 메일이 앞 메일의 설정을 물려받는다.
+    this.rcptDsn = new Map();
+    this.mailDsn = {};
     if (this.state !== "init") this.state = "greeted";
   }
 }

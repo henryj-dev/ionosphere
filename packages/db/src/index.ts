@@ -103,7 +103,8 @@ import { m012DsnDelayNotice } from "./migrations/012_dsn_delay_notice.ts";
 import { m013Vacation } from "./migrations/013_vacation.ts";
 import { m014ExpungedFloor } from "./migrations/014_expunged_floor.ts";
 import { m015VacationResponse } from "./migrations/015_vacation_response.ts";
+import { m016DsnParams } from "./migrations/016_dsn_params.ts";
 import type { Migration } from "./migrate.ts";
 
 /** 전체 마이그레이션 목록 (버전 순). */
-export const allMigrations: readonly Migration[] = [m001Init, m002Webhooks, m003Forwarding, m004BlobGc, m005MaildropLock, m006AddressFanout, m007Smarthosts, m008SuppressionExpiry, m009Complaints, m010BayesTokens, m011QueueIndexes, m012DsnDelayNotice, m013Vacation, m014ExpungedFloor, m015VacationResponse];
+export const allMigrations: readonly Migration[] = [m001Init, m002Webhooks, m003Forwarding, m004BlobGc, m005MaildropLock, m006AddressFanout, m007Smarthosts, m008SuppressionExpiry, m009Complaints, m010BayesTokens, m011QueueIndexes, m012DsnDelayNotice, m013Vacation, m014ExpungedFloor, m015VacationResponse, m016DsnParams];

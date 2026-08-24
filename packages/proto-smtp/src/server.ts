@@ -18,7 +18,7 @@ import {
   type ListenerShutdown,
   type ScramStoredKeys,
 } from "@ionosphere/core";
-import { type DeliverOutcome, type RcptOutcome, SmtpEngine, type SmtpAction } from "./engine.ts";
+import { type DeliverOutcome, type RcptOutcome, SmtpEngine, type SmtpAction, type SmtpDsnParams } from "./engine.ts";
 
 /** 수신자 검증/배달을 실제로 처리하는 백엔드 훅 — 스토어 연결은 apps/server 몫. */
 export interface SmtpBackend {
@@ -38,6 +38,13 @@ export interface SmtpBackend {
      * 여기서 넘긴다 — 엔진은 여전히 I/O를 모른다.
      */
     tls?: { protocol?: string | undefined; cipher?: string | undefined } | undefined;
+    /**
+     * DSN 확장 파라미터(RFC 3461) — 발신자가 준 것만 온다.
+     *
+     * ★백엔드가 이 값을 큐까지 나르지 않으면 우리는 **받아 놓고 무시하는** 서버다.
+     * 특히 `NOTIFY=NEVER`를 무시하면 메일링리스트가 자기 실패 알림을 되받아 폭풍이 된다.
+     */
+    dsn?: SmtpDsnParams | undefined;
   }): Promise<{ ok: true; queuedId?: string } | { ok: false; code: number; enhanced: string; message: string }>;
   /**
    * 생략 시 AUTH 비광고(authOffered=false) — Submission 프로파일은 이게 필수.
@@ -289,7 +296,7 @@ export class SmtpServer {
             recordEngineAuthFailure(action.user, action.mechanism);
             break;
           case "deliver":
-            void runDeliver(action.mailFrom, action.heloName, action.rcptTo, action.raw, action.authenticatedAs);
+            void runDeliver(action.mailFrom, action.heloName, action.rcptTo, action.raw, action.authenticatedAs, action.dsn);
             break;
           case "close":
             socket.end();
@@ -308,7 +315,15 @@ export class SmtpServer {
       applyActions(engine.rcptResult(outcome));
     };
 
-    const runDeliver = async (mailFrom: string, heloName: string, rcptTo: readonly string[], raw: Uint8Array, authenticatedAs: string | null): Promise<void> => {
+    const runDeliver = async (
+      mailFrom: string,
+      heloName: string,
+      rcptTo: readonly string[],
+      raw: Uint8Array,
+      authenticatedAs: string | null,
+      /** DSN 확장 파라미터(RFC 3461) — 발신자가 준 것만 온다. */
+      dsn?: SmtpDsnParams,
+    ): Promise<void> => {
       let outcome: DeliverOutcome;
       const clientIp = normalizeIp(socket.remoteAddress);
       // STARTTLS 업그레이드 후엔 socket이 교체돼 있다(let socket) — 지금 것을 봐야 한다.
@@ -322,6 +337,7 @@ export class SmtpServer {
           raw,
           authenticatedAs,
           ...(tls ? { tls } : {}),
+          ...(dsn ? { dsn } : {}),
         });
       } catch {
         outcome = { ok: false, code: 451, enhanced: "4.3.0", message: "Temporary error processing message" };

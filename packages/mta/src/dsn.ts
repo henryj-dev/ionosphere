@@ -47,6 +47,14 @@ export interface DsnRecipient {
   diagnostic?: string | undefined;
   /** 응답을 준 상대(진단용). 없으면 생략. */
   remoteMta?: string | undefined;
+  /**
+   * `Original-Recipient`(RFC 3464 §2.3.2) — 발신자가 `ORCPT`로 준 **원래 주소**.
+   *
+   * ★알리아스·메일링리스트가 주소를 여러 번 재작성하면 `Final-Recipient`는 발신자가 모르는
+   * 주소가 된다. 그때 이 줄이 없으면 사람이 "누구에게 실패했는지" 알 수 없다.
+   * 값은 `타입;주소` 형식 그대로 실린다(§2.3.2).
+   */
+  originalRecipient?: string | undefined;
 }
 
 export interface DsnInput {
@@ -128,6 +136,11 @@ function deliveryStatus(input: DsnInput): string {
   for (const r of input.recipients) {
     const fields = [
       "",
+      /**
+       * ★`Original-Recipient`가 **먼저**다(RFC 3464 §2.3.2의 순서). 알리아스·리스트가 주소를
+       * 재작성하면 `Final-Recipient`는 발신자가 모르는 주소라, 이 줄이 있어야 사람이 알아본다.
+       */
+      ...(r.originalRecipient ? [`Original-Recipient: ${headerSafe(r.originalRecipient, 350)}`] : []),
       `Final-Recipient: rfc822; ${headerSafe(r.rcpt, 320)}`,
       `Action: ${r.action}`,
       `Status: ${headerSafe(r.status, 32)}`,

@@ -37,6 +37,18 @@ export interface EnqueueInput {
    * 사용자 제출(submission)은 반드시 생략해 게이트를 통과시켜야 함.
    */
   system?: SystemRelay;
+  /**
+   * DSN 확장 파라미터(RFC 3461) — 발신자가 준 값을 큐에 실어 워커가 존중하게 한다.
+   *
+   * ★`NOTIFY=NEVER`가 이 배선의 핵심이다. 받아 놓고 버리면 우리는 사실상 그 요청을
+   * 무시하는 서버이고, 메일링리스트가 자기 실패 알림을 되받아 폭풍이 된다.
+   */
+  dsn?: {
+    ret?: "FULL" | "HDRS";
+    envid?: string;
+    /** 주소 → 그 수신자의 파라미터. 위치가 아니라 **주소로** 찾는다. */
+    perRcpt?: ReadonlyMap<string, { notify?: string; orcpt?: string }>;
+  };
 }
 
 /**
@@ -269,6 +281,11 @@ const MTA_QUEUE_COLUMNS = [
   "lease_until",
   "last_error",
   "created_at",
+  // DSN 확장(RFC 3461) — 발신자가 준 것만 값이 든다. NULL이 곧 기본 동작이다.
+  "dsn_notify",
+  "dsn_orcpt",
+  "dsn_envid",
+  "dsn_ret",
 ] as const;
 
 /** 주소의 "@" 이후 도메인부를 소문자로 추출. "@" 없으면 빈 문자열. */
@@ -481,6 +498,14 @@ export async function enqueueMessage(
       null,
       null,
       now,
+      /**
+       * ★수신자별 값은 **주소로** 찾는다. 배열 위치로 맞추면 suppression에 걸린 수신자를
+       * 건너뛴 순간 나머지가 한 칸씩 밀려 다른 사람의 설정이 적용된다.
+       */
+      input.dsn?.perRcpt?.get(rcpt)?.notify ?? null,
+      input.dsn?.perRcpt?.get(rcpt)?.orcpt ?? null,
+      input.dsn?.envid ?? null,
+      input.dsn?.ret ?? null,
     ];
   });
 
