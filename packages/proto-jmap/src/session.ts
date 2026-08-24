@@ -6,6 +6,10 @@ import { MAX_JMAP_UPLOAD_BYTES } from "@ionosphere/core";
 export const CORE_CAPABILITY = "urn:ietf:params:jmap:core";
 export const MAIL_CAPABILITY = "urn:ietf:params:jmap:mail";
 export const SUBMISSION_CAPABILITY = "urn:ietf:params:jmap:submission";
+/** RFC 9425 — 계정 쿼터 조회. IMAP QUOTA(RFC 9208)와 **같은 값**을 다른 표면에 낸다. */
+export const QUOTA_CAPABILITY = "urn:ietf:params:jmap:quota";
+/** RFC 8621 §8 — 부재 자동 응답 설정. Sieve `vacation`과 같은 게이트를 쓴다. */
+export const VACATION_CAPABILITY = "urn:ietf:params:jmap:vacationresponse";
 
 /** RFC 8620 §2 coreCapabilities — 보수적 기본값. */
 export interface CoreCapabilityLimits {

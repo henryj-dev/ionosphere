@@ -33,11 +33,13 @@ import {
   RequestError,
   CORE_CAPABILITY,
   MAIL_CAPABILITY,
+  QUOTA_CAPABILITY,
   SUBMISSION_CAPABILITY,
+  VACATION_CAPABILITY,
   type CapabilityModule,
   type JmapRequest,
 } from "@ionosphere/proto-jmap";
-import { buildMailModule, buildSubmissionModule } from "./jmap-backend.ts";
+import { buildMailModule, buildQuotaModule, buildSubmissionModule, buildVacationModule } from "./jmap-backend.ts";
 
 export interface JmapServerOptions {
   db: DbDriver;
@@ -134,9 +136,11 @@ export class JmapServer {
       coreModule,
       buildMailModule(opts.db, opts.store, opts.blobs),
       buildSubmissionModule(opts.db, opts.store, opts.blobs, opts.outbound),
+      buildQuotaModule(opts.store),
+      buildVacationModule(opts.db, opts.store),
       ...(opts.extraModules ?? []),
     ];
-    this.capabilities = [CORE_CAPABILITY, MAIL_CAPABILITY, SUBMISSION_CAPABILITY];
+    this.capabilities = [CORE_CAPABILITY, MAIL_CAPABILITY, SUBMISSION_CAPABILITY, QUOTA_CAPABILITY, VACATION_CAPABILITY];
     if (!opts.externalBaseUrl) {
       // Session 응답의 apiUrl/downloadUrl을 요청 Host로 만들게 된다 — 클라이언트가 보낸 값이라
       // 위조하면 다음 요청을 남의 호스트로 유도할 수 있다. 운영에서는 반드시 고정해야 한다.
@@ -436,6 +440,10 @@ export class JmapServer {
           accountCapabilities: {
             [MAIL_CAPABILITY]: { maxMailboxesPerEmail: null, maxMailboxDepth: null, mayCreateTopLevelMailbox: true },
             [SUBMISSION_CAPABILITY]: { maxDelayedSend: 0, submissionExtensions: {} },
+            // 계정별 능력 객체가 비어 있어도 **키가 있어야** 클라이언트가 그 계정에서 쓸 수
+            // 있다고 판단한다(RFC 8620 §2 accountCapabilities). 서버 전역 목록만으로는 부족하다.
+            [QUOTA_CAPABILITY]: {},
+            [VACATION_CAPABILITY]: {},
           },
         },
       ],

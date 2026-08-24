@@ -52,6 +52,7 @@ import {
   scramKeysFor,
   scramAuthorize,
   claimVacationReply,
+  getVacationResponse,
 } from "@ionosphere/store";
 import type { SmtpAuthResult, SmtpBackend } from "@ionosphere/proto-smtp";
 import type { LmtpBackend, LmtpDelivery, LmtpDeliverEnv } from "@ionosphere/proto-lmtp";
@@ -553,7 +554,26 @@ export class IonosphereSmtpBackend implements SmtpBackend {
     env: { mailFrom: string; rcptTo: readonly string[] },
     size: number,
   ): Promise<{ mailboxIds: string[]; keywords: string[]; redirect: string[]; discard: boolean; fileintoUsed: boolean; reject: string | null; vacation: VacationRequest | null }> {
-    const fallback = { mailboxIds: [inboxId], keywords: [] as string[], redirect: [] as string[], discard: false, fileintoUsed: false, reject: null, vacation: null };
+    /**
+     * ★JMAP `VacationResponse`(RFC 8621 §8)를 **Sieve와 같은 게이트로** 흘린다.
+     *
+     * 여기서 `VacationRequest`로 바꿔 두면 아래 판정(`decideVacation`의 §4.6 루프 방지)과
+     * 중복 억제(`vacation_sent`)를 그대로 탄다. 두 벌로 두면 자동 응답이 두 번 나가거나,
+     * 한쪽만 게이트를 고쳐서 메일링리스트에 부재 알림을 뿌린다.
+     *
+     * ★Sieve 스크립트가 **이긴다**(아래에서 덮어쓴다). 스크립트는 사용자가 명시적으로 쓴
+     * 규칙이고 조건 분기까지 담을 수 있어 더 구체적이다.
+     */
+    const jmapVacation = await this.jmapVacationRequest(accountId);
+    const fallback = {
+      mailboxIds: [inboxId],
+      keywords: [] as string[],
+      redirect: [] as string[],
+      discard: false,
+      fileintoUsed: false,
+      reject: null,
+      vacation: jmapVacation,
+    };
     const script = await this.store.getActiveSieveScript(accountId);
     if (!script) return fallback;
 
@@ -597,7 +617,7 @@ export class IonosphereSmtpBackend implements SmtpBackend {
     if (result.reject !== null) {
       return { mailboxIds: [], keywords: [], redirect: [], discard: false, fileintoUsed: false, reject: result.reject, vacation: null };
     }
-    if (result.discarded) return { mailboxIds: [], keywords: [], redirect: [], discard: true, fileintoUsed: false, reject: null, vacation: result.vacation };
+    if (result.discarded) return { mailboxIds: [], keywords: [], redirect: [], discard: true, fileintoUsed: false, reject: null, vacation: result.vacation ?? jmapVacation };
 
     /**
      * `fileinto :create`(RFC 5490 §3.2) — 없는 대상을 만든다.
@@ -636,9 +656,40 @@ export class IonosphereSmtpBackend implements SmtpBackend {
       redirect: result.redirect,
       discard: false,
       reject: null,
-      vacation: result.vacation,
+      // 스크립트가 vacation을 쓰면 그것이 이긴다(더 구체적인 규칙).
+      vacation: result.vacation ?? jmapVacation,
       // 사용자가 fileinto로 자리를 명시했는가 — junk 재배치가 이걸 존중한다.
       fileintoUsed: result.fileinto.length > 0,
+    };
+  }
+
+  /**
+   * JMAP `VacationResponse` 설정을 Sieve의 `VacationRequest`로 옮긴다 — 없거나 꺼져 있으면 null.
+   *
+   * ★날짜 창(`fromDate`/`toDate`)은 **JMAP에만 있는 개념**이라(RFC 8621 §8) 여기서만 본다.
+   * Sieve `vacation`에는 그런 인자가 없어서 아래 공통 게이트에 넣을 자리가 없다.
+   *
+   * ★`handle`을 고정 문자열로 둔다. 사용자가 본문을 고쳐도 "같은 부재 응답"으로 이어져야
+   * 중복 억제가 끊기지 않는다 — 본문 해시로 두면 오타 하나 고칠 때마다 모두에게 다시 보낸다.
+   */
+  private async jmapVacationRequest(accountId: string, now: number = Date.now()): Promise<VacationRequest | null> {
+    const v = await getVacationResponse(this.db, accountId);
+    if (!v.isEnabled) return null;
+    if (v.fromDate !== null && now < v.fromDate) return null;
+    if (v.toDate !== null && now > v.toDate) return null;
+    // 본문 없이 켤 수 없게 `/set`이 막지만, 옛 행이나 직접 조작을 대비해 여기서도 본다.
+    const reason = (v.textBody ?? "").trim() || (v.htmlBody ?? "").trim();
+    if (reason === "") return null;
+    return {
+      reason,
+      // JMAP에는 `:days`가 없다 — RFC 5230의 기본값(7일)을 쓴다.
+      days: 7,
+      subject: v.subject,
+      from: null,
+      addresses: [],
+      handle: "jmap-vacationresponse",
+      // htmlBody만 있으면 그 원문이 곧 본문이다 — MIME 헤더가 없으므로 평문으로 감싼다.
+      mime: false,
     };
   }
 

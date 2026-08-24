@@ -25,6 +25,7 @@ import { ImapParseError, parseCommand, valueText, type ImapValue, type ParsedCom
 import { formatUidSet, matchSequenceSet, parseSequenceSet, type SeqRange } from "./sequence-set.ts";
 import { evaluateSearch, parseSearchProgram, searchNeedsRaw } from "./search-criteria.ts";
 import { parseFetchItems, type FetchItem } from "./fetch-items.ts";
+import { formatSortLine, formatThreadLine, parseSortSpec, type ImapSortKeys, type SortSpec } from "./sort-thread.ts";
 import {
   binaryLiteralWire,
   extractBinary,
@@ -78,7 +79,7 @@ export type ImapBackendRequest =
    * FETCH — uids의 메시지 데이터. needRaw면 raw 바이트 포함,
    * markSeen이면 백엔드가 \Seen을 먼저 설정한 뒤 갱신된 flags를 돌려준다(계약).
    */
-  | { kind: "fetchMessages"; name: string; uids: readonly number[]; needRaw: boolean; markSeen: boolean }
+  | { kind: "fetchMessages"; name: string; uids: readonly number[]; needRaw: boolean; markSeen: boolean; needSortKeys?: boolean }
   /**
    * STORE — 플래그 갱신 후 갱신된 flags를 flagsUpdated로 돌려준다(계약).
    * unchangedSince 지정 시 modseq > 값인 메시지는 건너뛰고 failed에 보고(RFC 7162).
@@ -108,16 +109,37 @@ export type ImapBackendRequest =
   | { kind: "moveMessages"; from: string; to: string; uids: readonly number[] };
 
 /** fetchMessages 응답의 메시지 한 건. */
+export type { ImapSortKeys } from "./sort-thread.ts";
+
 export interface ImapFetchData {
   uid: number;
   flags: readonly string[];
+  /**
+   * INTERNALDATE — **메시지가 서버에 도착한 시각**이다.
+   *
+   * ★`SAVEDATE`(이 메일함에 들어온 시각)와 다르다. COPY한 사본은 원본의 INTERNALDATE를
+   * 물려받고(RFC 9051 §6.4.7) SAVEDATE만 새로 찍힌다 — 예전엔 둘을 같은 값(savedate)으로
+   * 실어 보내서 COPY가 INTERNALDATE를 바꿨다.
+   */
   internalDateMs: number;
+  /** SAVEDATE (RFC 8514) — 이 메일함에 들어온 시각. */
+  saveDateMs?: number;
   size: number;
   /** CONDSTORE — 메시지 최종 modseq(messages.modseq 물질화). */
   modseq: number;
   /** needRaw 요청 시에만. */
   raw?: Uint8Array;
+  /**
+   * SORT/THREAD(RFC 5256)용 키 — `needSortKeys` 요청 시에만.
+   *
+   * ★원문을 파싱해서 뽑지 않는다. 스토어가 이미 물질화해 둔 값들이라(`subject_base`·
+   * `sent_at`·`thread_id`·`message_addresses`) 정렬 한 번에 메일함 전체 블롭을 메모리에
+   * 올릴 이유가 없다 — SEARCH가 예전에 그렇게 해서 5만 통 × 50KB = 2.5GB였다.
+   */
+  sortKeys?: ImapSortKeys;
 }
+
+
 
 export type ImapBackendResponse =
   | { kind: "mailboxes"; mailboxes: readonly ImapMailbox[] }
@@ -274,7 +296,7 @@ type Pending =
   /** 백엔드 요청 대기 — resume이 응답을 액션으로 변환(명령별 continuation). */
   | { kind: "backend"; resume: (res: ImapBackendResponse) => ImapAction[] };
 
-const BASE_CAPABILITIES = ["IMAP4rev1", "IMAP4rev2", "LITERAL-", "SASL-IR", "ID", "ENABLE", "NAMESPACE", "CHILDREN", "SPECIAL-USE", "UNSELECT", "UIDPLUS", "MOVE", "IDLE", "CONDSTORE", "QRESYNC", "ESEARCH", "SEARCHRES", "BINARY", "LIST-STATUS", "QUOTA", "QUOTA=RES-STORAGE", "QUOTA=RES-MESSAGE"] as const;
+const BASE_CAPABILITIES = ["IMAP4rev1", "IMAP4rev2", "LITERAL-", "SASL-IR", "ID", "ENABLE", "NAMESPACE", "CHILDREN", "SPECIAL-USE", "UNSELECT", "UIDPLUS", "MOVE", "IDLE", "CONDSTORE", "QRESYNC", "ESEARCH", "SEARCHRES", "BINARY", "SAVEDATE", "SORT", "THREAD=ORDEREDSUBJECT", "THREAD=REFERENCES", "LIST-STATUS", "QUOTA", "QUOTA=RES-STORAGE", "QUOTA=RES-MESSAGE"] as const;
 
 /**
  * 쿼터 루트 이름 — 이 저장소의 쿼터는 **계정 단위**라 루트가 하나뿐이다(RFC 9208 §3.1이
@@ -630,6 +652,10 @@ export class ImapEngine {
         return this.requireSelected(cmd, () => this.cmdStore(cmd, false));
       case "SEARCH":
         return this.requireSelected(cmd, () => this.cmdSearch(cmd, false));
+      case "SORT":
+        return this.requireSelected(cmd, () => this.cmdSortThread(cmd, false, "sort"));
+      case "THREAD":
+        return this.requireSelected(cmd, () => this.cmdSortThread(cmd, false, "thread"));
       case "EXPUNGE":
         return this.requireSelected(cmd, () => this.cmdExpunge(cmd, null));
       case "APPEND":
@@ -976,6 +1002,10 @@ export class ImapEngine {
         return this.requireSelected(cmd, () => this.cmdStore(rest, true));
       case "SEARCH":
         return this.requireSelected(cmd, () => this.cmdSearch(rest, true));
+      case "SORT":
+        return this.requireSelected(cmd, () => this.cmdSortThread(rest, true, "sort"));
+      case "THREAD":
+        return this.requireSelected(cmd, () => this.cmdSortThread(rest, true, "thread"));
       case "COPY":
         return this.requireSelected(cmd, () => this.cmdCopyMove(rest, true, "copy"));
       case "MOVE":
@@ -1522,7 +1552,7 @@ export class ImapEngine {
             const i = offset + k; // 세션 뷰 인덱스 → seq는 i+1
             const matched = evaluateSearch(
               program.key,
-              { seq: i + 1, uid, flags: data.flags, size: data.size, internalDateMs: data.internalDateMs, modseq: data.modseq, raw: data.raw },
+              { seq: i + 1, uid, flags: data.flags, size: data.size, internalDateMs: data.internalDateMs, saveDateMs: data.saveDateMs, modseq: data.modseq, raw: data.raw },
               maxSeq,
               maxUid,
             );
@@ -1543,6 +1573,123 @@ export class ImapEngine {
       );
     };
     return searchFrom(0);
+  }
+
+  /**
+   * SORT / THREAD (RFC 5256) — 두 명령이 **같은 뼈대**를 쓴다.
+   *
+   * 둘 다 "크라이테리어로 고른 뒤 정렬해서 번호를 낸다"이고, 다른 것은 마지막 조립뿐이다
+   * (SORT는 평평한 목록, THREAD는 괄호 트리). 나눠 쓰면 배치 순회와 크라이테리어 파싱이
+   * 두 벌이 되고, 그러면 한쪽만 고쳐지는 형태로 갈라진다.
+   *
+   * ★정렬 키는 **스토어가 물질화해 둔 값**으로 만든다(`sortKeys`). 원문을 파싱해 제목·발신자를
+   * 뽑으면 정렬 한 번에 메일함 전체 블롭이 메모리에 올라온다 — SEARCH가 예전에 그렇게 해서
+   * 5만 통 × 50KB = 2.5GB였다. 크라이테리어가 본문을 볼 때만 원문을 싣는다.
+   */
+  private cmdSortThread(cmd: ParsedCommand, uidMode: boolean, mode: "sort" | "thread"): ImapAction[] {
+    const verb = `${uidMode ? "UID " : ""}${mode.toUpperCase()}`;
+    const view = this.selected;
+    if (!view) return [{ kind: "reply", text: `${cmd.tag} BAD command requires a selected mailbox` }];
+
+    /**
+     * 첫 인자는 SORT면 정렬 기준 리스트, THREAD면 알고리즘 이름. 그다음이 charset,
+     * 그다음이 크라이테리어다(RFC 5256 §3·§4 — charset은 **필수 인자**다).
+     */
+    let sortSpec: SortSpec[] = [];
+    let algorithm = "ORDEREDSUBJECT";
+    let idx = 0;
+    if (mode === "sort") {
+      const list = cmd.args[0];
+      if (!list || list.kind !== "list") return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} expects a sort criteria list` }];
+      const parsed = parseSortSpec(list.items);
+      if (parsed === null) return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} invalid sort criteria` }];
+      sortSpec = parsed;
+      idx = 1;
+    } else {
+      const alg = valueText(cmd.args[0] ?? { kind: "atom", value: "" })?.toUpperCase();
+      if (alg !== "ORDEREDSUBJECT" && alg !== "REFERENCES") {
+        return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} unsupported threading algorithm` }];
+      }
+      algorithm = alg;
+      idx = 1;
+    }
+
+    // charset — US-ASCII/UTF-8만 받는다(SEARCH의 CHARSET 처리와 같은 규칙).
+    const charset = valueText(cmd.args[idx] ?? { kind: "atom", value: "" })?.toUpperCase();
+    if (charset === undefined || charset === null) return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} expects a charset` }];
+    if (charset !== "UTF-8" && charset !== "US-ASCII") {
+      return [{ kind: "reply", text: `${cmd.tag} NO [BADCHARSET (UTF-8 US-ASCII)] unsupported charset` }];
+    }
+    idx += 1;
+
+    const program = parseSearchProgram(cmd.args.slice(idx));
+    if (!program.ok) {
+      return [
+        {
+          kind: "reply",
+          text: program.badCharset
+            ? `${cmd.tag} NO [BADCHARSET (UTF-8 US-ASCII)] unsupported charset`
+            : `${cmd.tag} BAD ${verb} invalid search criteria`,
+        },
+      ];
+    }
+
+    const emptyLine = mode === "sort" ? "* SORT" : "* THREAD";
+    if (view.uids.length === 0) {
+      return [
+        { kind: "reply", text: emptyLine },
+        { kind: "reply", text: `${cmd.tag} OK ${verb} completed` },
+      ];
+    }
+
+    const needRaw = searchNeedsRaw(program.key);
+    const maxSeq = view.uids.length;
+    const maxUid = view.uids[view.uids.length - 1] ?? 0;
+    const batchSize = needRaw ? FETCH_BATCH_RAW : FETCH_BATCH_META;
+    /** 매칭된 메시지의 (번호, 정렬키). 원문은 배치가 끝나면 버려진다. */
+    const hits: { num: number; seq: number; uid: number; keys: ImapSortKeys }[] = [];
+    /** ARRIVAL·SIZE 정렬용 — hits를 넓히지 않고 곁에 둔다. */
+    const sortMeta = new Map<number, { internalDateMs: number; size: number }>();
+
+    const step = (offset: number): ImapAction[] => {
+      const batchUids = view.uids.slice(offset, offset + batchSize);
+      return this.callBackend(
+        { kind: "fetchMessages", name: view.name, uids: batchUids, needRaw, markSeen: false, needSortKeys: true },
+        (res) => {
+          if (res.kind === "no") return [ImapEngine.noReply(cmd.tag, verb, res)];
+          if (res.kind !== "messages") return [{ kind: "reply", text: `${cmd.tag} NO ${verb} failed` }];
+          const byUid = new Map(res.messages.map((m) => [m.uid, m]));
+          batchUids.forEach((uid, k) => {
+            const data = byUid.get(uid);
+            if (!data) return;
+            const i = offset + k;
+            const matched = evaluateSearch(
+              program.key,
+              { seq: i + 1, uid, flags: data.flags, size: data.size, internalDateMs: data.internalDateMs, saveDateMs: data.saveDateMs, modseq: data.modseq, raw: data.raw },
+              maxSeq,
+              maxUid,
+            );
+            if (!matched) return;
+            hits.push({
+              num: uidMode ? uid : i + 1,
+              seq: i + 1,
+              uid,
+              keys: data.sortKeys ?? { subjectBase: "", sentAtMs: 0, threadId: "", from: "", to: "", cc: "" },
+            });
+            sortMeta.set(uid, { internalDateMs: data.internalDateMs, size: data.size });
+          });
+          const next = offset + batchSize;
+          if (next < view.uids.length) return step(next);
+
+          const line = mode === "sort" ? formatSortLine(hits, sortSpec, sortMeta) : formatThreadLine(hits, algorithm);
+          return [
+            { kind: "reply", text: line },
+            { kind: "reply", text: `${cmd.tag} OK ${verb} completed` },
+          ];
+        },
+      );
+    };
+    return step(0);
   }
 
   /**
@@ -1595,6 +1742,9 @@ export class ImapEngine {
         return `MODSEQ (${data.modseq})`;
       case "internaldate":
         return `INTERNALDATE "${formatInternalDate(data.internalDateMs)}"`;
+      case "savedate":
+        // 저장 시각을 모르면 NIL이 규격이다(RFC 8514 §3) — 우리는 항상 아는데 타입이 선택이다.
+        return `SAVEDATE ${data.saveDateMs === undefined ? "NIL" : `"${formatInternalDate(data.saveDateMs)}"`}`;
       case "rfc822size":
         return `RFC822.SIZE ${data.size}`;
       case "envelope":

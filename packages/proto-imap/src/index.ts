@@ -39,3 +39,4 @@ export {
   type ParsedCommand,
 } from "./parser.ts";
 export { matchSequenceSet, normalizeRanges, parseSequenceSet, type SeqRange } from "./sequence-set.ts";
+export { formatSortLine, formatThreadLine, parseSortSpec, type ImapSortKeys, type SortItem, type SortSpec } from "./sort-thread.ts";

@@ -9,7 +9,7 @@
  * 메일함 이름: IMAP 전체 경로(구분자 '/') ↔ 스토어 parent_id 트리를 여기서 변환.
  */
 import { noopLogger, type Logger } from "@ionosphere/core";
-import type { DbDriver } from "@ionosphere/db";
+import { ADDRESS_KIND, type DbDriver } from "@ionosphere/db";
 import { parseMessage, type ParsedAddress, type ParsedMessage } from "@ionosphere/mime";
 import {
   authenticate,
@@ -328,7 +328,8 @@ export class IonosphereImapBackend implements ImapBackend {
         this.db,
         req.uids,
         (ph) => `SELECT mm.uid AS uid, mm.message_id AS message_id, mm.savedate AS savedate, mm.deleted AS deleted,
-                   m.size_bytes AS size_bytes, m.modseq AS modseq
+                   m.size_bytes AS size_bytes, m.modseq AS modseq, m.received_at AS received_at,
+                   m.subject_base AS subject_base, m.sent_at AS sent_at, m.thread_id AS thread_id
             FROM message_mailbox mm JOIN messages m ON m.id = mm.message_id
             WHERE mm.mailbox_id = ? AND mm.uid IN (${ph})`,
         [found.row.id],
@@ -358,6 +359,37 @@ export class IonosphereImapBackend implements ImapBackend {
       keywords.set(id, arr);
     }
 
+    /**
+     * SORT의 FROM/TO/CC 키는 주소가 필요하다. **요청했을 때만** 읽는다 — 평범한 FETCH가
+     * 정렬 키 때문에 조인을 더 도는 것은 손해다.
+     */
+    const sortAddrs = new Map<string, { from: string; to: string; cc: string }>();
+    if (req.needSortKeys) {
+      const rows2 = await queryInChunks(
+        this.db,
+        messageIds,
+        (ph) => `SELECT message_id, kind, pos, name, email FROM message_addresses
+                   WHERE message_id IN (${ph}) ORDER BY kind, pos`,
+        [],
+      );
+      for (const r of rows2) {
+        const id = String(r.message_id);
+        const cur = sortAddrs.get(id) ?? { from: "", to: "", cc: "" };
+        /**
+         * ★정렬 키는 **첫 주소 하나**다(RFC 5256 §3: "the first address"). 전부 이으면
+         * 수신자가 많은 메일이 엉뚱한 자리로 간다.
+         * 표시 이름이 있으면 그걸 쓰고 없으면 주소 — 클라이언트가 보는 것과 같은 문자열로
+         * 정렬해야 사용자가 순서를 납득한다.
+         */
+        const key = (String(r.name ?? "").trim() || String(r.email)).toLowerCase();
+        const kind = Number(r.kind);
+        if (kind === ADDRESS_KIND.from && cur.from === "") cur.from = key;
+        else if (kind === ADDRESS_KIND.to && cur.to === "") cur.to = key;
+        else if (kind === ADDRESS_KIND.cc && cur.cc === "") cur.cc = key;
+        sortAddrs.set(id, cur);
+      }
+    }
+
     const messages: ImapFetchData[] = [];
     for (const r of rows) {
       const messageId = String(r.message_id);
@@ -375,13 +407,31 @@ export class IonosphereImapBackend implements ImapBackend {
         // 불일치(imaptest checkpoint)만 생김 — 응답에서 생략(엔진이 조용히 스킵)
         if (raw === undefined) continue;
       }
+      const addrs = sortAddrs.get(messageId) ?? { from: "", to: "", cc: "" };
       messages.push({
         uid: Number(r.uid),
         flags,
-        internalDateMs: Number(r.savedate),
+        /**
+         * ★INTERNALDATE는 **도착 시각**(`messages.received_at`)이다. 예전엔 `savedate`를
+         * 실어 보내서, COPY한 사본의 INTERNALDATE가 원본과 달라졌다 — RFC 9051 §6.4.7은
+         * 사본이 원본의 INTERNALDATE를 물려받기를 요구한다. `savedate`는 SAVEDATE(RFC 8514)의
+         * 값이고 그건 아래 별도 필드다.
+         */
+        internalDateMs: Number(r.received_at),
+        saveDateMs: Number(r.savedate),
         size: Number(r.size_bytes),
         modseq: Number(r.modseq),
         ...(raw !== undefined ? { raw } : {}),
+        ...(req.needSortKeys
+          ? {
+              sortKeys: {
+                subjectBase: String(r.subject_base ?? "").toLowerCase(),
+                sentAtMs: r.sent_at == null ? 0 : Number(r.sent_at),
+                threadId: String(r.thread_id ?? ""),
+                ...addrs,
+              },
+            }
+          : {}),
       });
     }
     return { kind: "messages", messages };

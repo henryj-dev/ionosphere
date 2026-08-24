@@ -58,3 +58,57 @@ export async function sweepVacationSent(db: DbDriver, now: number = Date.now()):
   const [res] = await db.batch([{ sql: "DELETE FROM vacation_sent WHERE expires_at <= ?", params: [now] }]);
   return res?.changes ?? 0;
 }
+
+
+// ── JMAP VacationResponse (RFC 8621 §8) ───────────────────────────────────────
+
+/** 계정당 하나. 없으면 "꺼짐"과 같다 — 행이 없는 것과 `isEnabled: false`를 구분하지 않는다. */
+export interface VacationResponseRow {
+  isEnabled: boolean;
+  fromDate: number | null;
+  toDate: number | null;
+  subject: string | null;
+  textBody: string | null;
+  htmlBody: string | null;
+}
+
+const VACATION_RESPONSE_OFF: VacationResponseRow = {
+  isEnabled: false,
+  fromDate: null,
+  toDate: null,
+  subject: null,
+  textBody: null,
+  htmlBody: null,
+};
+
+export async function getVacationResponse(db: DbDriver, accountId: string): Promise<VacationResponseRow> {
+  const { rows } = await db.query({
+    sql: "SELECT is_enabled, from_date, to_date, subject, text_body, html_body FROM vacation_response WHERE account_id = ?",
+    params: [accountId],
+  });
+  const r = rows[0];
+  if (!r) return { ...VACATION_RESPONSE_OFF };
+  return {
+    isEnabled: Number(r.is_enabled) === 1,
+    fromDate: r.from_date == null ? null : Number(r.from_date),
+    toDate: r.to_date == null ? null : Number(r.to_date),
+    subject: r.subject == null ? null : String(r.subject),
+    textBody: r.text_body == null ? null : String(r.text_body),
+    htmlBody: r.html_body == null ? null : String(r.html_body),
+  };
+}
+
+/**
+ * 통째로 덮어쓴다 — 싱글턴이라 부분 갱신도 결국 전체 상태를 쓰는 것과 같다.
+ * 호출자(JMAP `/set`)가 patch를 현재 값 위에 얹어 완성한 뒤 넘긴다.
+ */
+export async function setVacationResponse(db: DbDriver, accountId: string, v: VacationResponseRow, now: number = Date.now()): Promise<void> {
+  await db.batch([
+    { sql: "DELETE FROM vacation_response WHERE account_id = ?", params: [accountId] },
+    {
+      sql: `INSERT INTO vacation_response (account_id, is_enabled, from_date, to_date, subject, text_body, html_body, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      params: [accountId, v.isEnabled ? 1 : 0, v.fromDate, v.toDate, v.subject, v.textBody, v.htmlBody, now],
+    },
+  ]);
+}

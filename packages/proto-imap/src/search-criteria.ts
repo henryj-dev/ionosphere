@@ -40,6 +40,8 @@ export type SearchKey =
   | { kind: "seq"; ranges: SeqRange[] }
   | { kind: "internal-date"; op: "before" | "on" | "since"; ms: number }
   | { kind: "sent-date"; op: "before" | "on" | "since"; ms: number }
+  /** SAVEDBEFORE/SAVEDON/SAVEDSINCE (RFC 8514) — 이 메일함에 들어온 시각 기준. */
+  | { kind: "save-date"; op: "before" | "on" | "since"; ms: number }
   | { kind: "header"; field: string; value: string }
   | { kind: "text"; value: string; includeHeaders: boolean }
   | { kind: "modseq"; n: number } // CONDSTORE (RFC 7162)
@@ -53,6 +55,12 @@ export interface SearchMessage {
   flags: readonly string[];
   size: number;
   internalDateMs: number;
+  /**
+   * SAVEDATE(RFC 8514) 기준 시각. 없으면 `internalDateMs`로 떨어진다 —
+   * §3이 "저장 시각을 모르면 SAVEDATE 키는 매칭하지 않는다"고 하지만, 우리는 항상 알기
+   * 때문에(`message_mailbox.savedate`) 그 갈래가 필요 없다.
+   */
+  saveDateMs?: number | undefined;
   /** CONDSTORE MODSEQ 크라이테리어용 — 미지정 시 0. */
   modseq?: number | undefined;
   raw?: Uint8Array | undefined;
@@ -168,12 +176,17 @@ function parseKey(stream: TokenStream): SearchKey | null {
     case "SINCE":
     case "SENTBEFORE":
     case "SENTON":
-    case "SENTSINCE": {
+    case "SENTSINCE":
+    case "SAVEDBEFORE":
+    case "SAVEDON":
+    case "SAVEDSINCE": {
       const d = argText(stream);
       const ms = d !== null ? parseSearchDate(d) : null;
       if (ms === null) return null;
-      const op = upper.replace("SENT", "").toLowerCase() as "before" | "on" | "since";
-      return upper.startsWith("SENT") ? { kind: "sent-date", op, ms } : { kind: "internal-date", op, ms };
+      const op = upper.replace("SENT", "").replace("SAVED", "").toLowerCase() as "before" | "on" | "since";
+      if (upper.startsWith("SENT")) return { kind: "sent-date", op, ms };
+      if (upper.startsWith("SAVED")) return { kind: "save-date", op, ms };
+      return { kind: "internal-date", op, ms };
     }
     case "HEADER": {
       const field = argText(stream);
@@ -283,6 +296,9 @@ export function evaluateSearch(key: SearchKey, msg: SearchMessage, maxSeq: numbe
       return matchSequenceSet(key.ranges, msg.seq, maxSeq);
     case "internal-date":
       return dateMatch(key.op, key.ms, msg.internalDateMs);
+    case "save-date":
+      // 저장 시각을 모르면 도착 시각으로 — 우리는 항상 알지만 타입이 선택이라 방어한다.
+      return dateMatch(key.op, key.ms, msg.saveDateMs ?? msg.internalDateMs);
     case "sent-date": {
       if (!msg.raw) return false;
       const sentAt = parseMessage(msg.raw).sentAt;

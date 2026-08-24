@@ -5,7 +5,17 @@
 import { ADDRESS_FIELDS, RECIPIENT_KINDS, type DbDriver } from "@ionosphere/db";
 import { toAppendAddresses } from "./addresses.ts";
 import { buildSnippet, snippetTermsFromFilter } from "./snippet.ts";
-import { lookupBlob, Store, type BlobStore, type JmapEmailFilter, type JmapEmailMeta, type MailboxRow } from "@ionosphere/store";
+import {
+  getVacationResponse,
+  lookupBlob,
+  setVacationResponse,
+  Store,
+  type BlobStore,
+  type JmapEmailFilter,
+  type JmapEmailMeta,
+  type MailboxRow,
+  type VacationResponseRow,
+} from "@ionosphere/store";
 import { extractJmapBody, parseMessage, type ParsedAddress, type ParsedMessage } from "@ionosphere/mime";
 import {
   isUnsafeKey,
@@ -17,7 +27,9 @@ import {
   standardQueryChanges,
   standardSet,
   MAIL_CAPABILITY,
+  QUOTA_CAPABILITY,
   SUBMISSION_CAPABILITY,
+  VACATION_CAPABILITY,
   type CapabilityModule,
   type GetSource,
   type JmapObject,
@@ -1001,4 +1013,184 @@ async function searchSnippetGet(args: Record<string, unknown>, accountId: string
     list.push({ emailId: id, subject: buildSnippet(t.subject, terms), preview: buildSnippet(t.body, terms) });
   }
   return { accountId: acc, list, notFound };
+}
+
+
+/**
+ * JMAP Quota (RFC 9425) — **데이터는 이미 있다.** `accounts.quota_bytes`/`used_bytes`/
+ * `message_count`가 그것이고, IMAP QUOTA(RFC 9208)가 같은 값을 이미 보여 준다.
+ * 두 표면이 같은 소스를 봐야 "IMAP에서는 찼다는데 JMAP에서는 아니다"가 생기지 않는다.
+ */
+export function buildQuotaModule(store: Store): CapabilityModule {
+  /** 쿼터 객체 두 개 — 저장 용량과 메시지 수. id가 곧 resourceType이다(루트가 하나뿐이라). */
+  const quotaObjects = async (accountId: string): Promise<JmapObject[]> => {
+    const q = await store.getQuota(accountId);
+    return [
+      {
+        id: "octets",
+        resourceType: "octets",
+        used: q.usedBytes,
+        // `quota_bytes === 0`은 **무제한**이다(스토어의 기존 계약) — JMAP에서는 null이 그 뜻이다.
+        hardLimit: q.quotaBytes > 0 ? q.quotaBytes : null,
+        scope: "account",
+        name: "account-storage",
+        types: ["Mail"],
+        warnLimit: null,
+        softLimit: null,
+        description: null,
+      },
+      {
+        id: "count",
+        resourceType: "count",
+        used: q.messageCount,
+        // 메시지 수 상한은 두지 않는다 — 스키마에 그런 컬럼이 없고, 있는 척하면 거짓이다.
+        hardLimit: null,
+        scope: "account",
+        name: "account-messages",
+        types: ["Mail"],
+        warnLimit: null,
+        softLimit: null,
+        description: null,
+      },
+    ];
+  };
+
+  const getSource: GetSource = {
+    // 쿼터는 메시지가 오갈 때마다 바뀐다 — email state를 그대로 쓴다(같은 것이 움직이면 같이 움직인다).
+    state: async (accountId) => (await store.jmapState(accountId)).email,
+    get: async (accountId, ids) => {
+      const all = await quotaObjects(accountId);
+      if (ids === null) return { list: all, notFound: [] };
+      const byId = new Map(all.map((q) => [q.id, q]));
+      const list: JmapObject[] = [];
+      const notFound: string[] = [];
+      for (const id of ids) {
+        const o = byId.get(id);
+        if (o) list.push(o);
+        else notFound.push(id);
+      }
+      return { list, notFound };
+    },
+  };
+
+  return {
+    capability: QUOTA_CAPABILITY,
+    methods: {
+      "Quota/get": (args, ctx) => standardGet(args, ctx.accountId, getSource),
+      /**
+       * ★델타를 계산할 수 없다. `change_log`는 쿼터 변화를 따로 적지 않고, 적더라도
+       * "얼마나 늘었나"는 메시지 변화에서 유도되는 값이라 별도 기록이 중복이다.
+       * 규격이 그 상황을 위해 둔 오류를 낸다 — 클라이언트는 `Quota/get`을 다시 부르면 된다.
+       */
+      "Quota/changes": (args, ctx) => standardChanges(args, ctx.accountId, { changes: async () => ({ cannotCalculate: true }) }),
+      /**
+       * 쿼터 객체는 **둘뿐**이라 질의가 전량 나열과 같다. 필터·정렬을 받아 주는 척하지 않고
+       * 명시적으로 거절한다 — 받아 놓고 무시하면 클라이언트가 걸러진 줄 안다.
+       */
+      "Quota/query": async (args, ctx) => {
+        const acc = requireAccountId(args, ctx.accountId);
+        if (args.filter !== undefined && args.filter !== null) throw new MethodError("unsupportedFilter");
+        if (Array.isArray(args.sort) && args.sort.length > 0) throw new MethodError("unsupportedSort");
+        const ids = (await quotaObjects(acc)).map((q) => q.id);
+        const state = (await store.jmapState(acc)).email;
+        return { accountId: acc, queryState: state, canCalculateChanges: false, position: 0, total: ids.length, limit: ids.length, ids };
+      },
+    },
+  };
+}
+
+
+/**
+ * JMAP VacationResponse (RFC 8621 §8) — 부재 자동 응답 **설정**의 싱글턴.
+ *
+ * ★설정만 여기 있고 **판정은 배달 경로가 한다.** RFC 5230 §4.6의 루프 방지 게이트와
+ * 중복 억제(`vacation_sent`)는 Sieve `vacation`이 쓰는 것을 그대로 쓴다 — 두 벌로 두면
+ * 자동 응답이 두 번 나가거나, 한쪽만 게이트를 고쳐서 메일링리스트에 부재 알림을 뿌린다.
+ *
+ * ★Sieve 스크립트를 생성하지 않는다. 생성하면 `/get`에서 다시 파싱해야 하고, 그러면
+ * 사용자가 손으로 고친 스크립트를 우리가 덮어쓰거나 잘못 읽는 갈래가 생긴다.
+ */
+export function buildVacationModule(db: DbDriver, store: Store): CapabilityModule {
+  /** 싱글턴 id는 규격이 `"singleton"`으로 못박았다(§8). */
+  const SINGLETON = "singleton";
+
+  const toJmap = (v: VacationResponseRow): JmapObject => ({
+    id: SINGLETON,
+    isEnabled: v.isEnabled,
+    fromDate: v.fromDate === null ? null : new Date(v.fromDate).toISOString(),
+    toDate: v.toDate === null ? null : new Date(v.toDate).toISOString(),
+    subject: v.subject,
+    textBody: v.textBody,
+    htmlBody: v.htmlBody,
+  });
+
+  const getSource: GetSource = {
+    state: async (accountId) => (await store.jmapState(accountId)).email,
+    get: async (accountId, ids) => {
+      const v = await getVacationResponse(db, accountId);
+      // 싱글턴 외의 id는 notFound다 — 없는 객체를 만들어 주지 않는다.
+      if (ids !== null && !ids.includes(SINGLETON)) return { list: [], notFound: [...ids] };
+      const notFound = ids === null ? [] : ids.filter((i) => i !== SINGLETON);
+      return { list: [toJmap(v)], notFound };
+    },
+  };
+
+  /** ISO 날짜 → epoch ms. `null`은 "제한 없음", 형식 오류는 SetItemError. */
+  const parseDate = (raw: unknown, field: string): number | null => {
+    if (raw === null || raw === undefined) return null;
+    if (typeof raw !== "string") throw new SetItemError("invalidProperties", { properties: [field] });
+    const ms = Date.parse(raw);
+    if (Number.isNaN(ms)) throw new SetItemError("invalidProperties", { properties: [field] });
+    return ms;
+  };
+  const parseText = (raw: unknown, field: string): string | null => {
+    if (raw === null || raw === undefined) return null;
+    if (typeof raw !== "string") throw new SetItemError("invalidProperties", { properties: [field] });
+    return raw;
+  };
+
+  const setSource: SetSource = {
+    state: async (accountId) => (await store.jmapState(accountId)).email,
+    /**
+     * ★생성은 없다 — 싱글턴은 **항상 존재한다**(§8: 서버가 하나를 갖고 있다).
+     * `create`를 지원하는 척하면 클라이언트가 만들려다 실패하고, 실패 이유가 모호해진다.
+     */
+    update: async (accountId, id, patch) => {
+      if (id !== SINGLETON) throw new SetItemError("notFound");
+      const cur = await getVacationResponse(db, accountId);
+      /**
+       * ★패치는 현재 값 **위에** 얹는다. 통째로 덮으면 `isEnabled`만 바꾸려던 클라이언트가
+       * 본문을 지우게 된다 — RFC 8620 §5.3의 PatchObject 시맨틱이 그것이다.
+       */
+      const next: VacationResponseRow = {
+        isEnabled: "isEnabled" in patch ? patch.isEnabled === true : cur.isEnabled,
+        fromDate: "fromDate" in patch ? parseDate(patch.fromDate, "fromDate") : cur.fromDate,
+        toDate: "toDate" in patch ? parseDate(patch.toDate, "toDate") : cur.toDate,
+        subject: "subject" in patch ? parseText(patch.subject, "subject") : cur.subject,
+        textBody: "textBody" in patch ? parseText(patch.textBody, "textBody") : cur.textBody,
+        htmlBody: "htmlBody" in patch ? parseText(patch.htmlBody, "htmlBody") : cur.htmlBody,
+      };
+      /**
+       * ★켜면서 본문이 없으면 거절한다. 빈 자동 응답은 상대에게 빈 메일을 보내는 것이라
+       * 안 보내느니만 못하고, 사용자는 켜 뒀다고 믿는다.
+       */
+      if (next.isEnabled && (next.textBody ?? "").trim() === "" && (next.htmlBody ?? "").trim() === "") {
+        throw new SetItemError("invalidProperties", { properties: ["textBody"], description: "본문 없이 켤 수 없습니다" });
+      }
+      if (next.fromDate !== null && next.toDate !== null && next.fromDate > next.toDate) {
+        throw new SetItemError("invalidProperties", { properties: ["fromDate", "toDate"], description: "fromDate가 toDate보다 늦습니다" });
+      }
+      await setVacationResponse(db, accountId, next);
+      return null;
+    },
+    // 삭제도 없다 — 싱글턴을 지울 수 없다. 끄려면 `isEnabled: false`다.
+  };
+
+  return {
+    capability: VACATION_CAPABILITY,
+    methods: {
+      "VacationResponse/get": (args, ctx) => standardGet(args, ctx.accountId, getSource),
+      "VacationResponse/set": (args, ctx) => standardSet(args, ctx.accountId, ctx, setSource),
+    },
+  };
 }

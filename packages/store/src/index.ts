@@ -95,4 +95,10 @@ export { createBayesStore } from "./bayes-store.ts";
 export { queryInChunks } from "./chunk.ts";
 
 export { runRetention, type RetentionOptions, type RetentionResult } from "./retention.ts";
-export { claimVacationReply, sweepVacationSent } from "./vacation-store.ts";
+export {
+  claimVacationReply,
+  getVacationResponse,
+  setVacationResponse,
+  sweepVacationSent,
+  type VacationResponseRow,
+} from "./vacation-store.ts";
