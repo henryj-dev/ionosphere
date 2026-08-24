@@ -43,4 +43,5 @@ export { checkAccountAbuse, suspendAccount, type AbuseOptions, type AbuseVerdict
  */
 export { isSafeEnvelopeAddress, findUnsafeAddress } from "./envelope.ts";
 export { parseArf, isCountableComplaint, FEEDBACK_ID_HEADER, type ArfReport } from "./arf.ts";
+export { buildDsn, enhancedStatusFor, DSN_ACTION, type DsnAction, type DsnInput, type DsnRecipient } from "./dsn.ts";
 export { recordComplaint } from "./abuse.ts";
