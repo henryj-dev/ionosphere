@@ -562,3 +562,92 @@ function acc(): string {
   return cachedAcc ?? "";
 }
 
+
+/**
+ * RFC 8621 필수 메서드 — 규격을 따르는 클라이언트가 `unknownMethod`를 받지 않는지.
+ *
+ * ★`unknownMethod`와 규격 오류(`cannotCalculateChanges`·`fromAccountNotFound`)의 차이가
+ * 이 스위트의 요지다. 전자는 "이 서버는 JMAP 메일을 제대로 안 한다"는 신호라 클라이언트가
+ * 기능 전체를 접고, 후자는 **행동 가능한** 답이라 이미 처리 갈래가 있다.
+ */
+describe("RFC 8621 필수 메서드", () => {
+  const err = (r: { methodResponses: unknown[][] }): Record<string, unknown> =>
+    (r.methodResponses[0] as [string, Record<string, unknown>, string])[1];
+  const name = (r: { methodResponses: unknown[][] }): string => (r.methodResponses[0] as [string, unknown, string])[0];
+
+  test("Email/import — 업로드한 블롭을 들이고 created를 돌려준다", async () => {
+    const rawMime = ["Subject: via Email/import", "From: me@test.local", "To: you@test.local", "", "body"].join("\r\n");
+    const up = await fetch(`${base}/jmap/upload/${acc()}`, { method: "POST", headers: { authorization: AUTH, "content-type": "message/rfc822" }, body: rawMime });
+    const blobId = ((await up.json()) as { blobId: string }).blobId;
+    const mbx = await jmapCall([["Mailbox/query", { accountId: acc(), filter: { role: "inbox" } }, "c0"]]);
+    const inboxId = ((mbx.methodResponses[0] as [string, Record<string, unknown>, string])[1].ids as string[])[0]!;
+
+    const r = await jmapCall([
+      ["Email/import", { accountId: acc(), emails: { e1: { blobId, mailboxIds: { [inboxId]: true }, keywords: { $seen: true } } } }, "c0"],
+    ]);
+    expect(name(r)).toBe("Email/import");
+    const body = err(r);
+    const created = body.created as Record<string, { id: string }>;
+    expect(created.e1?.id).toBeTruthy();
+    // 상태가 실제로 움직였는지 — oldState와 newState가 같으면 아무것도 안 들어온 것이다
+    expect(body.oldState).not.toBe(body.newState);
+
+    const g = await jmapCall([["Email/get", { accountId: acc(), ids: [created.e1!.id], properties: ["subject"] }, "c0"]]);
+    const list = ((g.methodResponses[0] as [string, Record<string, unknown>, string])[1].list as Record<string, unknown>[]);
+    expect(list[0]?.subject).toBe("via Email/import");
+  });
+
+  test("Email/import — 없는 블롭은 notCreated(blobNotFound), 요청 전체는 성공", async () => {
+    const mbx = await jmapCall([["Mailbox/query", { accountId: acc(), filter: { role: "inbox" } }, "c0"]]);
+    const inboxId = ((mbx.methodResponses[0] as [string, Record<string, unknown>, string])[1].ids as string[])[0]!;
+    const r = await jmapCall([
+      ["Email/import", { accountId: acc(), emails: { bad: { blobId: "no-such-blob", mailboxIds: { [inboxId]: true } } } }, "c0"],
+    ]);
+    expect(name(r)).toBe("Email/import");
+    const notCreated = err(r).notCreated as Record<string, { type: string }>;
+    expect(notCreated.bad?.type).toBe("blobNotFound");
+  });
+
+  test("Email/import — ifInState 불일치는 stateMismatch", async () => {
+    const r = await jmapCall([["Email/import", { accountId: acc(), ifInState: "stale-state", emails: {} }, "c0"]]);
+    expect(name(r)).toBe("error");
+    expect(err(r).type).toBe("stateMismatch");
+  });
+
+  /** ★계정 하나짜리 서버에서 계정 간 복사는 늘 거절이다. 중요한 것은 **규격이 정한** 거절인 것. */
+  test("Email/copy — 같은 계정이면 invalidArguments", async () => {
+    const r = await jmapCall([["Email/copy", { accountId: acc(), fromAccountId: acc(), create: {} }, "c0"]]);
+    expect(name(r)).toBe("error");
+    expect(err(r).type).toBe("invalidArguments");
+  });
+
+  test("Email/copy — 다른 계정이면 fromAccountNotFound", async () => {
+    const r = await jmapCall([["Email/copy", { accountId: acc(), fromAccountId: "other-account", create: {} }, "c0"]]);
+    expect(name(r)).toBe("error");
+    expect(err(r).type).toBe("fromAccountNotFound");
+  });
+
+  /**
+   * ★`unknownMethod`가 아니라 `cannotCalculateChanges`여야 한다. `/query`가 이미
+   * `canCalculateChanges: false`를 냈으므로 이 답은 그 광고와 **일치**한다.
+   */
+  test("Email/queryChanges·Mailbox/queryChanges — cannotCalculateChanges", async () => {
+    for (const m of ["Email/queryChanges", "Mailbox/queryChanges"]) {
+      const r = await jmapCall([[m, { accountId: acc(), sinceQueryState: "0" }, "c0"]]);
+      expect(name(r)).toBe("error");
+      expect(err(r).type).toBe("cannotCalculateChanges");
+    }
+  });
+
+  /** 잘못된 요청은 서버 한계가 아니라 클라이언트 버그다 — 섞으면 원인을 못 찾는다. */
+  test("queryChanges — sinceQueryState 누락은 invalidArguments", async () => {
+    const r = await jmapCall([["Email/queryChanges", { accountId: acc() }, "c0"]]);
+    expect(name(r)).toBe("error");
+    expect(err(r).type).toBe("invalidArguments");
+  });
+
+  test("/query가 canCalculateChanges:false를 내는 것과 일치한다", async () => {
+    const r = await jmapCall([["Email/query", { accountId: acc() }, "c0"]]);
+    expect(err(r).canCalculateChanges).toBe(false);
+  });
+});

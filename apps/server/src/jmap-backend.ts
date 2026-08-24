@@ -7,11 +7,13 @@ import { toAppendAddresses } from "./addresses.ts";
 import { lookupBlob, Store, type BlobStore, type JmapEmailFilter, type JmapEmailMeta, type MailboxRow } from "@ionosphere/store";
 import { extractJmapBody, parseMessage, type ParsedAddress, type ParsedMessage } from "@ionosphere/mime";
 import {
+  isUnsafeKey,
   MethodError,
   requireAccountId,
   SetItemError,
   standardChanges,
   standardGet,
+  standardQueryChanges,
   standardSet,
   MAIL_CAPABILITY,
   SUBMISSION_CAPABILITY,
@@ -153,6 +155,11 @@ export function buildMailModule(db: DbDriver, store: Store, blobs: BlobStore): C
       "Email/changes": (args, ctx) => standardChanges(args, ctx.accountId, emailChangesSource),
       "Email/query": (args, ctx) => emailQuery(args, ctx.accountId, store),
       "Email/set": (args, ctx) => standardSet(args, ctx.accountId, ctx, buildEmailSetSource(db, store, blobs)),
+      "Email/import": (args, ctx) => emailImport(args, ctx, store, buildEmailSetSource(db, store, blobs)),
+      "Email/copy": (args, ctx) => emailCopy(args, ctx.accountId),
+      // RFC 8620 §5.6 — 델타를 계산할 수 없다는 것을 **규격의 말로** 알린다(standard.ts 주석).
+      "Email/queryChanges": (args, ctx) => standardQueryChanges(args, ctx.accountId),
+      "Mailbox/queryChanges": (args, ctx) => standardQueryChanges(args, ctx.accountId),
       "Thread/get": (args, ctx) => standardGet(args, ctx.accountId, threadGetSource),
       "Thread/changes": (args, ctx) => standardChanges(args, ctx.accountId, threadChangesSource),
     },
@@ -855,4 +862,95 @@ async function mailboxQuery(args: Record<string, unknown>, accountId: string, st
     limit,
     ids,
   };
+}
+
+/**
+ * Email/import (RFC 8621 §4.8) — 업로드된 블롭을 메일함에 들인다.
+ *
+ * ★변이 자체는 `Email/set`의 create와 **같은 코드**를 부른다. 같은 일(블롭 파싱 → 배치)을
+ * 두 벌로 두면 한쪽만 고쳐져 갈라진다 — 이 저장소가 반복해서 겪은 사고다. 다른 것은 봉투뿐:
+ * `create`가 아니라 `emails`를 받고, 결과 키가 `created`/`notCreated`다.
+ *
+ * ★`Email/set`과 달리 `#creationId` 참조가 없다(§4.8: 이미 업로드된 블롭만 들인다).
+ * 그래서 빈 `createdIds`를 넘긴다 — 넘기지 않으면 소스가 mailboxIds의 `#` 접두사를
+ * 해석하려다 미정의를 만난다.
+ */
+async function emailImport(
+  args: Record<string, unknown>,
+  ctx: MethodContext,
+  store: Store,
+  source: SetSource,
+): Promise<Record<string, unknown>> {
+  const acc = requireAccountId(args, ctx.accountId);
+  const oldState = (await store.jmapState(acc)).email;
+
+  if (args.ifInState !== undefined && args.ifInState !== null) {
+    if (typeof args.ifInState !== "string") throw new MethodError("invalidArguments", { description: "ifInState" });
+    if (args.ifInState !== oldState) throw new MethodError("stateMismatch");
+  }
+
+  const emails = args.emails;
+  if (typeof emails !== "object" || emails === null || Array.isArray(emails)) {
+    throw new MethodError("invalidArguments", { description: "emails는 객체여야 함" });
+  }
+
+  // 프로토타입 없는 집계 — 키가 전부 클라이언트 문자열이다(set.ts의 같은 주석 참조).
+  const created = Object.create(null) as Record<string, Record<string, unknown>>;
+  const notCreated = Object.create(null) as Record<string, unknown>;
+
+  for (const [id, props] of Object.entries(emails as Record<string, unknown>)) {
+    // `created[id] = …`가 프로토타입 교체가 되면 그 항목이 응답에서 조용히 사라진다(safe-key.ts).
+    if (isUnsafeKey(id)) {
+      notCreated[id] = { type: "invalidProperties", description: "허용되지 않는 id" };
+      continue;
+    }
+    if (typeof props !== "object" || props === null || Array.isArray(props)) {
+      notCreated[id] = { type: "invalidProperties", description: "객체가 아님" };
+      continue;
+    }
+    if (!source.create) {
+      notCreated[id] = { type: "forbidden", description: "import 미지원" };
+      continue;
+    }
+    try {
+      const { id: newId, serverProps } = await source.create(acc, props as Record<string, unknown>, { ...ctx, createdIds: {} });
+      created[id] = { id: newId, ...serverProps };
+    } catch (err) {
+      if (err instanceof SetItemError) {
+        notCreated[id] = err.setError;
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  const newState = (await store.jmapState(acc)).email;
+  return { accountId: acc, oldState, newState, created, notCreated };
+}
+
+
+/**
+ * Email/copy (RFC 8620 §5.4 · RFC 8621 §4.7) — **계정 간** 복사.
+ *
+ * ★이 서버의 세션에는 계정이 하나뿐이다. 그래서 이 메서드는 늘 거절로 끝나지만, 그 거절이
+ * **규격이 정한 거절**인 것이 중요하다. 등록하지 않으면 클라이언트가 `unknownMethod`를 받고,
+ * 그건 "이 서버는 JMAP 메일을 제대로 안 한다"는 신호라 관련 기능 전체를 접게 만든다.
+ *
+ * · `fromAccountId === accountId` → `invalidArguments`.
+ *   §5.4가 "This MUST be different to the 'fromAccountId'"라고만 하고 전용 오류를 두지
+ *   않아서, 표준 오류 중 "인자가 유효하지 않다"에 해당하는 것을 쓴다.
+ * · 그 밖의 `fromAccountId` → `fromAccountNotFound`. 세션이 아는 계정이 하나뿐이므로
+ *   다른 이름은 전부 "없는 계정"이 맞다 — 있는 척하고 빈 결과를 주면 클라이언트가
+ *   "복사했는데 아무것도 안 왔다"로 읽는다.
+ */
+async function emailCopy(args: Record<string, unknown>, accountId: string): Promise<Record<string, unknown>> {
+  requireAccountId(args, accountId);
+  const from = args.fromAccountId;
+  if (typeof from !== "string" || from.length === 0) {
+    throw new MethodError("invalidArguments", { description: "fromAccountId 누락" });
+  }
+  if (from === accountId) {
+    throw new MethodError("invalidArguments", { description: "fromAccountId는 accountId와 달라야 함" });
+  }
+  throw new MethodError("fromAccountNotFound");
 }

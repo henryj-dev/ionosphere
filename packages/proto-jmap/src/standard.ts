@@ -97,3 +97,36 @@ export async function standardChanges(args: Record<string, unknown>, accountId: 
     destroyed: r.destroyed,
   };
 }
+
+// ── /queryChanges (RFC 8620 §5.6) ──────────────────────────────────────────────
+
+/**
+ * 표준 /queryChanges 봉투.
+ *
+ * ★이 저장소는 **질의 델타를 계산할 수 없다.** `added`/`removed`를 정확히 내려면 옛 질의
+ * 결과가 무엇이었는지를 알아야 하고, 그건 (필터·정렬별로) 과거 결과 스냅샷을 저장해야
+ * 가능하다 — `change_log`만으로는 "그때 이 메시지가 이 필터에 걸렸는가"를 복원할 수 없다.
+ * 그래서 `/query`가 `canCalculateChanges: false`를 내고, 이 메서드는 규격이 정확히 그
+ * 상황을 위해 둔 `cannotCalculateChanges`를 낸다(§5.6).
+ *
+ * ★그럼에도 **메서드를 두는 이유**: 없으면 클라이언트가 `unknownMethod`를 받는다. 그건
+ * "이 서버는 JMAP 메일을 제대로 안 한다"는 신호라 클라이언트가 기능 전체를 접는 반면,
+ * `cannotCalculateChanges`는 "질의를 다시 돌려라"라는 **행동 가능한** 답이고 모든 JMAP
+ * 클라이언트가 이미 처리하는 갈래다. 틀린 값을 지어내는 것보다 이쪽이 맞다.
+ *
+ * 인자 검증을 먼저 하는 이유: 잘못된 요청은 `invalidArguments`로 답해야 한다. 무조건
+ * `cannotCalculateChanges`를 내면 클라이언트가 자기 버그를 서버 한계로 오해한다.
+ */
+export async function standardQueryChanges(args: Record<string, unknown>, accountId: string): Promise<Record<string, unknown>> {
+  requireAccountId(args, accountId);
+  if (typeof args.sinceQueryState !== "string") {
+    throw new MethodError("invalidArguments", { description: "sinceQueryState는 문자열이어야 함" });
+  }
+  if (args.maxChanges !== undefined && args.maxChanges !== null && (typeof args.maxChanges !== "number" || args.maxChanges < 0)) {
+    throw new MethodError("invalidArguments", { description: "maxChanges" });
+  }
+  if (args.upToId !== undefined && args.upToId !== null && typeof args.upToId !== "string") {
+    throw new MethodError("invalidArguments", { description: "upToId" });
+  }
+  throw new MethodError("cannotCalculateChanges");
+}
