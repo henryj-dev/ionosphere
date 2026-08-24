@@ -176,6 +176,11 @@ const MIN_STS_MAX_AGE_S = 300;
 const LOCAL_DOMAIN_TTL_MS = 60_000;
 const MAX_LOCAL_DOMAIN_CACHE = 1024;
 const DEFAULT_ABUSE_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+/**
+ * 지연 통보를 보내는 경과 시간 — RFC 5321 §4.5.4.1("몇 시간 안에 배달하지 못하면 알려라",
+ * 관행은 4시간). 한 메시지에 **한 번만** 보낸다(`delay_notified_at`).
+ */
+const DELAY_NOTIFY_AFTER_MS = 4 * 60 * 60 * 1000;
 
 interface QueueRow {
   id: string;
@@ -185,6 +190,10 @@ interface QueueRow {
   envFrom: string;
   blobId: string;
   attempts: number;
+  /** 큐 적재 시각 — 지연 통보의 경과 판정 기준(시도 횟수는 지터 때문에 시간과 대응하지 않는다). */
+  createdAt: number;
+  /** 지연 통보를 보낸 시각. null이면 아직 안 보냄 — **중복 통보를 막는 유일한 근거**다. */
+  delayNotifiedAt: number | null;
 }
 
 function errMsg(err: unknown): string {
@@ -537,7 +546,8 @@ export class MtaWorker {
     // 리스 UPDATE를 날린다(왕복 10만 번). 한 사이클을 짧게 유지해야 리스 만료·재기동에도
     // 진행이 남는다. 남은 행은 다음 tick이 가져간다(ORDER BY next_attempt이라 순서는 유지).
     const { rows } = await this.db.query({
-      sql: `SELECT id, tenant_id, account_id, submission_id, blob_id, env_from, rcpt, rcpt_domain, attempts
+      sql: `SELECT id, tenant_id, account_id, submission_id, blob_id, env_from, rcpt, rcpt_domain, attempts,
+                   created_at, delay_notified_at
             FROM mta_queue
             WHERE (status IN (${STATUS.queued}, ${STATUS.deferred}) AND next_attempt <= ?)
                OR (status = ${STATUS.inFlight} AND lease_until < ?)
@@ -570,6 +580,8 @@ export class MtaWorker {
         envFrom: String(row.env_from),
         blobId: String(row.blob_id),
         attempts: Number(row.attempts),
+        createdAt: Number(row.created_at),
+        delayNotifiedAt: row.delay_notified_at == null ? null : Number(row.delay_notified_at),
       });
     }
     if (leased.length === 0) return 0;
@@ -961,6 +973,7 @@ export class MtaWorker {
           code,
           stage: rcptAccepted ? "data" : "rcpt",
         });
+        this.noteDelayIfDue(row, now, dsnRows, stmts, rejectionText(code, detail));
         this.emitResult("deferred");
       }
     }
@@ -969,6 +982,27 @@ export class MtaWorker {
     await this.db.batch(stmts);
     // ★배치 커밋 **뒤에** 보낸다. DSN 적재가 실패해도 큐 행은 이미 올바르게 닫혀 있어야 한다.
     await this.sendDsn(rows[0], dsnRows, raw);
+  }
+
+  /**
+   * 아직 큐에 있는 건의 **지연 통보** 대상 판정 (RFC 5321 §4.5.4.1).
+   *
+   * 세 조건이 모두 맞아야 한다: 경과가 상한을 넘었고 · 아직 안 보냈고 · 봉투 발신자가 있다.
+   * 대상이면 DSN 행을 담고 `delay_notified_at`을 찍는 문장을 함께 넣는다 — **둘이 같은
+   * 배치에 있어야** 통보를 보내고 표시를 못 남기는(그래서 매 tick마다 다시 보내는) 창이 없다.
+   */
+  private noteDelayIfDue(row: QueueRow, now: number, dsnRows: DsnRecipient[], stmts: Statement[], detail: string): void {
+    if (!this.dsn) return;
+    if (row.delayNotifiedAt !== null) return;
+    if (row.envFrom.trim() === "") return; // 이중 바운스 차단 — sendDsn과 같은 규율
+    if (now - row.createdAt < DELAY_NOTIFY_AFTER_MS) return;
+    dsnRows.push({
+      rcpt: row.rcpt,
+      action: DSN_ACTION.delayed,
+      status: "4.4.7", // 큐에 머문 시간 초과(RFC 3463)
+      diagnostic: detail,
+    });
+    stmts.push({ sql: "UPDATE mta_queue SET delay_notified_at = ? WHERE id = ?", params: [now, row.id] });
   }
 
   /**
@@ -1066,6 +1100,7 @@ export class MtaWorker {
           params: [attempts, next, stored, row.id],
         });
         this.logger.info("deferred", { rcpt: row.rcpt, attempts, next, error: failure.detail });
+        this.noteDelayIfDue(row, now, dsnRows, stmts, stored);
         this.emitResult("deferred");
       }
     }

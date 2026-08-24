@@ -39,19 +39,36 @@ async function startPeer(rcpt: { ok: true } | { ok: false; code: number; enhance
 
 const mxToLocalhost = (): ((d: string) => Promise<MxRecord[]>) => async () => [{ exchange: "127.0.0.1", priority: 10 }];
 
-async function seedQueue(db: DbDriver, opts: { envFrom: string; attempts?: number }): Promise<string> {
+async function seedQueue(
+  db: DbDriver,
+  opts: { envFrom: string; attempts?: number; ageMs?: number; delayNotifiedAt?: number },
+): Promise<string> {
   const id = ulid();
   const now = Date.now();
   await db.batch([
     {
       sql: `INSERT INTO mta_queue (id, tenant_id, account_id, submission_id, blob_id, env_from, verp_token,
-              rcpt, rcpt_domain, status, attempts, next_attempt, lease_until, last_error, created_at)
-            VALUES (?, ?, NULL, NULL, ?, ?, ?, 'r@remote.test', 'remote.test', ?, ?, ?, NULL, NULL, ?)`,
-      params: [id, ulid(), BLOB_ID, opts.envFrom, "0".repeat(16), MTA_QUEUE_STATUS.queued, opts.attempts ?? 0, now, now],
+              rcpt, rcpt_domain, status, attempts, next_attempt, lease_until, last_error, created_at, delay_notified_at)
+            VALUES (?, ?, NULL, NULL, ?, ?, ?, 'r@remote.test', 'remote.test', ?, ?, ?, NULL, NULL, ?, ?)`,
+      params: [
+        id,
+        ulid(),
+        BLOB_ID,
+        opts.envFrom,
+        "0".repeat(16),
+        MTA_QUEUE_STATUS.queued,
+        opts.attempts ?? 0,
+        now,
+        now - (opts.ageMs ?? 0),
+        opts.delayNotifiedAt ?? null,
+      ],
     },
   ]);
   return id;
 }
+
+/** RFC 5321 §4.5.4.1의 관행값(4시간)보다 조금 넘긴 나이. */
+const OLD_ENOUGH_MS = 5 * 60 * 60 * 1000;
 
 interface Sent {
   tenantId: string;
@@ -180,5 +197,52 @@ describe("워커 DSN 발송", () => {
     });
     await w.tick();
     expect(await statusOf(db, id)).toBe(MTA_QUEUE_STATUS.bounced);
+  });
+
+  /**
+   * ★지연 통보(RFC 5321 §4.5.4.1) — **아직 배달될 수 있는** 메일이라 실패가 아니다.
+   * 사용자가 다시 보내지 않도록 문구도 다르다.
+   */
+  test("4시간 넘게 큐에 있으면 지연 통보를 한 번 보낸다", async () => {
+    const db = await freshDb();
+    const id = await seedQueue(db, { envFrom: "sender@x.test", ageMs: OLD_ENOUGH_MS });
+    const sent: Sent[] = [];
+    await worker(db, await startPeer(DEFER), sent).tick();
+
+    expect(sent).toHaveLength(1);
+    const body = Buffer.from(sent[0]!.message).toString("latin1");
+    expect(body).toContain("Action: delayed");
+    expect(body).toContain("Subject: Delivery Status Notification (Delayed)");
+    expect(body).toContain("You do not need to resend");
+    expect(await statusOf(db, id)).toBe(MTA_QUEUE_STATUS.deferred); // 여전히 재시도 중이다
+
+    // 표시가 남아야 다음 tick에 또 보내지 않는다.
+    const { rows } = await db.query({ sql: "SELECT delay_notified_at FROM mta_queue WHERE id = ?", params: [id] });
+    expect(rows[0]!.delay_notified_at != null).toBe(true);
+  });
+
+  /** 중복 통보가 특히 나쁘다 — 실패처럼 보이는 알림을 반복해서 받는다. */
+  test("이미 통보했으면 다시 보내지 않는다", async () => {
+    const db = await freshDb();
+    await seedQueue(db, { envFrom: "sender@x.test", ageMs: OLD_ENOUGH_MS, delayNotifiedAt: Date.now() });
+    const sent: Sent[] = [];
+    await worker(db, await startPeer(DEFER), sent).tick();
+    expect(sent).toHaveLength(0);
+  });
+
+  test("아직 4시간이 안 됐으면 보내지 않는다", async () => {
+    const db = await freshDb();
+    await seedQueue(db, { envFrom: "sender@x.test", ageMs: 60 * 60 * 1000 });
+    const sent: Sent[] = [];
+    await worker(db, await startPeer(DEFER), sent).tick();
+    expect(sent).toHaveLength(0);
+  });
+
+  test("지연 통보도 null 발신자에는 보내지 않는다", async () => {
+    const db = await freshDb();
+    await seedQueue(db, { envFrom: "", ageMs: OLD_ENOUGH_MS });
+    const sent: Sent[] = [];
+    await worker(db, await startPeer(DEFER), sent).tick();
+    expect(sent).toHaveLength(0);
   });
 });
