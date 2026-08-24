@@ -175,5 +175,103 @@ rc, out = run(G, {"tool_name": "Edit", "tool_input": {"file_path": "/tmp/x.md"},
                   "cwd": "/tmp", "session_id": "T"}, "/tmp")
 check("저장소 밖에서는 조용히 통과(rc=0)", rc == 0 and "deny" not in out)
 
+# ── `.claude/settings.json` — codex 도 이것을 읽는다 ────────────────────────────
+#
+# 🔴 **2026-08-24 라이브 사고.** codex 0.149.1 은 `.codex/hooks.json` 말고 **`.claude/settings.json`
+#    의 `hooks` 도 읽어 실행한다**(바이너리에 `settings.json`·`disableAllHooks`·`PreToolUse` 가
+#    있고, 그 파일의 명령이 실제로 발화했다). 그런데 **`$CLAUDE_PROJECT_DIR` 를 세팅하지 않는다** —
+#    그래서 `python3 "$CLAUDE_PROJECT_DIR/scripts/..."` 가 `/scripts/...` 로 풀려
+#    `can't open file` + **exit 2** 가 됐다. codex 는 PreToolUse 의 exit 2 를 **거부**로 읽으므로
+#    `git status` 같은 **읽기까지 전부 막혔고**, 세션이 통째로 멈췄다.
+#    ⚠️ 그리고 이 경로는 **`~/.codex/config.toml` 의 신뢰 승인 없이 발화한다**(그 파일의
+#    `[hooks.state]` 에 `.claude/settings.json` 항목이 없는데도 돌았다). 즉 승인이 필요한
+#    `.codex/hooks.json` 보다 **먼저·확실히 도는 층**이다 — 여기가 깨지면 codex 는 못 쓴다.
+#
+# 그래서 세 훅의 명령은 `${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel)}` 로
+# **스스로 경로를 찾는다.** Claude 에서는 앞의 변수가, codex 에서는 뒤의 git 이 답한다.
+SETTINGS = os.path.join(TOP, ".claude", "settings.json")
+try:
+    sd = json.load(open(SETTINGS, encoding="utf-8"))
+    check("`.claude/settings.json` 이 유효한 JSON 이다", True)
+except Exception as e:
+    print(f"✗ `.claude/settings.json` 파싱 실패: {e}")
+    sd = {}
+    fail += 1
+
+scmds, smatcher = {}, ""
+for ev, groups in (sd.get("hooks") or {}).items():
+    for g in groups:
+        if ev == "PreToolUse":
+            smatcher = g.get("matcher", "")
+        for h in g.get("hooks", []):
+            scmds[ev] = h.get("command", "")
+
+check("세 훅이 `.claude/settings.json` 에도 등록돼 있다",
+      set(scmds) == {"PreToolUse", "SessionStart", "SessionEnd"})
+
+# 🔴 **핵심 회귀** — 세 명령 중 하나라도 `$CLAUDE_PROJECT_DIR` 에만 기대면 codex 가 멈춘다.
+for ev, c in sorted(scmds.items()):
+    check(f"{ev} 명령이 `$CLAUDE_PROJECT_DIR` 없이도 경로를 찾는다",
+          "rev-parse --show-toplevel" in c)
+
+# codex 의 편집 툴 이름이 matcher 에 있는가. `apply_patch`·`shell` 은 Claude 에 없는 이름이라
+# 넣어도 Claude 동작은 안 바뀌고, codex 에서는 이것이 없으면 **패치 편집이 이 층을 통과한다**.
+for name in ("apply_patch", "shell"):
+    check(f"PreToolUse matcher 가 codex 툴 `{name}` 을 덮는다", name in smatcher)
+
+
+def run_codex(cmd, payload, cwd):
+    """codex 조건 재현 — `CLAUDE_PROJECT_DIR` 를 **지우고** 부른다."""
+    env = dict(os.environ)
+    env.pop("CLAUDE_PROJECT_DIR", None)
+    p = subprocess.run(["sh", "-c", cmd], input=json.dumps(payload),
+                       capture_output=True, text=True, cwd=cwd, env=env)
+    return p.returncode, p.stdout.strip(), p.stderr.strip()
+
+
+if "PreToolUse" in scmds:
+    SG = scmds["PreToolUse"]
+    rc, out, err = run_codex(SG, {"tool_name": "Edit",
+                                  "tool_input": {"file_path": f"{MAIN}/PLAN.md"},
+                                  "cwd": MAIN, "session_id": "T"}, MAIN)
+    # ⚠️ rc 를 함께 본다. 옛 형태의 증상은 「deny 가 없다」가 아니라 **exit 2 + 빈 stdout** 이었다 —
+    #    판정을 stdout 으로만 하면 그 사고가 「통과」로 보인다.
+    check("codex 조건에서 메인 편집 → deny", rc == 0 and "deny" in out)
+    check("codex 조건에서 해석 실패 흔적이 없다", "can't open file" not in err)
+
+    if WT:
+        rc, out, _ = run_codex(SG, {"tool_name": "Edit",
+                                    "tool_input": {"file_path": f"{WT}/PLAN.md"},
+                                    "cwd": WT, "session_id": "T"}, WT)
+        check("codex 조건에서 워크트리 편집 → 통과", rc == 0 and "deny" not in out)
+
+    rc, out, _ = run_codex(SG, {"tool_name": "apply_patch",
+                                "tool_input": {"command": f"*** Begin Patch\n*** Add File: {MAIN}/_probe.txt\n+x\n*** End Patch"},
+                                "cwd": MAIN, "session_id": "T"}, MAIN)
+    check("codex 조건에서 apply_patch 메인 편집 → deny", rc == 0 and "deny" in out)
+
+    rc, out, _ = run_codex(SG, {"tool_name": "Edit", "tool_input": {"file_path": "/tmp/x.md"},
+                                "cwd": "/tmp", "session_id": "T"}, "/tmp")
+    check("codex 조건에서 저장소 밖은 조용히 통과(rc=0)", rc == 0 and "deny" not in out)
+
+    # ⚠️ **막는 쪽만 재면 「전부 막는 훅」이 통과한다.** 읽기가 계속 통과해야 한다 —
+    #    이번 사고의 실제 피해가 「읽기까지 막힌 것」이었다.
+    rc, out, _ = run_codex(SG, {"tool_name": "shell",
+                                "tool_input": {"command": "git status --short"},
+                                "cwd": MAIN, "session_id": "T"}, MAIN)
+    check("codex 조건에서 메인의 읽기 명령은 통과", rc == 0 and "deny" not in out)
+
+    # Claude 쪽 경로도 살아 있는가 — 변수가 있으면 **그것을** 쓴다(워크트리에서 훅을 고쳐도
+    # 메인 세션엔 메인 사본이 먹는 §2-1 의 성질이 여기 달려 있다).
+    env = dict(os.environ, CLAUDE_PROJECT_DIR=MAIN)
+    p = subprocess.run(["sh", "-c", SG],
+                       input=json.dumps({"tool_name": "Edit",
+                                         "tool_input": {"file_path": f"{MAIN}/PLAN.md"},
+                                         "cwd": "/tmp", "session_id": "T"}),
+                       capture_output=True, text=True, cwd="/tmp", env=env)
+    check("`$CLAUDE_PROJECT_DIR` 가 있으면 그것으로 찾는다(Claude 경로)",
+          p.returncode == 0 and "deny" in p.stdout)
+
+
 print("\n실패", fail, "건")
 sys.exit(1 if fail else 0)

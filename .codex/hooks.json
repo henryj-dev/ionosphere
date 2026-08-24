@@ -1,12 +1,19 @@
 {
+  "$comment": [
+    "codex 용 등록. Claude 와 같은 훅 이벤트·같은 입력 스키마를 쓰므로 스크립트를 공유한다.",
+    "$CLAUDE_PROJECT_DIR 이 없으므로 런처가 git rev-parse --show-toplevel 로 찾고,",
+    "못 찾으면 조용히 통과한다(exit 0) — 저장소 밖에서 codex 를 세우지 않기 위해서다.",
+    "⚠️ 이 파일이 있다고 훅이 도는 것이 아니다 — ~/.codex/config.toml 의 [hooks.state] 에",
+    "   항목별 trusted_hash 승인이 있어야 발화한다. 머신마다·파일을 고칠 때마다 다시 승인.",
+    "⚠️ codex exec 는 SessionEnd 를 발화하지 않는다(실측) — 워크트리 회수는 SessionStart 가 한다."
+  ],
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|NotebookEdit|Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/claude-hooks/main-tree-guard.py\""
+            "command": "sh -c 'p=\"$(git rev-parse --show-toplevel 2>/dev/null)\"; [ -n \"$p\" ] && [ -f \"$p/scripts/claude-hooks/main-tree-guard.py\" ] && exec python3 \"$p/scripts/claude-hooks/main-tree-guard.py\"; exit 0'"
           }
         ]
       }
@@ -16,9 +23,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/claude-hooks/session-start-pull.py\"",
-            "timeout": 90,
-            "statusMessage": "메인 트리 최신화"
+            "command": "sh -c 'p=\"$(git rev-parse --show-toplevel 2>/dev/null)\"; [ -n \"$p\" ] && [ -f \"$p/scripts/claude-hooks/session-start-pull.py\" ] && exec python3 \"$p/scripts/claude-hooks/session-start-pull.py\"; exit 0'"
           }
         ]
       }
@@ -28,9 +33,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/claude-hooks/session-end-cleanup.py\"",
-            "timeout": 120,
-            "statusMessage": "세션 정리 — 메인 pull · 워크트리 회수"
+            "command": "sh -c 'p=\"$(git rev-parse --show-toplevel 2>/dev/null)\"; [ -n \"$p\" ] && [ -f \"$p/scripts/claude-hooks/session-end-cleanup.py\" ] && exec python3 \"$p/scripts/claude-hooks/session-end-cleanup.py\"; exit 0'"
           }
         ]
       }

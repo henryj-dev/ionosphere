@@ -6,11 +6,11 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|NotebookEdit|Bash",
+        "matcher": "Edit|Write|NotebookEdit|Bash|apply_patch|shell",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/claude-hooks/main-tree-guard.py\""
+            "command": "sh -c 'p=\"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null)}\"; [ -n \"$p\" ] && [ -f \"$p/scripts/claude-hooks/main-tree-guard.py\" ] && exec python3 \"$p/scripts/claude-hooks/main-tree-guard.py\"; exit 0'"
           }
         ]
       }
@@ -20,7 +20,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/claude-hooks/session-start-pull.py\"",
+            "command": "sh -c 'p=\"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null)}\"; [ -n \"$p\" ] && [ -f \"$p/scripts/claude-hooks/session-start-pull.py\" ] && exec python3 \"$p/scripts/claude-hooks/session-start-pull.py\"; exit 0'",
             "timeout": 90,
             "statusMessage": "메인 트리 최신화"
           }
@@ -32,7 +32,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/claude-hooks/session-end-cleanup.py\"",
+            "command": "sh -c 'p=\"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null)}\"; [ -n \"$p\" ] && [ -f \"$p/scripts/claude-hooks/session-end-cleanup.py\" ] && exec python3 \"$p/scripts/claude-hooks/session-end-cleanup.py\"; exit 0'",
             "timeout": 120,
             "statusMessage": "세션 정리 — 메인 pull · 워크트리 회수"
           }
