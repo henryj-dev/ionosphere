@@ -115,3 +115,16 @@ export {
   type DmarcRowKey,
   type TlsRptRowKey,
 } from "./report-store.ts";
+// JMAP PushSubscription(RFC 8620 §7.2) — 확인 코드는 조회로 나가지 않는다(push-store.ts 주석).
+export {
+  deletePushSubscription,
+  listPushSubscriptions,
+  purgeExpiredPushSubscriptions,
+  pushSubjects,
+  pushTargets,
+  updatePushSubscription,
+  upsertPushSubscription,
+  verifyPushSubscription,
+  type PushSubscriptionInput,
+  type PushSubscriptionRow,
+} from "./push-store.ts";

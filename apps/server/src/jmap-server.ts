@@ -40,6 +40,7 @@ import {
   type JmapRequest,
 } from "@ionosphere/proto-jmap";
 import { buildMailModule, buildQuotaModule, buildSubmissionModule, buildVacationModule } from "./jmap-backend.ts";
+import { buildPushMethods, type PushModuleOptions } from "./push.ts";
 
 export interface JmapServerOptions {
   db: DbDriver;
@@ -59,6 +60,13 @@ export interface JmapServerOptions {
   extraModules?: CapabilityModule[];
   /** EventSource(push) 상태 폴링 주기(ms). 기본 2000. 테스트는 짧게. */
   eventSourcePollMs?: number;
+  /**
+   * `PushSubscription`(RFC 8620 §7.2). 주면 메서드가 열리고 상태 변화가 등록된 URL로 나간다.
+   *
+   * ★opt-in인 이유: **사용자가 준 URL로 서버가 나가는** 기능이라 SSRF 표면이 새로 생긴다.
+   * 가드가 걸린 fetch를 조립층이 만들어 넘기게 해서, 그 방어를 우회한 배선이 생길 수 없게 한다.
+   */
+  push?: PushModuleOptions;
   /**
    * 인증 실패 스로틀 — **다른 리스너와 같은 인스턴스를 받아야 한다**(조립층이 주입).
    * 리스너마다 새로 만들면 "IP당 분당 10회" 정책이 리스너 수만큼 곱해진다.
@@ -138,6 +146,12 @@ export class JmapServer {
       buildSubmissionModule(opts.db, opts.store, opts.blobs, opts.outbound),
       buildQuotaModule(opts.store),
       buildVacationModule(opts.db, opts.store),
+      /**
+       * `PushSubscription`(RFC 8620 §7.2)은 **Core capability**에 속한다 — 계정이 아니라
+       * 사용자에 묶이므로 mail/submission 어디에도 들어가지 않는다. 별도 모듈로 얹어
+       * `coreModule`을 건드리지 않는다(그쪽은 프로토콜 패키지의 순수 코드다).
+       */
+      ...(opts.push ? [{ capability: CORE_CAPABILITY, methods: buildPushMethods(opts.push) }] : []),
       ...(opts.extraModules ?? []),
     ];
     this.capabilities = [CORE_CAPABILITY, MAIL_CAPABILITY, SUBMISSION_CAPABILITY, QUOTA_CAPABILITY, VACATION_CAPABILITY];

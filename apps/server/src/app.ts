@@ -26,7 +26,7 @@ import { HttpRedirectServer } from "./http-redirect.ts";
 import { ManageSieveServer } from "@ionosphere/proto-managesieve";
 import { IonosphereManageSieveBackend } from "./managesieve-backend.ts";
 import { MtaWorker, type MxRecord, type RateLimitConfig, type SmarthostOptions } from "@ionosphere/mta";
-import { WebhookWorker } from "@ionosphere/webhook";
+import { createGuardedFetch, WebhookWorker } from "@ionosphere/webhook";
 import { parseCidrList, type DnsResolver } from "@ionosphere/mail-auth";
 import type { DnsblZone, GreylistOptions, SpamScoreOptions, VirusScanner, VirusScanOptions } from "@ionosphere/spam";
 import { AdminApiServer, type TlsAdmin } from "@ionosphere/api";
@@ -39,6 +39,7 @@ import { LmtpServer } from "@ionosphere/proto-lmtp";
 import type { CertSource, SealedCertSource, TlsMaterial } from "@ionosphere/tls";
 import { MailboxReaper } from "./reaper.ts";
 import type { ReportSender } from "./reports.ts";
+import { PushWatcher } from "./push.ts";
 import { BlobGcWorker } from "./blob-gc.ts";
 import { AuditFileSink } from "./audit-sink.ts";
 import { AuditShipper, type AuditS3Target } from "./audit-shipper.ts";
@@ -354,6 +355,14 @@ export interface IonosphereAppOptions {
    */
   reports?: { contactEmail: string; retentionDays?: number };
   /**
+   * JMAP `PushSubscription`(RFC 8620 §7.2) 활성화.
+   *
+   * ★opt-in인 이유: **사용자가 준 URL로 서버가 나가는** 기능이라 SSRF 표면이 새로 생긴다.
+   * 켜더라도 `@ionosphere/webhook`의 가드(URL 검사 + 해석된 IP 피닝)와 §7.2.2 확인 절차를
+   * 둘 다 통과해야 실제 알림이 나간다. `pollMs`는 상태 감시 주기(기본 5초)다.
+   */
+  push?: { pollMs?: number };
+  /**
    * 블롭 GC 수위 — "off" | "mark"(기본, 파일 삭제 없음) | "sweep"(파일 삭제).
    * 삭제는 되돌릴 수 없으므로 기본은 관측만 한다. 상세는 @ionosphere/store BlobGcMode 주석.
    */
@@ -542,6 +551,7 @@ export class IonosphereApp {
   mta?: MtaWorker;
   webhookWorker?: WebhookWorker;
   reaper?: MailboxReaper;
+  pushWatcher?: PushWatcher;
   blobGc?: BlobGcWorker;
   /**
    * 접근 감사 싱크 — **리스너보다 먼저 만들어져야 한다**(생성 시 주입하므로).
@@ -1143,6 +1153,11 @@ export class IonosphereApp {
         authThrottle: this.authThrottle,
         audit: this.audit,
         ...(this.opts.jmapBaseUrl ? { externalBaseUrl: this.opts.jmapBaseUrl } : {}),
+        /**
+         * `PushSubscription`(RFC 8620 §7.2) — **가드가 걸린 fetch를 조립층이 만들어 넘긴다.**
+         * 모듈이 자기 fetch를 만들게 두면 그 방어를 우회한 배선이 생길 수 있다.
+         */
+        ...(this.opts.push ? { push: { db: this.db, logger: ctx.log, fetch: createGuardedFetch() } } : {}),
       });
       // 443 프론트가 있으면 JMAP 평문 포트는 그 upstream이다.
       this.jmapPort = await this.jmap.listen(jmapListener.port, jmapListener.host);
@@ -1450,6 +1465,23 @@ export class IonosphereApp {
         ...(this.opts.reaperIntervalMs !== undefined ? { intervalMs: this.opts.reaperIntervalMs } : {}),
       });
       this.reaper.start();
+    }
+    /**
+     * push 감시자 — 상태 변화를 등록된 구독으로 민다.
+     *
+     * ★리퍼와 따로 두는 이유: 리퍼 주기(5분)는 메일함 회수에 맞춘 값이라 알림에는 너무
+     * 느리다. 반대로 리퍼를 빠르게 하면 회수 스윕이 그만큼 자주 돈다 — 두 일이 요구하는
+     * 주기가 다르므로 타이머를 나눈다.
+     */
+    if (this.opts.push) {
+      this.pushWatcher = new PushWatcher({
+        db: this.db,
+        logger: log,
+        fetch: createGuardedFetch(),
+        store: this.store,
+        ...(this.opts.push.pollMs !== undefined ? { intervalMs: this.opts.push.pollMs } : {}),
+      });
+      this.pushWatcher.start();
     }
     const gcMode = this.opts.blobGcMode ?? "mark";
     if (gcMode !== "off") {
@@ -1858,6 +1890,7 @@ export class IonosphereApp {
       src.close?.();
     }
     if (this.reaper) await this.reaper.stop();
+    this.pushWatcher?.stop();
     if (this.blobGc) await this.blobGc.stop();
     if (this.lmtp) await this.lmtp.close();
     if (this.httpRedirect) await this.httpRedirect.close();
