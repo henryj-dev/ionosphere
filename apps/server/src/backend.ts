@@ -70,7 +70,12 @@ function buildSieveEnv(
   env: { mailFrom: string; rcptTo: readonly string[] },
   size: number,
   mailboxes: readonly string[],
-  extra: { raw?: Uint8Array; spamScore?: number | undefined; wantContentParts?: boolean } = {},
+  extra: {
+    raw?: Uint8Array;
+    spamScore?: number | undefined;
+    wantContentParts?: boolean;
+    scripts?: ReadonlyMap<string, string>;
+  } = {},
 ): SieveEnv {
   /**
    * `body :raw`(RFC 5173)는 **헤더 뒤 전체**다. 헤더 경계는 `@ionosphere/mime`의 정본
@@ -95,6 +100,7 @@ function buildSieveEnv(
     ...(bodyRaw !== undefined ? { bodyRaw } : {}),
     ...(bodyParts !== undefined ? { bodyParts } : {}),
     ...(extra.spamScore !== undefined ? { spamScore: normalizeSpamScore(extra.spamScore) } : {}),
+    ...(extra.scripts ? { scripts: extra.scripts } : {}),
   };
 }
 
@@ -647,11 +653,19 @@ export class IonosphereSmtpBackend implements SmtpBackend {
     let rows = await this.store.listMailboxes(accountId);
     let pathToId = buildMailboxPathMap(rows);
 
+    /**
+     * `include`(RFC 6609)를 쓰는 스크립트만 나머지 스크립트를 읽는다 — 안 쓰는 계정에서
+     * 조회 한 번을 더 도는 것은 배달 경로에서 그냥 손해다. `include`는 리터럴 키워드라
+     * 문자열 검사로 거르는 것이 안전하다(오탐은 비용만, 누락은 불가능).
+     */
+    const scripts = script.includes("include") ? await this.store.getSieveScriptSources(accountId) : undefined;
+
     let result;
     try {
       result = runSieve(
         script,
         buildSieveEnv(parsed, env, size, [...pathToId.keys()], {
+          ...(scripts ? { scripts } : {}),
           ...(content.raw ? { raw: content.raw } : {}),
           ...(content.spamScore !== undefined ? { spamScore: content.spamScore } : {}),
           // 리터럴 태그가 있어야 파서가 읽으므로 문자열 검사로 거른다(오탐은 비용만).

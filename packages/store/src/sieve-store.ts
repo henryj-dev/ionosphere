@@ -84,3 +84,22 @@ export async function renameSieveScript(s: StoreInternals, accountId: string, fr
     }),
   );
 }
+
+
+/**
+ * `include`(RFC 6609)가 부를 수 있는 스크립트 전체 — 이름 → 소스.
+ *
+ * ★활성 스크립트가 **아닌** 것들이 대상이다. 활성은 진입점이고, 나머지는 그 진입점이
+ * `include`로 부르는 조각이다 — 그래서 여기서 걸러내지 않고 전부 싣는다(활성 스크립트가
+ * 자기를 부르는 것은 평가기의 깊이 상한이 막는다).
+ *
+ * ★스크립트가 하나뿐이면(대부분) 빈 맵과 다름없는 비용이다. 그래도 `include`를 쓰지 않는
+ * 계정에서 이 조회를 돌지 않도록, 호출자가 진입점 소스에 `include`가 있을 때만 부른다.
+ */
+export async function getSieveScriptSources(s: StoreInternals, accountId: string): Promise<Map<string, string>> {
+  const { rows } = await s.db.query({
+    sql: "SELECT name, content FROM sieve_scripts WHERE account_id = ?",
+    params: [accountId],
+  });
+  return new Map(rows.map((r) => [String(r.name), String(r.content)]));
+}

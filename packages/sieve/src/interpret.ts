@@ -8,8 +8,9 @@
  * **원격 발신자가 보낸 `Subject:`** 가 매칭 값이 되므로, 계정 하나로 전 테넌트의 메일을
  * 세울 수 있었다(실측 19.6초). IMAP LIST에 같은 결함이 복제돼 있었다 — glob.ts 머리 주석 참조.
  */
-import { compileGlob, SIEVE_MATCH_SYNTAX } from "@ionosphere/core";
+import { compileGlob, globCaptures, SIEVE_MATCH_SYNTAX } from "@ionosphere/core";
 import { datePartOf, isDatePart, parseHeaderDate, parseZoneOffset } from "./date-parts.ts";
+import { applyModifiers, isModifier, isValidVariableName, SieveVariables, type Modifier } from "./variables.ts";
 import type { SieveArg, SieveCommand, SieveTest } from "./ast.ts";
 import { parseSieve } from "./parser.ts";
 
@@ -60,6 +61,16 @@ export interface SieveEnv {
   spamScore?: number;
   /** `currentdate`(RFC 5260)의 "지금". 테스트 결정성을 위해 주입받는다. */
   now?: number;
+  /**
+   * `include`(RFC 6609)가 부를 수 있는 **개인 스크립트** — 이름 → 소스.
+   *
+   * ★평가기는 저장소를 모른다. 조립층이 계정의 스크립트를 미리 실어 준다 — 그래야
+   * 평가가 순수하게 남고, 스크립트 하나 실행에 DB 왕복이 끼어들지 않는다.
+   *
+   * `:global`은 지원하지 않는다. 이 저장소에 전역 스크립트라는 개념이 없어서, 있는 척하면
+   * 사용자가 만들 수 없는 것을 부르게 된다(`:optional`이면 조용히 넘어간다).
+   */
+  scripts?: ReadonlyMap<string, string>;
 }
 
 /** 실행 결과 — 배달 파이프라인이 해석. keep=INBOX 배달, fileinto=지정 메일함. */
@@ -149,6 +160,8 @@ export const SUPPORTED_EXTENSION_LIST = [
   "date",
   "spamtest",
   "comparator-i;ascii-numeric",
+  "include",
+  "variables",
 ] as const;
 
 const SUPPORTED_EXTENSIONS: ReadonlySet<string> = new Set(SUPPORTED_EXTENSION_LIST);
@@ -156,8 +169,33 @@ const SUPPORTED_EXTENSIONS: ReadonlySet<string> = new Set(SUPPORTED_EXTENSION_LI
 interface ExecState {
   env: SieveEnv;
   result: { keep: boolean; fileinto: string[]; fileintoCreate: string[]; redirect: string[]; flags: Set<string>; canceledImplicit: boolean; explicitKeep: boolean; reject: string | null; vacation: VacationRequest | null };
+  /** `stop` — **스크립트 전체**를 끝낸다. include된 스크립트에서 써도 바깥까지 멈춘다(RFC 6609 §3.2). */
   stopped: boolean;
+  /** `return` — **이 스크립트만** 끝내고 부른 쪽으로 돌아간다(RFC 6609 §3.3). */
+  returned: boolean;
+  /** `include :once`가 이미 부른 스크립트들. 이름은 정규화 없이 그대로 쓴다. */
+  included: Set<string>;
+  /** 현재 중첩 깊이 — 순환 include를 여기서 끊는다. */
+  depth: number;
+  /** `variables`(RFC 5229) 저장소. include된 스크립트와 **공유한다**(§3.2: 하나처럼 동작한다). */
+  vars: SieveVariables;
+  /**
+   * `require "variables"`를 했나.
+   *
+   * ★안 했으면 `${...}`는 **평범한 글자**다(§3). 전개해 버리면 본문에 우연히 `${x}`가 들어간
+   * 기존 스크립트의 뜻이 조용히 바뀐다. 캡처를 만드는 비용도 여기서 갈린다.
+   */
+  varsEnabled: boolean;
 }
+
+/**
+ * `include` 중첩 상한 (RFC 6609 §3.2가 상한을 두라고 요구한다).
+ *
+ * ★순환 include는 `:once` 없이도 만들 수 있고(A→B→A), 그건 배달 경로에서 도는 무한 루프라
+ * **프로세스 전체가 멈춘다**(이 서버는 모든 프로토콜이 한 프로세스다). 깊이로 끊는 것이
+ * 이름 추적보다 확실하다 — 이름을 바꿔 가며 도는 형태까지 잡는다.
+ */
+const MAX_INCLUDE_DEPTH = 3;
 
 /** 스크립트 소스를 실행. 파싱/require 오류는 throw(호출자가 암묵 keep으로 폴백). */
 export function runSieve(src: string, env: SieveEnv): SieveResult {
@@ -166,6 +204,11 @@ export function runSieve(src: string, env: SieveEnv): SieveResult {
     env,
     result: { keep: false, fileinto: [], fileintoCreate: [], redirect: [], flags: new Set(), canceledImplicit: false, explicitKeep: false, reject: null, vacation: null },
     stopped: false,
+    returned: false,
+    included: new Set(),
+    depth: 0,
+    vars: new SieveVariables(),
+    varsEnabled: false,
   };
   execBlock(cmds, state);
   const r = state.result;
@@ -191,16 +234,31 @@ export function runSieve(src: string, env: SieveEnv): SieveResult {
   };
 }
 
+/**
+ * 인자의 모든 문자열에 `${...}`를 전개한 **새 인자 배열**을 만든다.
+ *
+ * ★전개를 여기 한 곳에서 하는 이유: 인자를 읽는 헬퍼가 여럿인데(위치 인자·태그 값·플래그
+ * 목록) 각자 전개하게 하면 한 곳을 빠뜨리고, 빠진 자리는 `${...}`가 **글자 그대로** 남아
+ * 사용자가 "왜 여기만 안 되지"를 겪는다. 평가 직전에 통째로 펴면 그 갈래가 없다.
+ *
+ * `require "variables"` 전에는 아무것도 하지 않는다 — 전개는 옵트인이다(§3).
+ */
+function withExpanded(args: readonly SieveArg[], st: ExecState): readonly SieveArg[] {
+  if (!st.varsEnabled) return args;
+  return args.map((a) => (a.kind === "strings" ? { kind: "strings" as const, values: a.values.map((v) => st.vars.expand(v)) } : a));
+}
+
 function execBlock(cmds: readonly SieveCommand[], st: ExecState): void {
   let prevMatched = false; // if/elsif 체인 상태
   for (const cmd of cmds) {
-    if (st.stopped) return;
+    // `stop`은 전체를, `return`은 이 스크립트만 끝낸다 — 둘 다 여기서 빠져나간다.
+    if (st.stopped || st.returned) return;
     if (cmd.name === "if") {
-      prevMatched = evalTest(cmd.test!, st.env);
+      prevMatched = evalTest(cmd.test!, st.env, st);
       if (prevMatched) execBlock(cmd.block ?? [], st);
     } else if (cmd.name === "elsif") {
       if (!prevMatched) {
-        prevMatched = evalTest(cmd.test!, st.env);
+        prevMatched = evalTest(cmd.test!, st.env, st);
         if (prevMatched) execBlock(cmd.block ?? [], st);
       }
     } else if (cmd.name === "else") {
@@ -213,18 +271,97 @@ function execBlock(cmds: readonly SieveCommand[], st: ExecState): void {
   }
 }
 
-function execAction(cmd: SieveCommand, st: ExecState): void {
+function execAction(rawCmd: SieveCommand, st: ExecState): void {
   const r = st.result;
+  /**
+   * ★`set`만은 **전개된 인자로 실행하되** 값이 자기 자신을 참조하는 재귀는 없다
+   * (`variables.ts`의 `expand`가 한 번만 편다). 나머지 명령도 같은 규칙이라 여기서
+   * 통째로 편다 — 명령마다 전개하면 한 곳을 빠뜨린다.
+   */
+  const cmd: SieveCommand = { ...rawCmd, args: [...withExpanded(rawCmd.args, st)] };
   switch (cmd.name) {
     case "require": {
       const exts = firstStrings(cmd.args);
       for (const e of exts) {
         if (!SUPPORTED_EXTENSIONS.has(e)) throw new SieveError(`unsupported extension: ${e}`);
+        if (e === "variables") st.varsEnabled = true;
       }
+      return;
+    }
+    /**
+     * `set`(RFC 5229 §4) — 변수에 값을 넣는다.
+     *
+     * ★`require "variables"` 없이는 오류다. 안 그러면 전개도 안 되는 상태에서 값만 쌓여
+     * "설정은 되는데 읽히지 않는" 침묵이 된다.
+     */
+    case "set": {
+      if (!st.varsEnabled) throw new SieveError('set requires: require "variables"');
+      const mods = new Set<Modifier>();
+      for (const a of cmd.args) {
+        if (a.kind !== "tag") continue;
+        if (!isModifier(a.name)) throw new SieveError(`unknown set modifier: :${a.name}`);
+        mods.add(a.name);
+      }
+      const positional = positionalStrings(cmd.args, new Set());
+      const name = positional[0];
+      const value = positional[1];
+      if (name === undefined || value === undefined) throw new SieveError("set requires a name and a value");
+      if (!isValidVariableName(name)) throw new SieveError(`invalid variable name: ${name}`);
+      st.vars.set(name, applyModifiers(value, mods));
       return;
     }
     case "stop":
       st.stopped = true;
+      return;
+    /**
+     * `include`(RFC 6609) — 다른 개인 스크립트를 **이 자리에서** 실행한다.
+     *
+     * ★부작용은 부른 쪽과 **공유한다**(§3.2: 하나의 스크립트처럼 동작한다). fileinto·flag가
+     * 같은 결과에 쌓이고 `stop`은 바깥까지 멈춘다. 그래서 별도 상태를 만들지 않고 같은
+     * `ExecState`를 그대로 넘긴다 — 나누면 include된 규칙의 처분이 사라진다.
+     */
+    case "include": {
+      const name = positionalStrings(cmd.args, new Set())[0];
+      if (name === undefined) throw new SieveError("include requires a script name");
+      const optional = hasTag(cmd.args, "optional");
+
+      // `:global`은 이 저장소에 개념이 없다 — 있는 척하면 만들 수 없는 것을 부르게 된다.
+      if (hasTag(cmd.args, "global")) {
+        if (optional) return;
+        throw new SieveError("include :global is not supported");
+      }
+      if (hasTag(cmd.args, "once") && st.included.has(name)) return;
+
+      const src = st.env.scripts?.get(name);
+      if (src === undefined) {
+        // §3.2 — `:optional`이면 없는 스크립트를 조용히 넘긴다. 아니면 오류다.
+        if (optional) return;
+        throw new SieveError(`included script not found: ${name}`);
+      }
+      if (st.depth >= MAX_INCLUDE_DEPTH) {
+        throw new SieveError(`include nesting too deep (max ${MAX_INCLUDE_DEPTH})`);
+      }
+
+      st.included.add(name);
+      st.depth += 1;
+      /**
+       * ★`return`은 **이 스크립트만** 끝낸다. 들어가기 전 값을 저장했다가 되돌리지 않으면
+       * include된 스크립트의 `return`이 바깥 스크립트까지 멈춘다 — `stop`과 구분이 사라진다.
+       */
+      const outerReturned = st.returned;
+      st.returned = false;
+      try {
+        execBlock(parseSieve(src), st);
+      } finally {
+        st.depth -= 1;
+        st.returned = outerReturned;
+      }
+      return;
+    }
+    /** `return`(RFC 6609 §3.3) — 이 스크립트만 끝낸다. 최상위에서는 `stop`과 같다. */
+    case "return":
+      if (st.depth > 0) st.returned = true;
+      else st.stopped = true;
       return;
     case "reject":
     case "ereject": {
@@ -311,18 +448,25 @@ function execAction(cmd: SieveCommand, st: ExecState): void {
 
 // ── 테스트 평가 ────────────────────────────────────────────────────────────────
 
-function evalTest(test: SieveTest, env: SieveEnv): boolean {
+function evalTest(test: SieveTest, env: SieveEnv, st: ExecState): boolean {
+  // 평가 직전에 통째로 편다 — 인자를 읽는 헬퍼마다 전개하면 한 곳을 빠뜨린다.
+  const expanded: SieveTest = { ...test, args: [...withExpanded(test.args, st)] };
+  return evalExpandedTest(expanded, env, st);
+}
+
+function evalExpandedTest(test: SieveTest, env: SieveEnv, st: ExecState): boolean {
+  const vars = st.varsEnabled ? st.vars : undefined;
   switch (test.name) {
     case "true":
       return true;
     case "false":
       return false;
     case "not":
-      return !evalTest(test.tests[0]!, env);
+      return !evalTest(test.tests[0]!, env, st);
     case "allof":
-      return test.tests.every((t) => evalTest(t, env));
+      return test.tests.every((t) => evalTest(t, env, st));
     case "anyof":
-      return test.tests.some((t) => evalTest(t, env));
+      return test.tests.some((t) => evalTest(t, env, st));
     case "exists": {
       const names = firstStrings(test.args).map((s) => s.toLowerCase());
       return names.every((nm) => (env.headers.get(nm)?.length ?? 0) > 0);
@@ -347,7 +491,7 @@ function evalTest(test: SieveTest, env: SieveEnv): boolean {
       const names = strs[0] ?? [];
       const keys = strs[1] ?? [];
       const values = names.flatMap((nm) => env.headers.get(nm.toLowerCase()) ?? []);
-      return anyMatch(values, keys, match, isNumericComparator(test.args));
+      return anyMatch(values, keys, match, isNumericComparator(test.args), vars);
     }
     case "address": {
       const match = matchType(test.args);
@@ -357,7 +501,7 @@ function evalTest(test: SieveTest, env: SieveEnv): boolean {
       const names = strs[0] ?? [];
       const keys = strs[1] ?? [];
       const values = names.flatMap((nm) => (env.headers.get(nm.toLowerCase()) ?? []).flatMap((h) => extractAddresses(h).map((a) => addrPart(a, part, delim))));
-      return anyMatch(values, keys, match, isNumericComparator(test.args));
+      return anyMatch(values, keys, match, isNumericComparator(test.args), vars);
     }
     case "envelope": {
       const match = matchType(test.args);
@@ -371,7 +515,7 @@ function evalTest(test: SieveTest, env: SieveEnv): boolean {
         if (f === "from") values.push(addrPart(env.envelopeFrom, part, delim));
         else if (f === "to") for (const t of env.envelopeTo) values.push(addrPart(t, part, delim));
       }
-      return anyMatch(values, keys, match, isNumericComparator(test.args));
+      return anyMatch(values, keys, match, isNumericComparator(test.args), vars);
     }
     /**
      * `mailboxexists`(RFC 5490 §3.1) — 나열한 메일함이 **전부** 있으면 참.
@@ -397,7 +541,7 @@ function evalTest(test: SieveTest, env: SieveEnv): boolean {
       const keys = positionalStrings(test.args, BODY_VALUE_TAGS);
       if (keys.length === 0) throw new SieveError("body requires a key");
       const values = bodyValues(test.args, env);
-      return anyMatch(values, keys, match, isNumericComparator(test.args));
+      return anyMatch(values, keys, match, isNumericComparator(test.args), vars);
     }
     /**
      * `date` / `currentdate` (RFC 5260) — 헤더 날짜/현재 시각의 **조각**을 비교한다.
@@ -432,7 +576,7 @@ function evalTest(test: SieveTest, env: SieveEnv): boolean {
         // `currentdate`에는 `:originalzone`이 없다(§4) — 원 시간대라는 개념이 없다.
         offset = zoneOffsetArg(test.args);
       }
-      return anyMatch([datePartOf(ms, offset, partName)], keys, match, isNumericComparator(test.args));
+      return anyMatch([datePartOf(ms, offset, partName)], keys, match, isNumericComparator(test.args), vars);
     }
     /**
      * `spamtest`(RFC 5235) — 정규화된 스팸 점수. `"0"`은 **검사 안 함**이고 `"1"`이
@@ -453,7 +597,19 @@ function evalTest(test: SieveTest, env: SieveEnv): boolean {
       const value =
         score === undefined ? "0" : percent ? String(Math.round(((score - 1) / 9) * 100)) : String(score);
       // 비교자를 안 줬어도 숫자로 본다 — 문자열 비교면 "10" < "5"가 참이 되어 뜻이 뒤집힌다.
-      return anyMatch([value], keys, match, true);
+      return anyMatch([value], keys, match, true, vars);
+    }
+    /**
+     * `string`(RFC 5229 §5) — 변수 값 자체를 검사한다. 헤더가 아니라 **문자열**이 원본이라
+     * `${x}` 전개 결과를 그대로 비교할 수 있다(전개는 이미 위에서 끝났다).
+     */
+    case "string": {
+      const match = matchType(test.args);
+      const groups = positionalStringGroups(test.args, TEST_VALUE_TAGS);
+      const sources = groups[0] ?? [];
+      const keys = groups[1] ?? [];
+      if (keys.length === 0) throw new SieveError("string requires a key");
+      return anyMatch(sources, keys, match, isNumericComparator(test.args), vars);
     }
     default:
       throw new SieveError(`unknown test: ${test.name}`);
@@ -536,7 +692,17 @@ function relate(rel: Relation, a: string, b: string, numeric: boolean): boolean 
  * ★`:matches` 패턴은 **키마다 한 번만** 컴파일한다. 값이 여러 개일 때(헤더가 여러 줄,
  * 주소가 여럿) 예전 구현은 (값 × 키)마다 정규식을 다시 만들었다.
  */
-function anyMatch(values: readonly string[], keys: readonly string[], kind: MatchKind, numeric = false): boolean {
+function anyMatch(
+  values: readonly string[],
+  keys: readonly string[],
+  kind: MatchKind,
+  numeric = false,
+  /**
+   * `:matches` 성공 시 캡처를 여기 기록한다(RFC 5229 §3의 `${1}`). 없으면 캡처를 만들지
+   * 않는다 — `variables`를 안 쓰는 스크립트에서 표를 만드는 것은 그냥 손해다.
+   */
+  vars?: SieveVariables,
+): boolean {
   /**
    * ★`:count`는 **값의 개수**를 비교한다(RFC 5231 §5) — 값 하나하나가 아니라.
    * 값 순회 앞에서 끝내야 하는 이유다(순회 안에서 세면 "개수"라는 의미가 사라진다).
@@ -547,6 +713,21 @@ function anyMatch(values: readonly string[], keys: readonly string[], kind: Matc
   }
   if (kind.kind === "value") {
     return values.some((v) => keys.some((k) => relate(kind.rel, numeric ? v : v.toLowerCase(), numeric ? k : k.toLowerCase(), numeric)));
+  }
+  /**
+   * ★캡처가 필요할 때만 `globCaptures`로 간다. 캡처 복원은 DP 표 전체를 만들어야 해서
+   * 불리언 판정보다 비싸다 — `${1}`을 안 쓰는 스크립트가 그 값을 치를 이유가 없다.
+   */
+  if (kind.kind === "matches" && vars !== undefined) {
+    for (const v of values) {
+      for (const k of keys) {
+        const r = globCaptures(k.toLowerCase(), v, SIEVE_MATCH_SYNTAX);
+        if (!r.matched) continue;
+        vars.setMatches(v, r.captures);
+        return true;
+      }
+    }
+    return false;
   }
   const matchers = kind.kind === "matches" ? keys.map((k) => compileGlob(k.toLowerCase(), SIEVE_MATCH_SYNTAX)) : null;
   for (const v of values) {

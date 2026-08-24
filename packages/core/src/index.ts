@@ -83,6 +83,7 @@ export { applyLegacyEnvAliases, LegacyEnvConflictError } from "./env-legacy.ts";
 export { PeerConnectionLimiter, DEFAULT_MAX_CONNECTIONS_PER_PEER } from "./peer-limit.ts";
 export {
   compileGlob,
+  globCaptures,
   globMatch,
   imapListSyntax,
   SIEVE_MATCH_SYNTAX,

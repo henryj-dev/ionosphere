@@ -38,6 +38,7 @@ import type { AccountSnapshot, StoreInternals } from "./internals.ts";
 import {
   deleteSieveScript,
   getActiveSieveScript,
+  getSieveScriptSources,
   getSieveScript,
   listSieveScripts,
   putSieveScript,
@@ -2060,6 +2061,11 @@ export class Store {
   // ── Sieve 스크립트 저장소 — 구현은 sieve-store.ts ────────────────────────
   getActiveSieveScript(accountId: string): Promise<string | null> {
     return getActiveSieveScript(this.internals, accountId);
+  }
+
+  /** `include`(RFC 6609)용 — 이름 → 소스. 조립층이 진입점에 `include`가 있을 때만 부른다. */
+  getSieveScriptSources(accountId: string): Promise<Map<string, string>> {
+    return getSieveScriptSources(this.internals, accountId);
   }
 
   putSieveScript(accountId: string, name: string, content: string): Promise<void> {

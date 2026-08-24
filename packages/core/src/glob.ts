@@ -200,3 +200,115 @@ export function compileGlob(pattern: string, syntax: GlobSyntax): (value: string
   const tokens = tokenize(pattern, syntax);
   return (value: string) => matchTokens(tokens, value, syntax);
 }
+
+
+// ── 캡처 추출 (Sieve `variables`, RFC 5229 §3) ─────────────────────────────────
+
+/**
+ * 캡처를 만들 때 허용하는 **DP 표 크기**(칸 수).
+ *
+ * ★불리언 매칭은 행 하나만 굴려 메모리가 O(값 길이)지만, 캡처를 복원하려면 표 전체가
+ * 필요하다(토큰 수 × 값 길이). `body :matches`처럼 10MB 본문에 걸면 그 표가 곧 메모리
+ * 폭발이라, 상한을 넘으면 **매칭 여부만** 답하고 캡처는 비운다. 헤더·주소처럼 짧은 값
+ * (실제 `${1}` 쓰임새의 거의 전부)은 이 상한에 걸리지 않는다.
+ */
+const MAX_CAPTURE_CELLS = 1_000_000;
+
+export interface GlobCaptureResult {
+  matched: boolean;
+  /**
+   * 와일드카드가 먹은 조각들 — 패턴에 나온 **순서대로**.
+   * 상한을 넘어 캡처를 만들지 않은 경우에도 빈 배열이다(matched는 정확하다).
+   */
+  captures: string[];
+}
+
+/**
+ * 매칭 여부 + 와일드카드가 먹은 조각들.
+ *
+ * ★와일드카드는 **탐욕적**이다(앞쪽이 최대한 먹는다). RFC 5229는 탐욕/게으름을 규정하지
+ * 않는데, 정하지 않으면 같은 스크립트가 구현마다 다른 `${1}`을 보게 된다. 정규식의 `*`와
+ * 같은 쪽으로 고정하면 사용자가 예상하기 쉽다.
+ *
+ * ★여기서도 정규식을 만들지 않는다. "끝까지 갈 수 있는가"를 담은 역방향 표를 먼저 만들고
+ * 앞에서부터 최대로 먹으며 내려간다 — 되돌아가는 개념이 없어 폭발이 성립하지 않는다.
+ */
+export function globCaptures(pattern: string, value: string, syntax: GlobSyntax): GlobCaptureResult {
+  const tokens = tokenize(pattern, syntax);
+  const n = tokens.length;
+  const m = value.length;
+  if ((n + 1) * (m + 1) > MAX_CAPTURE_CELLS) {
+    return { matched: matchTokens(tokens, value, syntax), captures: [] };
+  }
+
+  const hay = syntax.caseInsensitive ? value.toLowerCase() : value;
+  const boundary = syntax.boundary;
+
+  /** `canFinish[i * (m+1) + j]` = 토큰 i..n-1이 값 j..m-1을 먹을 수 있나. */
+  const canFinish = new Uint8Array((n + 1) * (m + 1));
+  canFinish[n * (m + 1) + m] = 1; // 토큰도 값도 다 썼다
+  for (let i = n - 1; i >= 0; i--) {
+    const tok = tokens[i]!;
+    const row = i * (m + 1);
+    const next = (i + 1) * (m + 1);
+    switch (tok.kind) {
+      case "literal": {
+        const ch = syntax.caseInsensitive ? tok.ch.toLowerCase() : tok.ch;
+        for (let j = 0; j < m; j++) if (hay[j] === ch) canFinish[row + j] = canFinish[next + j + 1]!;
+        break;
+      }
+      case "single":
+        for (let j = 0; j < m; j++) canFinish[row + j] = canFinish[next + j + 1]!;
+        break;
+      case "star": {
+        // 뒤에서부터 누적 OR — j에서 시작해 어디까지든 먹고 나머지가 끝나면 참이다.
+        let run = 0;
+        for (let j = m; j >= 0; j--) {
+          run |= canFinish[next + j]!;
+          canFinish[row + j] = run;
+        }
+        break;
+      }
+      case "starWithin": {
+        // `%`는 구분자를 넘지 못하므로 누적을 구분자에서 끊는다(불리언 판정과 같은 규칙).
+        let run = canFinish[next + m]!;
+        canFinish[row + m] = run;
+        for (let j = m - 1; j >= 0; j--) {
+          run = boundary !== undefined && hay[j] === boundary ? canFinish[next + j]! : run | canFinish[next + j]!;
+          canFinish[row + j] = run;
+        }
+        break;
+      }
+    }
+  }
+
+  if (canFinish[0] !== 1) return { matched: false, captures: [] };
+
+  // 앞에서부터 **최대로** 먹으며 내려간다 — 각 단계에서 "끝까지 갈 수 있는" 가장 먼 지점.
+  const captures: string[] = [];
+  let j = 0;
+  for (let i = 0; i < n; i++) {
+    const tok = tokens[i]!;
+    const next = (i + 1) * (m + 1);
+    if (tok.kind === "literal") {
+      j += 1;
+      continue;
+    }
+    if (tok.kind === "single") {
+      captures.push(value.slice(j, j + 1));
+      j += 1;
+      continue;
+    }
+    let end = j;
+    for (let k = m; k >= j; k--) {
+      if (canFinish[next + k] !== 1) continue;
+      // `%`는 구분자를 넘지 못한다 — 넘는 구간은 후보에서 뺀다.
+      if (tok.kind === "starWithin" && boundary !== undefined && hay.slice(j, k).includes(boundary)) continue;
+      end = k;
+      break;
+    }
+    captures.push(value.slice(j, end));
+    j = end;
+  }
+  return { matched: true, captures };
+}

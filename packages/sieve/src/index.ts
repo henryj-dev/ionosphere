@@ -3,3 +3,5 @@ export { parseSieve } from "./parser.ts";
 export { tokenize, SieveSyntaxError, type Token } from "./lexer.ts";
 export { runSieve, SieveError, SUPPORTED_EXTENSION_LIST, type SieveEnv, type SieveResult, type VacationRequest } from "./interpret.ts";
 export type { SieveArg, SieveCommand, SieveTest } from "./ast.ts";
+export { applyModifiers, isValidVariableName, SieveVariables, type Modifier } from "./variables.ts";
+export { datePartOf, isDatePart, parseHeaderDate, parseZoneOffset, type DatePart } from "./date-parts.ts";

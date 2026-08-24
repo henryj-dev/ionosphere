@@ -129,9 +129,9 @@ describe("제어 흐름·플래그·오류", () => {
   });
 
   test("미지원 확장 require → SieveError", () => {
-    // ★예시를 `vacation`에서 바꿨다 — 2026-08-24에 지원 목록에 들어갔다.
-    //   지원 확장이 늘 때마다 여기가 깨지는 것이 맞다(그게 이 테스트가 하는 일이다).
-    expect(() => runSieve('require "variables"; keep;', env())).toThrow(SieveError);
+    // ★지원 확장이 늘 때마다 여기가 깨지는 것이 맞다(그게 이 테스트가 하는 일이다).
+    //   `vacation`(→F2)·`variables`(→F5)가 차례로 지원 목록에 들어가 예시를 두 번 바꿨다.
     expect(() => runSieve('require "editheader"; keep;', env())).toThrow(SieveError);
+    expect(() => runSieve('require "extlists"; keep;', env())).toThrow(SieveError);
   });
 });
