@@ -161,6 +161,8 @@ export class IonosphereImapBackend implements ImapBackend {
           return await this.storeFlags(accountId, req);
         case "appendMessage":
           return await this.appendMessage(accountId, req);
+        case "replaceMessage":
+          return await this.replaceMessage(accountId, req);
         case "copyMessages":
           return await this.copyOrMove(accountId, req.from, req.to, req.uids, "copy");
         case "moveMessages":
@@ -648,6 +650,49 @@ export class IonosphereImapBackend implements ImapBackend {
       if (deletedAt[i] === true) await this.store.setDeleted({ accountId, mailboxId: found.row.id, uids: [uids[i]!], deleted: true });
     }
     return { kind: "appended", uidvalidity: found.row.uidvalidity, uid: uids[0]!, uids };
+  }
+
+  /**
+   * REPLACE (RFC 8508) — 넣고 **그다음에** 지운다.
+   *
+   * ★순서가 안전성의 전부다. 지우기를 먼저 하면 넣기가 실패했을 때 메일이 사라진다.
+   * 이 순서면 최악이 사본 하나가 남는 것이고 사용자가 지울 수 있다 — `유실 > 지연`이라는
+   * 이 저장소의 판단과 같은 방향이다.
+   *
+   * ★지우기 실패를 **삼킨다**(`expungedUid: null`). 새 메시지는 이미 들어갔으므로 여기서
+   * 오류를 내면 클라이언트가 실패로 알고 다시 보내 중복이 하나 더 생긴다.
+   */
+  private async replaceMessage(
+    accountId: string,
+    req: Extract<ImapBackendRequest, { kind: "replaceMessage" }>,
+  ): Promise<ImapBackendResponse> {
+    const from = await this.findByPath(accountId, req.from);
+    if (!from) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
+    const to = await this.findByPath(accountId, req.to);
+    if (!to) return { kind: "no", code: "TRYCREATE", message: "no such target mailbox" };
+
+    const appended = await this.appendMessage(accountId, {
+      kind: "appendMessage",
+      name: req.to,
+      flags: req.flags,
+      internalDateMs: req.internalDateMs,
+      raw: req.raw,
+    });
+    if (appended.kind !== "appended") return appended;
+
+    let expungedUid: number | null = null;
+    try {
+      await this.store.setDeleted({ accountId, mailboxId: from.row.id, uids: [req.oldUid], deleted: true });
+      const r = await this.store.expunge({ accountId, mailboxId: from.row.id, uids: [req.oldUid] });
+      if (r.expunged.some((e) => e.uid === req.oldUid)) expungedUid = req.oldUid;
+    } catch (err) {
+      // 새 메시지는 이미 들어갔다 — 여기서 실패해도 명령은 성공이다(사본이 하나 남을 뿐).
+      this.log.warn("REPLACE: 옛 메시지 정리 실패 — 사본이 남는다", {
+        uid: req.oldUid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return { kind: "replaced", uidvalidity: to.row.uidvalidity, uid: appended.uid, expungedUid };
   }
 
   private async copyOrMove(

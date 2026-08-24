@@ -189,3 +189,92 @@ describe("MULTIAPPEND (RFC 3502)", () => {
     await ctx.db.close();
   });
 });
+
+describe("REPLACE (RFC 8508)", () => {
+  /** 드래프트 수정 — 새 것이 들어오고 옛 것이 사라진다. */
+  test("한 명령으로 바꾼다", async () => {
+    const ctx = await setup();
+    const run = await session(ctx);
+    const oldRaw = MSG("old");
+    await run(`p1 APPEND INBOX {${oldRaw.length}+}\r\n${oldRaw}\r\n`);
+    await run("s1 SELECT INBOX\r\n");
+
+    const newRaw = MSG("new");
+    const out = await run(`r1 REPLACE 1 INBOX {${newRaw.length}+}\r\n${newRaw}\r\n`);
+    expect(out).toContain("OK [APPENDUID");
+    expect(out).toContain("EXPUNGE");
+
+    await run("s2 SELECT INBOX\r\n");
+    const fetched = await run("f1 FETCH 1 (BODY.PEEK[HEADER.FIELDS (SUBJECT)])\r\n");
+    expect(fetched).toContain("new");
+    expect(fetched).not.toContain("old");
+    await ctx.db.close();
+  });
+
+  test("다른 메일함으로도 바꿀 수 있다", async () => {
+    const ctx = await setup();
+    await ctx.store.createMailbox({ accountId: ctx.accountId, name: "Sent" });
+    const run = await session(ctx);
+    const oldRaw = MSG("draft");
+    await run(`p1 APPEND INBOX {${oldRaw.length}+}\r\n${oldRaw}\r\n`);
+    await run("s1 SELECT INBOX\r\n");
+    const newRaw = MSG("sent");
+    expect(await run(`r1 REPLACE 1 Sent {${newRaw.length}+}\r\n${newRaw}\r\n`)).toContain("OK [APPENDUID");
+
+    const { rows } = await ctx.db.query({
+      sql: "SELECT COUNT(*) AS n FROM message_mailbox WHERE mailbox_id = ?",
+      params: [ctx.mailboxId],
+    });
+    expect(Number(rows[0]!.n)).toBe(0); // INBOX는 비었다
+    await ctx.db.close();
+  });
+
+  /**
+   * ★**옛 것을 먼저 지우지 않는다**(§3의 핵심). 없는 메일함으로 REPLACE하면 넣기가
+   * 실패하는데, 그때 옛 메시지가 **남아 있어야** 한다 — 아니면 메일이 사라진다.
+   */
+  test("넣기가 실패하면 옛 메시지가 남는다", async () => {
+    const ctx = await setup();
+    const run = await session(ctx);
+    const oldRaw = MSG("old");
+    await run(`p1 APPEND INBOX {${oldRaw.length}+}\r\n${oldRaw}\r\n`);
+    await run("s1 SELECT INBOX\r\n");
+
+    const newRaw = MSG("new");
+    expect(await run(`r1 REPLACE 1 Nope {${newRaw.length}+}\r\n${newRaw}\r\n`)).toContain("NO");
+
+    const { rows } = await ctx.db.query({ sql: "SELECT COUNT(*) AS n FROM messages", params: [] });
+    expect(Number(rows[0]!.n)).toBe(1); // 옛 것이 그대로다
+    await ctx.db.close();
+  });
+
+  /** §3 — REPLACE는 **한 통**을 바꾼다. 집합을 허용하면 뜻이 없다. */
+  test("여러 통을 지정하면 NO", async () => {
+    const ctx = await setup();
+    const run = await session(ctx);
+    const raw = MSG("a");
+    await run(`p1 APPEND INBOX {${raw.length}+}\r\n${raw}\r\n`);
+    await run(`p2 APPEND INBOX {${raw.length}+}\r\n${raw}\r\n`);
+    await run("s1 SELECT INBOX\r\n");
+    expect(await run(`r1 REPLACE 1:2 INBOX {${raw.length}+}\r\n${raw}\r\n`)).toContain("NO");
+    await ctx.db.close();
+  });
+
+  test("UID REPLACE도 된다", async () => {
+    const ctx = await setup();
+    const run = await session(ctx);
+    const oldRaw = MSG("old");
+    await run(`p1 APPEND INBOX {${oldRaw.length}+}\r\n${oldRaw}\r\n`);
+    await run("s1 SELECT INBOX\r\n");
+    const newRaw = MSG("new");
+    expect(await run(`r1 UID REPLACE 1 INBOX {${newRaw.length}+}\r\n${newRaw}\r\n`)).toContain("OK [APPENDUID");
+    await ctx.db.close();
+  });
+
+  test("CAPABILITY가 REPLACE를 광고한다", async () => {
+    const ctx = await setup();
+    const run = await session(ctx);
+    expect(await run("c1 CAPABILITY\r\n")).toContain("REPLACE");
+    await ctx.db.close();
+  });
+});

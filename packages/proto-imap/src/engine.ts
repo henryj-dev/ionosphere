@@ -121,6 +121,23 @@ export type ImapBackendRequest =
       raw: Uint8Array;
       items?: readonly { raw: Uint8Array; flags: readonly string[]; internalDateMs?: number }[];
     }
+  /**
+   * REPLACE (RFC 8508) — 새 메시지를 넣고 **그다음에** 옛 메시지를 지운다.
+   *
+   * ★순서가 안전성의 전부다. 반대로 하면 넣기가 실패했을 때 **메일이 사라진다**.
+   * 이 순서면 최악이 사본 하나가 남는 것이고, 그건 사용자가 지울 수 있다.
+   */
+  | {
+      kind: "replaceMessage";
+      /** 옛 메시지가 있는 메일함(선택 중인 것). */
+      from: string;
+      /** 새 메시지를 넣을 메일함 — 같을 수도 다를 수도 있다. */
+      to: string;
+      oldUid: number;
+      raw: Uint8Array;
+      flags: readonly string[];
+      internalDateMs: number | null;
+    }
   | { kind: "copyMessages"; from: string; to: string; uids: readonly number[] }
   /** MOVE — 원자적 이동(RFC 6851). 응답은 copied 재사용(원본 제거는 엔진이 EXPUNGE 방출). */
   | { kind: "moveMessages"; from: string; to: string; uids: readonly number[] };
@@ -182,6 +199,8 @@ export type ImapBackendResponse =
   /** APPENDUID — MULTIAPPEND면 `uids`가 전부이고 `uid`는 그 첫 번째다(단일 경로 호환). */
   | { kind: "appended"; uidvalidity: number; uid: number; uids?: readonly number[] }
   /** COPY/MOVE 결과 — COPYUID용. srcUids[i] ↔ dstUids[i] 대응. */
+  /** REPLACE 결과 — 새 uid와, 실제로 지워진 옛 uid(못 지웠으면 null). */
+  | { kind: "replaced"; uidvalidity: number; uid: number; expungedUid: number | null }
   | { kind: "copied"; uidvalidity: number; srcUids: readonly number[]; dstUids: readonly number[] }
   /**
    * 쿼터 현황. `limitBytes === 0`이면 무제한 — 그때는 `* QUOTA`에 STORAGE 항목을 싣지 않는다
@@ -326,7 +345,7 @@ type Pending =
   /** 백엔드 요청 대기 — resume이 응답을 액션으로 변환(명령별 continuation). */
   | { kind: "backend"; resume: (res: ImapBackendResponse) => ImapAction[] };
 
-const BASE_CAPABILITIES = ["IMAP4rev1", "IMAP4rev2", "LITERAL-", "SASL-IR", "ID", "ENABLE", "NAMESPACE", "CHILDREN", "SPECIAL-USE", "UNSELECT", "UIDPLUS", "MOVE", "IDLE", "CONDSTORE", "QRESYNC", "ESEARCH", "SEARCHRES", "BINARY", "SAVEDATE", "MULTIAPPEND", "OBJECTID", "SORT", "THREAD=ORDEREDSUBJECT", "THREAD=REFERENCES", "LIST-STATUS", "QUOTA", "QUOTA=RES-STORAGE", "QUOTA=RES-MESSAGE"] as const;
+const BASE_CAPABILITIES = ["IMAP4rev1", "IMAP4rev2", "LITERAL-", "SASL-IR", "ID", "ENABLE", "NAMESPACE", "CHILDREN", "SPECIAL-USE", "UNSELECT", "UIDPLUS", "MOVE", "IDLE", "CONDSTORE", "QRESYNC", "ESEARCH", "SEARCHRES", "BINARY", "SAVEDATE", "MULTIAPPEND", "REPLACE", "OBJECTID", "SORT", "THREAD=ORDEREDSUBJECT", "THREAD=REFERENCES", "LIST-STATUS", "QUOTA", "QUOTA=RES-STORAGE", "QUOTA=RES-MESSAGE"] as const;
 
 /**
  * 쿼터 루트 이름 — 이 저장소의 쿼터는 **계정 단위**라 루트가 하나뿐이다(RFC 9208 §3.1이
@@ -724,6 +743,8 @@ export class ImapEngine {
         return this.requireSelected(cmd, () => this.cmdExpunge(cmd, null));
       case "APPEND":
         return this.requireAuth(cmd, () => this.cmdAppend(cmd));
+      case "REPLACE":
+        return this.requireSelected(cmd, () => this.cmdReplace(cmd, false));
       case "COPY":
         return this.requireSelected(cmd, () => this.cmdCopyMove(cmd, false, "copy"));
       case "MOVE":
@@ -1079,6 +1100,8 @@ export class ImapEngine {
         return this.requireSelected(cmd, () => this.cmdCopyMove(rest, true, "copy"));
       case "MOVE":
         return this.requireSelected(cmd, () => this.cmdCopyMove(rest, true, "move"));
+      case "REPLACE":
+        return this.requireSelected(cmd, () => this.cmdReplace(rest, true));
       case "EXPUNGE": {
         // UIDPLUS UID EXPUNGE — uid 집합 내 \Deleted만
         const setText = rest.args[0] ? valueText(rest.args[0]) : null;
@@ -1279,6 +1302,86 @@ export class ImapEngine {
           return actions;
         }
         return [ImapEngine.noReply(cmd.tag, "APPEND", res.kind === "no" ? res : { message: "failed" })];
+      },
+    );
+  }
+
+  /**
+   * REPLACE / UID REPLACE (RFC 8508).
+   *
+   * ★"드래프트를 고쳤다"를 한 명령으로 표현한다. 클라이언트가 APPEND + STORE \Deleted +
+   * EXPUNGE를 손으로 하면 그 사이에 다른 세션이 옛 것을 보거나, 중간에 끊겨 둘 다 남는다.
+   *
+   * ★**편차(2026-08-24)**: 우리 구현은 append와 expunge가 **한 트랜잭션이 아니다**.
+   * 두 배치 빌더를 합치는 것이 위험 대비 이득이 적어, 대신 **순서**로 안전성을 만든다 —
+   * 넣기가 성공한 뒤에만 지운다. 그래서 실패 모드가 "메일이 사라진다"가 아니라
+   * "사본이 하나 남는다"이고, 후자는 사용자가 지울 수 있다. §3이 요구하는 원자성의
+   * 핵심(옛 것을 먼저 지우지 않는다)은 지킨다.
+   */
+  private cmdReplace(cmd: ParsedCommand, uidMode: boolean): ImapAction[] {
+    const verb = uidMode ? "UID REPLACE" : "REPLACE";
+    const view = this.selected;
+    if (!view) return [{ kind: "reply", text: `${cmd.tag} BAD command requires a selected mailbox` }];
+    if (!view.readWrite) return [{ kind: "reply", text: `${cmd.tag} NO [READ-ONLY] mailbox is read-only` }];
+
+    const setText = cmd.args[0] ? valueText(cmd.args[0]) : null;
+    const ranges = setText !== null ? this.resolveSetArg(setText, uidMode) : null;
+    if (!ranges) return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} expects a message number` }];
+    const targets = this.resolveTargets(ranges, uidMode);
+    /**
+     * ★대상이 **정확히 하나**여야 한다(§3: `REPLACE`는 한 통을 바꾼다). 집합을 허용하면
+     * "여러 통을 한 통으로 바꾼다"가 되는데 그건 규격에 없고 사용자 의도일 리도 없다.
+     */
+    if (targets.length !== 1) return [{ kind: "reply", text: `${cmd.tag} NO ${verb} expects exactly one message` }];
+    const oldUid = targets[0]!.uid;
+
+    const dest = this.mailboxArg(cmd, 1);
+    if (dest === null) return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} expects mailbox name` }];
+
+    // 나머지는 APPEND와 같은 `[flags] [date] literal`이다.
+    let idx = 2;
+    const flags: string[] = [];
+    const flagsVal = cmd.args[idx];
+    if (flagsVal?.kind === "list") {
+      for (const f of flagsVal.items) {
+        const t = valueText(f);
+        if (t === null) return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} invalid flag` }];
+        flags.push(t);
+      }
+      idx += 1;
+    }
+    let internalDateMs: number | null = null;
+    const dateVal = cmd.args[idx];
+    if (dateVal?.kind === "quoted") {
+      const ms = parseImapDateTime(dateVal.value);
+      if (ms !== null) {
+        internalDateMs = ms;
+        idx += 1;
+      }
+    }
+    const msgVal = cmd.args[idx];
+    let raw: Uint8Array;
+    if (msgVal?.kind === "literal") raw = msgVal.bytes;
+    else if (msgVal?.kind === "quoted") raw = new TextEncoder().encode(msgVal.value);
+    else return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} expects message literal` }];
+    if (raw.length === 0) return [{ kind: "reply", text: `${cmd.tag} NO ${verb} empty message` }];
+    if (idx !== cmd.args.length - 1) return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} invalid arguments` }];
+
+    return this.callBackend(
+      { kind: "replaceMessage", from: view.name, to: dest, oldUid, raw, flags, internalDateMs },
+      (res) => {
+        if (res.kind === "no") return [ImapEngine.noReply(cmd.tag, verb, res)];
+        if (res.kind !== "replaced") return [{ kind: "reply", text: `${cmd.tag} NO ${verb} failed` }];
+        const actions: ImapAction[] = [];
+        // 새 메시지가 선택 중 메일함에 들어갔으면 EXISTS를 먼저 알린다(§5의 예시 순서).
+        if (view.name === dest && !view.uids.includes(res.uid)) {
+          view.uids.push(res.uid);
+          view.uids.sort((a, b) => a - b);
+          actions.push({ kind: "reply", text: `* ${view.uids.length} EXISTS` });
+        }
+        if (res.expungedUid !== null) actions.push(...this.removalActions([res.expungedUid]));
+        actions.push({ kind: "reply", text: `${cmd.tag} OK [APPENDUID ${res.uidvalidity} ${res.uid}] ${verb} completed` });
+        return actions;
       },
     );
   }

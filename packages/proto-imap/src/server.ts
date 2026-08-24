@@ -138,6 +138,10 @@ function auditDetailOf(req: ImapBackendRequest): { detail?: Record<string, strin
     case "copyMessages":
     case "moveMessages":
       return { detail: { from: req.from, to: req.to, uids: req.uids.length } };
+    case "replaceMessage":
+      // 넣기와 지우기가 함께 도는 명령이라 **양쪽 메일함과 지워질 uid**를 남긴다 —
+      // 사본이 남는 실패 모드를 사후에 추적할 수 있어야 한다.
+      return { detail: { from: req.from, to: req.to, oldUid: req.oldUid, bytes: req.raw.byteLength } };
   }
 }
 
