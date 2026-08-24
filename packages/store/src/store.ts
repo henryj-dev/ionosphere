@@ -19,7 +19,7 @@ import {
   type DbDriver,
   type Statement,
 } from "@ionosphere/db";
-import { chunk, MAX_PARAMS_PER_STATEMENT, multiRowInsertStatements, rowsPerStatement } from "./chunk.ts";
+import { chunk, MAX_PARAMS_PER_STATEMENT, multiRowInsertStatements, queryInChunks, rowsPerStatement } from "./chunk.ts";
 import { StoreConflictError, StoreError, StoreQuotaError } from "./errors.ts";
 import { CHANGE_KIND, CHANGE_LOG_SQL, ENTITY, SEARCH_FIELD } from "./codes.ts";
 import {
@@ -405,11 +405,11 @@ export class Store {
     if (memRows.length > 0) {
       const acct = await this.mustGetAccount(accountId);
       const messageIds = [...new Set(memRows.map((r) => String(r.message_id)))];
-      const ph = messageIds.map(() => "?").join(", ");
-      const { rows: countRows } = await this.db.query({
-        sql: `SELECT message_id, COUNT(*) AS cnt FROM message_mailbox WHERE message_id IN (${ph}) GROUP BY message_id`,
-        params: messageIds,
-      });
+      const countRows = await queryInChunks(
+        this.db,
+        messageIds,
+        (ph) => `SELECT message_id, COUNT(*) AS cnt FROM message_mailbox WHERE message_id IN (${ph}) GROUP BY message_id`,
+      );
       const cnt = new Map(countRows.map((r) => [String(r.message_id), Number(r.cnt)]));
       const dying = messageIds.filter((id) => (cnt.get(id) ?? 0) <= 1);
       const dyingSet = new Set(dying);
@@ -537,6 +537,8 @@ export class Store {
     const uniqueHashes = [...new Set(hashes)];
     if (uniqueHashes.length === 0) return { id: ulid(), isNew: true };
 
+    // lint-allow chunked-in-query: `GROUP BY thread_id … LIMIT 1`은 "가장 오래된 스레드 하나"를
+    // 고르는 질의라 나눠 돌리면 답이 달라진다. 개수는 MAX_THREAD_REFS(64)가 상한이므로 안전하다.
     const placeholders = uniqueHashes.map(() => "?").join(", ");
     const { rows } = await this.db.query({
       sql: `SELECT thread_id, MIN(created_at) AS oldest FROM thread_refs
@@ -556,11 +558,13 @@ export class Store {
   ): Promise<{ id: string; uidnext: number }[]> {
     const ids = [...new Set(mailboxIds)];
     if (ids.length === 0) throw new StoreError("mailboxIds가 비어있음");
-    const placeholders = ids.map(() => "?").join(", ");
-    const { rows } = await this.db.query({
-      sql: `SELECT id, uidnext FROM mailboxes WHERE account_id = ? AND status = 1 AND id IN (${placeholders})`,
-      params: [accountId, ...ids],
-    });
+    // JMAP은 `maxMailboxesPerEmail: null`(무제한)을 광고하므로 이 목록도 유계가 아니다.
+    const rows = await queryInChunks(
+      this.db,
+      ids,
+      (ph) => `SELECT id, uidnext FROM mailboxes WHERE account_id = ? AND status = 1 AND id IN (${ph})`,
+      [accountId],
+    );
     const found = new Map(rows.map((r) => [String(r.id), Number(r.uidnext)]));
     for (const id of ids) {
       if (!found.has(id)) throw new StoreError(`mailbox not found or inactive: ${id}`);
@@ -846,6 +850,8 @@ export class Store {
     }
 
     const limit = opts.limit ?? DEFAULT_SEARCH_LIMIT;
+    // lint-allow chunked-in-query: `HAVING COUNT(DISTINCT si.token) = ?`가 AND 시맨틱이라
+    // 나눠 돌리면 교집합이 깨진다. 위에서 maxTokens 초과를 명시적으로 거부해 상한을 건다.
     const placeholders = tokens.map(() => "?").join(", ");
     const { rows } = await this.db.query({
       sql: `SELECT si.message_id AS message_id, m.received_at AS received_at
@@ -972,11 +978,12 @@ export class Store {
     });
     if (mbxRows.length === 0) throw new StoreError(`mailbox not found or inactive: ${input.mailboxId}`);
 
-    const uidPlaceholders = input.uids.map(() => "?").join(", ");
-    const { rows } = await this.db.query({
-      sql: `SELECT uid, message_id, deleted FROM message_mailbox WHERE mailbox_id = ? AND uid IN (${uidPlaceholders})`,
-      params: [input.mailboxId, ...input.uids],
-    });
+    const rows = await queryInChunks(
+      this.db,
+      input.uids,
+      (ph) => `SELECT uid, message_id, deleted FROM message_mailbox WHERE mailbox_id = ? AND uid IN (${ph})`,
+      [input.mailboxId],
+    );
     if (rows.length === 0) return;
 
     const deletedFlag = input.deleted ? 1 : 0;
@@ -992,8 +999,16 @@ export class Store {
       { sql: "INSERT INTO modseq_claims (account_id, modseq) VALUES (?, ?)", params: [input.accountId, nextModseq] },
     ];
 
-    // mailbox_id 1개 고정 파라미터를 예약하고 나머지를 uid IN-리스트에 배정 (§7-6 유도 기반)
-    for (const uidChunk of chunk(uids, rowsPerStatement(1) - 1)) {
+    /**
+     * 고정 파라미터를 **정확히** 빼고 나머지를 uid IN-리스트에 배정한다 (§7-6 유도 기반).
+     *
+     * ★여기 `deleted = ?`와 `mailbox_id = ?`로 고정이 **둘**인데 예약은 하나뿐이라
+     * 문장당 101개가 나갔다(2026-08-23 검수, 대형 메일함 테스트가 실측으로 잡았다).
+     * D1 한도가 100이라 `UID STORE 1:* +FLAGS \Deleted`가 99통을 넘는 순간 깨진다.
+     * 고정 개수를 세는 상수를 옆에 두어 문장이 바뀌면 같이 바뀌게 한다.
+     */
+    const DELETED_FIXED_PARAMS = 2; // deleted, mailbox_id
+    for (const uidChunk of chunk(uids, rowsPerStatement(1) - DELETED_FIXED_PARAMS)) {
       const placeholders = uidChunk.map(() => "?").join(", ");
       stmts.push({
         sql: `UPDATE message_mailbox SET deleted = ? WHERE mailbox_id = ? AND uid IN (${placeholders})`,
@@ -1031,14 +1046,16 @@ export class Store {
     });
     if (mbxRows.length === 0) throw new StoreError(`mailbox not found or inactive: ${input.mailboxId}`);
 
-    // UIDPLUS UID EXPUNGE — uid 필터 지정 시 그 범위의 deleted=1만 (§7-4 변형)
-    const uidFilter = input.uids && input.uids.length > 0 ? ` AND mm.uid IN (${input.uids.map(() => "?").join(", ")})` : "";
-    const { rows: targetRows } = await this.db.query({
-      sql: `SELECT mm.uid AS uid, mm.message_id AS message_id, m.size_bytes AS size_bytes
+    // UIDPLUS UID EXPUNGE — uid 필터 지정 시 그 범위의 deleted=1만 (§7-4 변형).
+    // 필터가 있으면 uid 수만큼 파라미터가 붙으므로 한도 안에서 나눠 돈다(`UID EXPUNGE 1:*`).
+    const selectTargets = (ph: string): string =>
+      `SELECT mm.uid AS uid, mm.message_id AS message_id, m.size_bytes AS size_bytes
             FROM message_mailbox mm JOIN messages m ON m.id = mm.message_id
-            WHERE mm.mailbox_id = ? AND mm.deleted = 1${uidFilter}`,
-      params: [input.mailboxId, ...(input.uids && input.uids.length > 0 ? input.uids : [])],
-    });
+            WHERE mm.mailbox_id = ? AND mm.deleted = 1${ph === "" ? "" : ` AND mm.uid IN (${ph})`}`;
+    const targetRows =
+      input.uids && input.uids.length > 0
+        ? await queryInChunks(this.db, input.uids, selectTargets, [input.mailboxId])
+        : (await this.db.query({ sql: selectTargets(""), params: [input.mailboxId] })).rows;
     if (targetRows.length === 0) return { expunged: [] };
 
     const targets = targetRows.map((r) => ({
@@ -1049,18 +1066,19 @@ export class Store {
     const messageIds = [...new Set(targets.map((t) => t.messageId))];
 
     // 마지막 membership 판정 — 스냅샷 시점 전체 membership 카운트 (§7-4)
-    const idPlaceholders = messageIds.map(() => "?").join(", ");
-    const { rows: countRows } = await this.db.query({
-      sql: `SELECT message_id, COUNT(*) AS cnt FROM message_mailbox WHERE message_id IN (${idPlaceholders}) GROUP BY message_id`,
-      params: messageIds,
-    });
+    const countRows = await queryInChunks(
+      this.db,
+      messageIds,
+      (ph) => `SELECT message_id, COUNT(*) AS cnt FROM message_mailbox WHERE message_id IN (${ph}) GROUP BY message_id`,
+    );
     const membershipCount = new Map(countRows.map((r) => [String(r.message_id), Number(r.cnt)]));
 
     // unread_count 조정용 $seen 보유 여부
-    const { rows: seenRows } = await this.db.query({
-      sql: `SELECT message_id FROM message_keywords WHERE keyword = '$seen' AND message_id IN (${idPlaceholders})`,
-      params: messageIds,
-    });
+    const seenRows = await queryInChunks(
+      this.db,
+      messageIds,
+      (ph) => `SELECT message_id FROM message_keywords WHERE keyword = '$seen' AND message_id IN (${ph})`,
+    );
     const seenSet = new Set(seenRows.map((r) => String(r.message_id)));
 
     const dyingIds = messageIds.filter((id) => (membershipCount.get(id) ?? 0) <= 1);

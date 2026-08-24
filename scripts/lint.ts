@@ -391,6 +391,59 @@ function checkLazyDbDrivers(file: string, text: string): void {
   }
 }
 
+
+/**
+ * `IN (…)` 자리표시자를 손으로 조립한 **읽기 질의**를 막는다.
+ *
+ * 왜(2026-08-23 검수): `store/chunk.ts`가 문장당 파라미터 100개(D1 최소공통분모)를 정해 두고
+ * **쓰기 경로는 전부 그 규율을 지켰는데 읽기 경로는 지키지 않았다.** `db.query()`로 가는
+ * `IN` 리스트가 `uids.map(() => "?")`로 조립돼 개수 제한이 없었고, `UID FETCH 1:*`이
+ * 메일함 메시지 수만큼 파라미터를 만들었다(D1은 100개, PG는 65535개에서 깨진다).
+ *
+ * 규칙: `db.query(`와 `map(() => "?")`가 **같은 문장 안에** 있으면 위반이다. 정본은
+ * `queryInChunks()`이고, 헬퍼가 있어야 새 호출자도 자동으로 한도를 탄다 —
+ * 손으로 쓰게 두면 다음 사람이 같은 실수를 한다(이 결함이 생긴 방식이 정확히 그것이다).
+ *
+ * `db.batch()`로 가는 쓰기 문장은 이미 `chunk()` 루프 안에서 조립되므로 대상이 아니다.
+ */
+function checkChunkedInQuery(file: string, text: string): void {
+  const normalized = file.replaceAll("\\", "/");
+  // 헬퍼 자신과 그 테스트는 예외 — 여기가 정본이다.
+  if (normalized.includes("packages/store/src/chunk.ts")) return;
+  if (normalized.endsWith(".test.ts")) return;
+  const lines = text.split("\n");
+  lines.forEach((line, i) => {
+    if (!/map\(\(\) => "\?"\)/.test(line)) return;
+    /**
+     * 같은 질의 안인지 판정한다. 자리표시자를 만드는 줄은 `db.query({`의 **앞**에 오는 것이
+     * 보통이지만(`const ph = ids.map(...)` → 다음 줄에서 사용) 인라인으로 들어가기도 하므로
+     * 앞뒤를 함께 본다. 쓰기 경로(`db.batch`)는 이미 chunk() 루프 안이라 대상이 아니다.
+     */
+    const window = lines.slice(Math.max(0, i - 3), i + 5).join("\n");
+    if (!/\.query\(\{/.test(window)) return;
+    /**
+     * 탈출구 — 청크가 **구조적으로 불가능한** 질의가 있다. `HAVING COUNT(DISTINCT …) = ?`
+     * (AND 검색)나 `GROUP BY … LIMIT 1`(가장 오래된 스레드 하나)은 나눠 돌리면 답이 달라진다.
+     * 그런 곳은 **개수 상한을 스스로 걸고** 이 표식을 단다 — 사유를 적게 해서, 다음 사람이
+     * "왜 여기만 예외인가"를 코드에서 읽을 수 있게 한다(CLAUDE.md: 승인된 탈출구는 명시).
+     */
+    // 표식은 여러 줄 주석의 첫 줄에 오는 것이 자연스러우므로 바로 앞 주석 블록 전체를 본다.
+    let j = i - 1;
+    while (j >= 0 && /^\s*(\/\/|\*)/.test(lines[j] ?? "")) {
+      if (/lint-allow\s+chunked-in-query:\s*\S/.test(lines[j] ?? "")) return;
+      j--;
+    }
+    violations.push({
+      file,
+      line: i + 1,
+      rule: "chunked-in-query",
+      message:
+        "읽기 질의의 IN 리스트를 손으로 조립하지 말 것 — 정본은 @ionosphere/store의 queryInChunks다. " +
+        "문장당 파라미터 한도(100, D1 최소공통분모)를 넘기면 대형 메일함에서 IMAP이 통째로 깨진다",
+    });
+  });
+}
+
 function check(file: string): void {
   const text = readFileSync(file, "utf8");
   const lines = text.split("\n");
@@ -402,6 +455,7 @@ function check(file: string): void {
   checkSharedTestDbIsolation(file, lines);
   checkDkimCryptoOwner(file, text);
   checkLazyDbDrivers(file, text);
+  checkChunkedInQuery(file, text);
 
   lines.forEach((line, i) => {
     const lineNo = i + 1;

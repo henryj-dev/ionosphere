@@ -6,29 +6,29 @@
  */
 import type { BayesStore, TokenCounts } from "@ionosphere/spam";
 import type { DbDriver } from "@ionosphere/db";
+import { chunk, MAX_PARAMS_PER_STATEMENT, queryInChunks } from "./chunk.ts";
 
-/** 한 번에 다루는 토큰 수 상한 — 파라미터 폭발과 D1의 문장당 한도(100개)를 함께 막는다. */
-const CHUNK = 90;
-
-function chunks<T>(xs: readonly T[], n: number): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < xs.length; i += n) out.push(xs.slice(i, i + n));
-  return out;
-}
+/**
+ * 쓰기 경로의 토큰 청크 크기.
+ *
+ * ★예전엔 이 파일이 `CHUNK = 90`과 자체 `chunk()`를 들고 있었다. 값도 헬퍼도 `chunk.ts`의
+ * 복제였고, 그러면 소유자 쪽 한도를 조정해도 여기가 옛 값을 계속 쓴다. 읽기 경로는
+ * `queryInChunks`가 알아서 나누고, 쓰기 경로만 한도에서 유도한다(토큰 1 + 카운트 2 + 계정 1).
+ */
+const WRITE_CHUNK = Math.floor(MAX_PARAMS_PER_STATEMENT / 4);
 
 export function createBayesStore(db: DbDriver): BayesStore {
   return {
     async counts(accountId: string, tokens: readonly string[]): Promise<Map<string, TokenCounts>> {
       const map = new Map<string, TokenCounts>();
-      for (const part of chunks(tokens, CHUNK)) {
-        const ph = part.map(() => "?").join(",");
-        const { rows } = await db.query({
-          sql: `SELECT token, spam_count, ham_count FROM bayes_tokens WHERE account_id = ? AND token IN (${ph})`,
-          params: [accountId, ...part],
-        });
-        for (const r of rows) {
-          map.set(String(r.token), { spam: Number(r.spam_count ?? 0), ham: Number(r.ham_count ?? 0) });
-        }
+      const rows = await queryInChunks(
+        db,
+        tokens,
+        (ph) => `SELECT token, spam_count, ham_count FROM bayes_tokens WHERE account_id = ? AND token IN (${ph})`,
+        [accountId],
+      );
+      for (const r of rows) {
+        map.set(String(r.token), { spam: Number(r.spam_count ?? 0), ham: Number(r.ham_count ?? 0) });
       }
       return map;
     },
@@ -44,7 +44,7 @@ export function createBayesStore(db: DbDriver): BayesStore {
        * (`ON CONFLICT` vs `ON DUPLICATE KEY`), 그 분기는 `@ionosphere/db` 밖으로 나오면 안 된다
        * (다이얼렉트 봉인 규약). 두 문장이면 네 방언에서 같은 SQL로 성립한다.
        */
-      for (const part of chunks(tokens, CHUNK)) {
+      for (const part of chunk([...tokens], WRITE_CHUNK)) {
         const stmts = [];
         for (const t of part) {
           // ★`insertIgnore()`는 다이얼렉트 봉인 규약이 명시한 **유일한 탈출구**다

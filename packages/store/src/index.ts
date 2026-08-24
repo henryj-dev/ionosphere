@@ -84,3 +84,9 @@ export type {
 } from "./types.ts";
 export { scramSegment, buildScramSegment, scramKeysFor, scramAuthorize, type StoredScram } from "./auth.ts";
 export { createBayesStore } from "./bayes-store.ts";
+
+/**
+ * `IN (…)` 읽기 질의의 파라미터 청크 헬퍼 — 조립층(IMAP 백엔드)도 같은 한도를 지켜야 한다.
+ * 한도의 소유자는 이 패키지다(`chunk.ts MAX_PARAMS_PER_STATEMENT`).
+ */
+export { queryInChunks } from "./chunk.ts";

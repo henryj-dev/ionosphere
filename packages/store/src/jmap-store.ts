@@ -10,7 +10,7 @@
  */
 import { ulid } from "@ionosphere/core";
 import { isAddressKind, type AddressKind } from "@ionosphere/db";
-import { chunk, MAX_PARAMS_PER_STATEMENT, rowsPerStatement } from "./chunk.ts";
+import { chunk, MAX_PARAMS_PER_STATEMENT, queryInChunks, rowsPerStatement } from "./chunk.ts";
 import { CHANGE_KIND, CHANGE_LOG_SQL, ENTITY, groupBy, SEARCH_FIELD } from "./codes.ts";
 import { tokenizeQuery } from "./tokenize.ts";
 import { StoreError } from "./errors.ts";
@@ -131,6 +131,7 @@ export async function getEmailsForJmap(s: StoreInternals, accountId: string, ids
   if (ids.length === 0) return [];
   const out: JmapEmailMeta[] = [];
   for (const idChunk of chunk([...ids], rowsPerStatement(1) - 1)) {
+    // lint-allow chunked-in-query: 바깥 chunk() 루프가 이미 한도를 건다(청크당 99개).
     const ph = idChunk.map(() => "?").join(", ");
     const { rows } = await s.db.query({
       sql: `SELECT m.id AS id, m.blob_id AS blob_id, m.thread_id AS thread_id, m.size_bytes AS size_bytes,
@@ -142,6 +143,7 @@ export async function getEmailsForJmap(s: StoreInternals, accountId: string, ids
     });
     if (rows.length === 0) continue;
     const foundIds = rows.map((r) => String(r.id));
+    // lint-allow chunked-in-query: foundIds는 위 청크의 부분집합이라 같은 상한 안에 있다.
     const idPh = foundIds.map(() => "?").join(", ");
     const [mmRes, kwRes, addrRes] = await Promise.all([
       s.db.query({ sql: `SELECT message_id, mailbox_id FROM message_mailbox WHERE message_id IN (${idPh})`, params: foundIds }),
@@ -256,17 +258,14 @@ export async function queryEmails(s: StoreInternals, accountId: string, filter: 
  * 스레드는 ≥1 메시지가 그 thread_id를 가질 때만 "존재".
  */
 export async function getThreadsForJmap(s: StoreInternals, accountId: string, ids: readonly string[] | null): Promise<{ id: string; emailIds: string[] }[]> {
-  const params: unknown[] = [accountId];
-  let filter = "";
-  if (ids !== null) {
-    if (ids.length === 0) return [];
-    filter = ` AND thread_id IN (${ids.map(() => "?").join(", ")})`;
-    params.push(...ids);
-  }
-  const { rows } = await s.db.query({
-    sql: `SELECT id, thread_id FROM messages WHERE account_id = ?${filter} ORDER BY thread_id, received_at, id`,
-    params,
-  });
+  // 클라이언트가 주는 id 목록은 유계가 아니다 — 한도 안에서 나눠 돌린다(store/chunk.ts).
+  const selectRows = (ph: string): string =>
+    `SELECT id, thread_id FROM messages WHERE account_id = ?${ph === "" ? "" : ` AND thread_id IN (${ph})`} ORDER BY thread_id, received_at, id`;
+  if (ids !== null && ids.length === 0) return [];
+  const rows =
+    ids === null
+      ? (await s.db.query({ sql: selectRows(""), params: [accountId] })).rows
+      : await queryInChunks(s.db, ids, selectRows, [accountId]);
   const byThread = new Map<string, string[]>();
   for (const r of rows) {
     const tid = String(r.thread_id);
@@ -332,17 +331,13 @@ export async function createSubmission(
 
 /** EmailSubmission/get (RFC 8621 §7). ids=null이면 전체. */
 export async function getSubmissions(s: StoreInternals, accountId: string, ids: readonly string[] | null): Promise<{ id: string; identityId: string; emailId: string | null; envFrom: string; sendAt: number; undoStatus: number }[]> {
-  const params: unknown[] = [accountId];
-  let filter = "";
-  if (ids !== null) {
-    if (ids.length === 0) return [];
-    filter = ` AND id IN (${ids.map(() => "?").join(", ")})`;
-    params.push(...ids);
-  }
-  const { rows } = await s.db.query({
-    sql: `SELECT id, identity_id, message_id, env_from, send_at, undo_status FROM email_submissions WHERE account_id = ?${filter} ORDER BY created_at`,
-    params,
-  });
+  const selectRows = (ph: string): string =>
+    `SELECT id, identity_id, message_id, env_from, send_at, undo_status FROM email_submissions WHERE account_id = ?${ph === "" ? "" : ` AND id IN (${ph})`} ORDER BY created_at`;
+  if (ids !== null && ids.length === 0) return [];
+  const rows =
+    ids === null
+      ? (await s.db.query({ sql: selectRows(""), params: [accountId] })).rows
+      : await queryInChunks(s.db, ids, selectRows, [accountId]);
   return rows.map((r) => ({
     id: String(r.id),
     identityId: String(r.identity_id),

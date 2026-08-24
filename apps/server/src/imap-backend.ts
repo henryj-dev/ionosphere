@@ -14,6 +14,7 @@ import { parseMessage, type ParsedAddress, type ParsedMessage } from "@ionospher
 import {
   authenticate,
   putBlob,
+  queryInChunks,
   StoreError,
   type AppendAddress,
   type BlobStore,
@@ -296,14 +297,23 @@ export class IonosphereImapBackend implements ImapBackend {
     if (!found) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
     if (req.uids.length === 0) return { kind: "messages", messages: [] };
 
-    const ph = req.uids.map(() => "?").join(", ");
-    const { rows } = await this.db.query({
-      sql: `SELECT mm.uid AS uid, mm.message_id AS message_id, mm.savedate AS savedate, mm.deleted AS deleted,
+    /**
+     * ★파라미터 한도 안에서 나눠 돈다(`store/chunk.ts`). `UID FETCH 1:*`은 메일함 메시지
+     * 수만큼 uid를 싣는데, 이 저장소가 정한 D1 한도는 문장당 100개다 — 예전엔 그 한도를
+     * 쓰기 경로만 지키고 여기 읽기 경로는 지키지 않았다.
+     * 청크마다 정렬되므로 합친 뒤 uid로 다시 정렬한다(호출자가 순서를 전제한다).
+     */
+    const rows = (
+      await queryInChunks(
+        this.db,
+        req.uids,
+        (ph) => `SELECT mm.uid AS uid, mm.message_id AS message_id, mm.savedate AS savedate, mm.deleted AS deleted,
                    m.size_bytes AS size_bytes, m.modseq AS modseq
             FROM message_mailbox mm JOIN messages m ON m.id = mm.message_id
-            WHERE mm.mailbox_id = ? AND mm.uid IN (${ph}) ORDER BY mm.uid`,
-      params: [found.row.id, ...req.uids],
-    });
+            WHERE mm.mailbox_id = ? AND mm.uid IN (${ph})`,
+        [found.row.id],
+      )
+    ).sort((a, b) => Number(a.uid) - Number(b.uid));
     if (rows.length === 0) return { kind: "messages", messages: [] };
 
     const messageIds = [...new Set(rows.map((r) => String(r.message_id)))];
@@ -315,11 +325,11 @@ export class IonosphereImapBackend implements ImapBackend {
       }
     }
 
-    const idPh = messageIds.map(() => "?").join(", ");
-    const { rows: kwRows } = await this.db.query({
-      sql: `SELECT message_id, keyword FROM message_keywords WHERE message_id IN (${idPh})`,
-      params: messageIds,
-    });
+    const kwRows = await queryInChunks(
+      this.db,
+      messageIds,
+      (ph) => `SELECT message_id, keyword FROM message_keywords WHERE message_id IN (${ph})`,
+    );
     const keywords = new Map<string, string[]>();
     for (const r of kwRows) {
       const id = String(r.message_id);
@@ -365,13 +375,16 @@ export class IonosphereImapBackend implements ImapBackend {
   ): Promise<ImapBackendResponse> {
     const found = await this.findByPath(accountId, req.name);
     if (!found) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
-    const ph = req.uids.map(() => "?").join(", ");
-    const { rows: allRows } = await this.db.query({
-      sql: `SELECT mm.uid AS uid, mm.message_id AS message_id, m.modseq AS modseq
+    const allRows = (
+      await queryInChunks(
+        this.db,
+        req.uids,
+        (ph) => `SELECT mm.uid AS uid, mm.message_id AS message_id, m.modseq AS modseq
             FROM message_mailbox mm JOIN messages m ON m.id = mm.message_id
-            WHERE mm.mailbox_id = ? AND mm.uid IN (${ph}) ORDER BY mm.uid`,
-      params: [found.row.id, ...req.uids],
-    });
+            WHERE mm.mailbox_id = ? AND mm.uid IN (${ph})`,
+        [found.row.id],
+      )
+    ).sort((a, b) => Number(a.uid) - Number(b.uid));
     // CONDSTORE UNCHANGEDSINCE — modseq 초과분은 건너뛰고 failed로 보고(RFC 7162)
     const failed: number[] = [];
     const rows =
@@ -513,11 +526,14 @@ export class IonosphereImapBackend implements ImapBackend {
     const to = await this.findByPath(accountId, toPath);
     if (!to) return { kind: "no", code: "TRYCREATE", message: "no such target mailbox" };
 
-    const ph = uids.map(() => "?").join(", ");
-    const { rows } = await this.db.query({
-      sql: `SELECT uid, message_id FROM message_mailbox WHERE mailbox_id = ? AND uid IN (${ph}) ORDER BY uid`,
-      params: [from.row.id, ...uids],
-    });
+    const rows = (
+      await queryInChunks(
+        this.db,
+        uids,
+        (ph) => `SELECT uid, message_id FROM message_mailbox WHERE mailbox_id = ? AND uid IN (${ph})`,
+        [from.row.id],
+      )
+    ).sort((a, b) => Number(a.uid) - Number(b.uid));
     const srcUids: number[] = [];
     const dstUids: number[] = [];
     for (const r of rows) {
