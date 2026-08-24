@@ -424,6 +424,11 @@ export class Store {
         stmts.push({ sql: `DELETE FROM messages WHERE id IN (${p})`, params: idChunk });
         stmts.push({ sql: `DELETE FROM message_keywords WHERE message_id IN (${p})`, params: idChunk });
         stmts.push({ sql: `DELETE FROM message_addresses WHERE message_id IN (${p})`, params: idChunk });
+        // ★검색 부산물도 **여기서** 지운다. 예전엔 message_text·search_index만 남았고,
+        //   message_text에는 제목과 본문 텍스트가 들어간다 — 사용자가 지운 메일의 본문이
+        //   DB와 백업에 영구히 남는다는 뜻이었다(저장소 낭비 이전에 삭제 계약이 깨진 것).
+        stmts.push({ sql: `DELETE FROM message_text WHERE message_id IN (${p})`, params: idChunk });
+        stmts.push({ sql: `DELETE FROM search_index WHERE message_id IN (${p})`, params: idChunk });
         stmts.push({ sql: `DELETE FROM blob_refs WHERE ref_kind = ${REF_KIND.message} AND ref_id IN (${p})`, params: idChunk });
       }
       for (const id of dying) {
@@ -756,7 +761,8 @@ export class Store {
     // 검색 색인 후속 배치 (§7-1/§8) — core batch 커밋 이후에만 시도. 여기서 실패해도
     // append 자체는 이미 성공했으므로 삼켜서 재시도 루프(withRetry)로 되돌리지 않는다
     // (되돌리면 core batch가 새 modseq로 통째로 재실행돼 메시지가 중복 생성된다).
-    // 색인 누락은 §7-4 질의 시 messages 조인 필터 + 주기 스위퍼로 수렴하는 지연 정리 대상.
+    // 색인 **누락**(여기서 실패해 안 들어간 행)은 §7-4 질의 시 messages 조인 필터가 덮는다.
+    // 색인 **고아**(메시지가 지워졌는데 남은 행)는 이제 없다 — 파기 경로가 함께 지운다(§7-4).
     for (const [i, input] of inputs.entries()) {
       if (!input.searchText) continue;
       try {
@@ -1085,14 +1091,20 @@ export class Store {
         stmts.push({ sql: `DELETE FROM messages WHERE id IN (${ph})`, params: idChunk });
         stmts.push({ sql: `DELETE FROM message_keywords WHERE message_id IN (${ph})`, params: idChunk });
         stmts.push({ sql: `DELETE FROM message_addresses WHERE message_id IN (${ph})`, params: idChunk });
+        // ★검색 부산물도 **여기서** 지운다. 예전엔 message_text·search_index만 남았고,
+        //   message_text에는 제목과 본문 텍스트가 들어간다 — 사용자가 지운 메일의 본문이
+        //   DB와 백업에 영구히 남는다는 뜻이었다(저장소 낭비 이전에 삭제 계약이 깨진 것).
+        stmts.push({ sql: `DELETE FROM message_text WHERE message_id IN (${ph})`, params: idChunk });
+        stmts.push({ sql: `DELETE FROM search_index WHERE message_id IN (${ph})`, params: idChunk });
         stmts.push({ sql: `DELETE FROM blob_refs WHERE ref_kind = ${REF_KIND.message} AND ref_id IN (${ph})`, params: idChunk });
         // ★편차 (실행 요약에 기재): SCHEMA.md §7-4 원문은 마지막 membership 소멸 시
         // thread_refs도 함께 DELETE하라고 명시한다. 하지만 thread_refs PK(§5-3)는
         // (account_id, ref_hash, thread_id)로 message_id 연결이 없어 "이 메시지가 만든 행"을
         // 정확히 스코프할 수 없다 — 같은 ref_hash를 형제 메시지가 재사용(insertIgnore로 dedup)한
         // 경우 삭제하면 형제 메시지의 스레딩 연속성이 깨진다(과잉 삭제 리스크). 대신 thread_refs는
-        // 자체 보존창 GC(§5-3, 기본 180일)로 수거 — search_index 고아 처리(§7-4)와 동일한
-        // "지연 정리" 패턴으로 수용.
+        // 자체 보존창 GC(§5-3, 기본 180일)로 수거한다.
+        // ⚠ 그 GC는 **아직 없다**(2026-08-23 검수) — 지금은 thread_refs만 무한 누적된다.
+        //   search_index·message_text는 이 커밋부터 여기서 즉시 지우므로 더 이상 같은 부류가 아니다.
       }
       for (const id of dyingIds) {
         stmts.push({ sql: CHANGE_LOG_SQL, params: [input.accountId, nextModseq, ENTITY.Email, id, CHANGE_KIND.destroyed, now] });
@@ -1171,6 +1183,9 @@ export class Store {
         { sql: "DELETE FROM messages WHERE id = ?", params: [messageId] },
         { sql: "DELETE FROM message_keywords WHERE message_id = ?", params: [messageId] },
         { sql: "DELETE FROM message_addresses WHERE message_id = ?", params: [messageId] },
+        // 검색 부산물 — 위 청크 경로와 같은 이유로 함께 지운다(삭제 계약).
+        { sql: "DELETE FROM message_text WHERE message_id = ?", params: [messageId] },
+        { sql: "DELETE FROM search_index WHERE message_id = ?", params: [messageId] },
         { sql: `DELETE FROM blob_refs WHERE ref_kind = ${REF_KIND.message} AND ref_id = ?`, params: [messageId] },
         { sql: CHANGE_LOG_SQL, params: [accountId, nextModseq, ENTITY.Email, messageId, CHANGE_KIND.destroyed, now] },
         {
@@ -1225,6 +1240,9 @@ export class Store {
       { sql: "DELETE FROM messages WHERE id = ?", params: [messageId] },
       { sql: "DELETE FROM message_keywords WHERE message_id = ?", params: [messageId] },
       { sql: "DELETE FROM message_addresses WHERE message_id = ?", params: [messageId] },
+      // 검색 부산물 — 위 청크 경로와 같은 이유로 함께 지운다(삭제 계약).
+      { sql: "DELETE FROM message_text WHERE message_id = ?", params: [messageId] },
+      { sql: "DELETE FROM search_index WHERE message_id = ?", params: [messageId] },
       { sql: `DELETE FROM blob_refs WHERE ref_kind = ${REF_KIND.message} AND ref_id = ?`, params: [messageId] },
       { sql: CHANGE_LOG_SQL, params: [accountId, nextModseq, ENTITY.Email, messageId, CHANGE_KIND.destroyed, now] },
       {
