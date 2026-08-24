@@ -194,6 +194,51 @@ export const MAX_QUEUED_LINE_BYTES = 1024 * 1024;
 export const MAX_MIME_PARTS = 1024;
 
 /**
+ * 한 메시지가 만들 수 있는 **스레딩 참조 해시** 개수 상한
+ * (`Message-ID` + `In-Reply-To` + `References`).
+ *
+ * ★왜 이 축만 비어 있었나(2026-08-23 검수): MIME 파서는 **세로**(`MAX_MIME_DEPTH`)와
+ * **가로**(`MAX_MIME_PARTS`)를 이미 같은 예산으로 묶어 뒀는데, **헤더 안의 리스트** 축에는
+ * 아무 상한이 없었다. 그래서 파트를 늘리는 길은 막혔지만 `References:` 한 줄을 늘리는 길은
+ * 그대로 열려 있었다 — 같은 종류의 증폭인데 한쪽만 막은 셈이다.
+ *
+ * 실측(SQLite, 메시지 **한 통**):
+ *   References 1,000개  (31KB)  → append  14ms, thread_refs  1,001행
+ *   References 20,000개 (701KB) → append 407ms, thread_refs 20,001행
+ *
+ * 407ms는 `db.batch()`가 동기로 도는 시간이라 그동안 이벤트 루프가 통째로 멈춘다. 그리고
+ * 이건 **25번 포트에 미인증으로 접속한 상대**가 정하는 값이다. `MAX_MESSAGE_BYTES`(25MB)까지
+ * 채우면 한 통이 참조 70만 개, 즉 append 한 번에 십수 초다.
+ *
+ * 저장 쪽 대가도 함께 는다: `resolveThread()`가 `ref_hash IN (?×N)` 질의를 만드는데
+ * 이 저장소가 정한 D1 한도는 문장당 100개이고(`store/chunk.ts`), `thread_refs`에는 GC가 없다.
+ *
+ * 64인 이유: 스레딩은 **가장 최근 조상 하나만 찾으면 되는 힌트**다(`resolveThread`는 매치된
+ * 스레드 중 가장 오래된 것 하나를 고르고 병합하지 않는다). 실사용 References는 길어야
+ * 수십 개고, RFC 5322 §3.6.4도 개수를 규정하지 않는다. 64면 정상 스레드보다 충분히 크다.
+ *
+ * ★잘라내도 두 파서가 갈라지지 않는다 — `MAX_MIME_PARTS`가 "조용히 잘라내지 않는다"를 택한
+ * 이유(잘린 트리가 정상 메시지와 구별되지 않는다)가 여기엔 적용되지 않는다. 스레딩 힌트가
+ * 짧아지면 최악이 "스레드가 덜 묶인다"이지, 검사기와 파서가 같은 입력을 다르게 읽는 일이
+ * 생기지 않는다.
+ */
+export const MAX_THREAD_REFS = 64;
+
+/**
+ * **주소 헤더 하나**가 만들 수 있는 `message_addresses` 행 수 상한
+ * (From/To/Cc/Bcc/Reply-To/Sender 각각에 적용).
+ *
+ * `MAX_THREAD_REFS`와 같은 사고의 다른 절반이다 — 같은 701KB 메시지가 `To:` 하나로
+ * `message_addresses` 20,000행을 만들었다. 행마다 다중행 INSERT 청크가 붙으므로 배치
+ * 문장 수도 함께 는다.
+ *
+ * 256인 이유: 이 값은 **표시·검색용 캐시**(SCHEMA §5-2 envelope-cache)이지 배달 대상이
+ * 아니다(배달은 봉투가 정하고 그쪽은 `MAX_RCPT_PER_SESSION`이 막는다). 실사용 메일링리스트
+ * 헤더도 수십 명 선이라 256이면 정상 메일을 자르지 않는다.
+ */
+export const MAX_ADDRESSES_PER_HEADER = 256;
+
+/**
  * MIME 중첩 깊이 상한 — multipart 안의 multipart, message/rfc822 안의 메시지.
  *
  * 여기로 올린 이유: 값이 파서마다 흩어져 있었고 **서로 달랐다**(`structure.ts` 20 ·

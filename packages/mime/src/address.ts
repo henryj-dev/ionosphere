@@ -2,6 +2,7 @@
  * 실용적 addr-spec 파서: display-name <local@domain>, bare 주소, 콤마 목록, 그룹(name: a, b;).
  * 손상된 항목은 조용히 건너뛴다 — 절대 throw하지 않는다.
  */
+import { MAX_ADDRESSES_PER_HEADER } from "@ionosphere/core";
 import type { ParsedAddress } from "./types.ts";
 
 /** 따옴표/괄호 밖에서의 최상위 콤마·콜론(그룹 시작)을 인지하며 항목 단위로 분리. */
@@ -165,12 +166,23 @@ function parseSingleOrGroup(entry: string): ParsedAddress[] {
   return out;
 }
 
-/** 주소 목록 헤더(From/To/Cc/Bcc/Reply-To/Sender) 파싱. 손상 항목은 건너뜀, 절대 throw 없음. */
+/**
+ * 주소 목록 헤더(From/To/Cc/Bcc/Reply-To/Sender) 파싱. 손상 항목은 건너뜀, 절대 throw 없음.
+ *
+ * ★`MAX_ADDRESSES_PER_HEADER`에서 자른다. 상한이 없던 시절 `To:` 한 줄로 메시지 한 통이
+ * `message_addresses` 2만 행을 만들었고, 그 행들이 다중행 INSERT 청크로 배치 문장 수까지
+ * 부풀렸다(`core/limits.ts` 상수 주석). 이 목록은 표시·검색용 캐시(SCHEMA §5-2)이지 배달
+ * 대상이 아니므로 — 배달은 봉투가 정하고 그쪽은 `MAX_RCPT_PER_SESSION`이 막는다 — 잘라도
+ * 메일이 덜 가지 않는다.
+ */
 export function parseAddressList(raw: string | null): ParsedAddress[] {
   if (!raw) return [];
   const out: ParsedAddress[] = [];
   for (const entry of splitAddressEntries(raw)) {
-    out.push(...parseSingleOrGroup(entry));
+    for (const a of parseSingleOrGroup(entry)) {
+      out.push(a);
+      if (out.length >= MAX_ADDRESSES_PER_HEADER) return out;
+    }
   }
   return out;
 }
