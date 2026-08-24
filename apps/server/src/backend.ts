@@ -242,6 +242,8 @@ type RecipientOutcome =
    * 수렴하긴 하지만, 의미가 다른 값을 같은 칸에 넣으면 LMTP처럼 코드가 갈리는 자리에서 새어나간다.
    */
   | { status: "tempfail" }
+  /** Sieve `reject`/`ereject` — 사용자 규칙이 거절했다. 사유가 발신자에게 간다. */
+  | { status: "reject"; reason: string }
   | { status: "unknown" };
 
 /**
@@ -252,6 +254,19 @@ type RecipientOutcome =
  * 실패는 재시도로 고쳐지지 않는 종류라, 중복 폭주를 만드는 대신 로그로 드러내고 나머지를 살린다.
  * 전원 실패일 때만 4xx/5xx가 나가므로 "아무 데도 안 들어갔는데 250" 같은 유실은 없다.
  */
+/**
+ * Sieve `reject` 사유를 SMTP 응답 줄에 실을 수 있는 형태로.
+ *
+ * ★이 문자열은 **사용자가 스크립트에 쓴 값**이고 그대로 응답 줄에 나간다. CR/LF가 들어가면
+ * 그것이 곧 응답 주입이다 — 우리가 만든 응답이 상대 파서에게 여러 줄로 보인다. 길이도 자른다
+ * (RFC 5321 §4.5.3.1.5의 응답 줄 상한 512옥텟 안에 코드·확장코드와 함께 들어가야 한다).
+ */
+function sieveRejectText(reason: string): string {
+  const cleaned = reason.replace(/[\r\n\0]/g, " ").trim();
+  if (cleaned === "") return "rejected by recipient's filter";
+  return cleaned.length > 400 ? `${cleaned.slice(0, 400)}…` : cleaned;
+}
+
 function combineFanoutOutcomes(outcomes: readonly RecipientOutcome[], forwarded: boolean): RecipientOutcome {
   if (outcomes.some((o) => o.status === "delivered")) return { status: "delivered" };
   const accepted = outcomes.find((o) => o.status === "accepted");
@@ -261,6 +276,13 @@ function combineFanoutOutcomes(outcomes: readonly RecipientOutcome[], forwarded:
   // quota를 tempfail보다 앞에 두는 건 기존 SMTP 집계와 같은 순서라서다(452가 더 구체적이다).
   if (outcomes.some((o) => o.status === "quota")) return { status: "quota" };
   if (outcomes.some((o) => o.status === "tempfail")) return { status: "tempfail" };
+  /**
+   * ★`reject`는 **확정 판정**이라 `unknown`(주소 없음)보다 구체적이다. 팬아웃에서 한 계정이
+   * 규칙으로 거절하고 나머지는 실패했다면, 발신자에게는 그 사유를 알리는 편이 낫다 —
+   * "그런 사용자 없음"은 사실이 아니다.
+   */
+  const rejected = outcomes.find((o) => o.status === "reject");
+  if (rejected) return rejected;
   return { status: "unknown" };
 }
 
@@ -515,8 +537,8 @@ export class IonosphereSmtpBackend implements SmtpBackend {
     parsed: ParsedMessage,
     env: { mailFrom: string; rcptTo: readonly string[] },
     size: number,
-  ): Promise<{ mailboxIds: string[]; keywords: string[]; redirect: string[]; discard: boolean; fileintoUsed: boolean }> {
-    const fallback = { mailboxIds: [inboxId], keywords: [] as string[], redirect: [] as string[], discard: false, fileintoUsed: false };
+  ): Promise<{ mailboxIds: string[]; keywords: string[]; redirect: string[]; discard: boolean; fileintoUsed: boolean; reject: string | null }> {
+    const fallback = { mailboxIds: [inboxId], keywords: [] as string[], redirect: [] as string[], discard: false, fileintoUsed: false, reject: null };
     const script = await this.store.getActiveSieveScript(accountId);
     if (!script) return fallback;
 
@@ -542,7 +564,14 @@ export class IonosphereSmtpBackend implements SmtpBackend {
       });
       result.redirect = [];
     }
-    if (result.discarded) return { mailboxIds: [], keywords: [], redirect: [], discard: true, fileintoUsed: false };
+    /**
+     * `reject`/`ereject`(RFC 5429) — 배달하지 않고 **발신자에게 사유를 알린다**. 다른 처분보다
+     * 앞선다(§2.1: 다른 액션과 함께 쓸 수 없다 — 평가기가 그 우선순위를 이미 적용한다).
+     */
+    if (result.reject !== null) {
+      return { mailboxIds: [], keywords: [], redirect: [], discard: false, fileintoUsed: false, reject: result.reject };
+    }
+    if (result.discarded) return { mailboxIds: [], keywords: [], redirect: [], discard: true, fileintoUsed: false, reject: null };
 
     // fileinto 대상(경로)을 mailboxId로 — 없으면 INBOX 폴백
     const mailboxIds = new Set<string>();
@@ -562,6 +591,7 @@ export class IonosphereSmtpBackend implements SmtpBackend {
       keywords: result.flags.map(sieveFlagToKeyword),
       redirect: result.redirect,
       discard: false,
+      reject: null,
       // 사용자가 fileinto로 자리를 명시했는가 — junk 재배치가 이걸 존중한다.
       fileintoUsed: result.fileinto.length > 0,
     };
@@ -678,6 +708,15 @@ export class IonosphereSmtpBackend implements SmtpBackend {
     const accepted = outcomes.filter((o) => o.status === "delivered" || o.status === "accepted").length;
     const quotaFailed = outcomes.filter((o) => o.status === "quota").length;
     if (accepted === 0) {
+      /**
+       * Sieve `reject`/`ereject`(RFC 5429)는 **확정 판정**이라 일반 실패보다 먼저 답한다.
+       * 451로 뭉개면 상대가 계속 재시도하는데, 사용자 규칙은 재시도해도 같은 답을 낸다 —
+       * 사유를 담은 5xx가 발신자에게 훨씬 쓸모 있다.
+       */
+      const rejected = outcomes.find((o) => o.status === "reject");
+      if (rejected && rejected.status === "reject") {
+        return { ok: false as const, code: 550, enhanced: "5.7.1", message: sieveRejectText(rejected.reason) };
+      }
       return quotaFailed > 0
         ? { ok: false as const, code: 452, enhanced: "4.2.2", message: "mailbox full" }
         : { ok: false as const, code: 451, enhanced: "4.3.0", message: "delivery failed" };
@@ -725,6 +764,9 @@ export class IonosphereSmtpBackend implements SmtpBackend {
         case "tempfail":
           // 4xx로 답해야 상류 MTA가 재시도한다. 550으로 뭉개면 일시 오류에 메일을 버린다.
           return { rcpt, ok: false as const, code: 451, enhanced: "4.3.0", message: "temporary failure" };
+        case "reject":
+          // Sieve reject/ereject (RFC 5429) — 사용자 규칙이 거절했다. 사유가 발신자에게 간다.
+          return { rcpt, ok: false as const, code: 550, enhanced: "5.7.1", message: sieveRejectText(outcome.reason) };
         default:
           return { rcpt, ok: false as const, code: 550, enhanced: "5.1.1", message: "no such user" };
       }
@@ -1042,6 +1084,18 @@ export class IonosphereSmtpBackend implements SmtpBackend {
 
     // Sieve 필터(Phase 4) — 활성 스크립트로 배달 대상/플래그/폐기 결정. 오류·미설정 시 INBOX.
     const route = await this.runSieveRoute(accountId, inbox.id, parsed, env, size);
+    if (route.reject !== null) {
+      /**
+       * ★`discard`와 **정반대의 처분**이다. discard는 조용히 버리는 것이라 발신자에게 성공을
+       * 답하지만(사용자가 그러기로 정했다), reject는 "받지 않겠다"를 **발신자에게 알리는 것**이
+       * 목적이다 — 5xx를 돌려주지 않으면 그 액션이 아무 일도 하지 않은 것이 된다.
+       *
+       * 사유는 사용자가 스크립트에 쓴 문자열이라 **그대로 SMTP 응답에 실린다** — CR/LF와
+       * 길이는 아래에서 자른다(응답 줄 주입 방지).
+       */
+      this.log.info("sieve reject", { rcpt });
+      return { status: "reject", reason: route.reject };
+    }
     if (route.discard) {
       this.log.info("sieve discard", { rcpt });
       return { status: "accepted", via: "sieve-discard" }; // 수신은 수락됨(사용자 규칙에 의한 폐기)

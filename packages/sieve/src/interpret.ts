@@ -34,13 +34,24 @@ export interface SieveResult {
   redirect: string[];
   flags: string[];
   discarded: boolean;
+  /**
+   * `reject`/`ereject`(RFC 5429) — 이 수신자에게 배달하지 않고 **거절 사유를 발신자에게
+   * 알린다**. `null`이면 거절 없음.
+   *
+   * ★`reject`와 `ereject`를 결과에서 구분하지 않는 이유: 둘의 차이는 "어떻게 알리는가"인데
+   * (reject는 DSN 생성, ereject는 SMTP 세션에서 5xx) 우리 배달 경로는 **DATA를 받은 뒤**
+   * 수신자별로 판정하므로 어느 쪽이든 그 수신자에 대한 5xx로 표현된다. RFC 5429 §2.1도
+   * "가능하면 프로토콜 레벨 거절"을 권하고, 그게 우리가 할 수 있는 형태다.
+   * (구분이 필요해지면 그때 필드를 나눈다 — 지금 나누면 소비처가 없는 갈래가 생긴다.)
+   */
+  reject: string | null;
 }
 
-const SUPPORTED_EXTENSIONS = new Set(["fileinto", "envelope", "imap4flags", "copy"]);
+const SUPPORTED_EXTENSIONS = new Set(["fileinto", "envelope", "imap4flags", "copy", "reject", "ereject"]);
 
 interface ExecState {
   env: SieveEnv;
-  result: { keep: boolean; fileinto: string[]; redirect: string[]; flags: Set<string>; canceledImplicit: boolean; explicitKeep: boolean };
+  result: { keep: boolean; fileinto: string[]; redirect: string[]; flags: Set<string>; canceledImplicit: boolean; explicitKeep: boolean; reject: string | null };
   stopped: boolean;
 }
 
@@ -49,18 +60,27 @@ export function runSieve(src: string, env: SieveEnv): SieveResult {
   const cmds = parseSieve(src);
   const state: ExecState = {
     env,
-    result: { keep: false, fileinto: [], redirect: [], flags: new Set(), canceledImplicit: false, explicitKeep: false },
+    result: { keep: false, fileinto: [], redirect: [], flags: new Set(), canceledImplicit: false, explicitKeep: false, reject: null },
     stopped: false,
   };
   execBlock(cmds, state);
   const r = state.result;
-  const keep = r.explicitKeep || !r.canceledImplicit;
+  /**
+   * ★거절이 다른 모든 처분을 이긴다(RFC 5429 §2.1: reject는 다른 액션과 함께 쓸 수 없다).
+   * 파서 단계에서 막지 않고 여기서 이기게 두는 이유는, 조건 분기 때문에 **정적으로는
+   * 공존하지 않는데 문법상으로만 함께 있는** 스크립트가 흔하기 때문이다.
+   */
+  const keep = r.reject !== null ? false : r.explicitKeep || !r.canceledImplicit;
+  if (r.reject !== null) {
+    return { keep: false, fileinto: [], redirect: [], flags: [], discarded: false, reject: r.reject };
+  }
   return {
     keep,
     fileinto: [...new Set(r.fileinto)],
     redirect: [...new Set(r.redirect)],
     flags: [...r.flags],
     discarded: !keep && r.fileinto.length === 0 && r.redirect.length === 0,
+    reject: null,
   };
 }
 
@@ -99,6 +119,19 @@ function execAction(cmd: SieveCommand, st: ExecState): void {
     case "stop":
       st.stopped = true;
       return;
+    case "reject":
+    case "ereject": {
+      /**
+       * RFC 5429 — 배달하지 않고 발신자에게 사유를 알린다. `ereject`는 "프로토콜 레벨로
+       * 거절하라"는 뜻이고 `reject`는 DSN도 허용하는데, 우리 배달 경로에서는 둘 다 그
+       * 수신자에 대한 5xx가 된다(SieveResult.reject 주석).
+       */
+      const reason = firstStrings(cmd.args)[0];
+      if (reason === undefined) throw new SieveError(`${cmd.name} requires a reason string`);
+      r.reject = reason;
+      r.canceledImplicit = true;
+      return;
+    }
     case "keep":
       r.explicitKeep = true;
       return;
