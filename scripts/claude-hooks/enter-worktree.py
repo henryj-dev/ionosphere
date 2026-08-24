@@ -121,6 +121,39 @@ def record_owner(common, path):
         os.replace(tmp, owners_path)
 
 
+def verify_checkout(main, path, branch):
+    """`worktree add` 의 exit 0 을 믿지 않고 **체크아웃된 결과**를 직접 본다.
+
+    🔴 2026-08-24 실측: codex 샌드박스 안에서 `git worktree add` 가 **성공을 보고하고도
+    추적 파일 194개를 안 썼다**(`dispatcher/`·`deploy/`·`phase3/`·`vultr-broker/`·
+    `.stardust/` 통째로). 같은 생성기를 샌드박스 밖에서 돌린 대조군은 누락 0이었고,
+    codex 로 한 번 더 돌리니 또 0이었다 — **규칙이 아니라 일회성**이다. 그래서 원인을
+    아는 것으로는 못 막는다.
+
+    빠진 채로 작업을 시작하면 `git status` 가 그 파일들을 **삭제로** 보여주고, 그 상태의
+    커밋은 **없는 줄 알고 지운 것이 된다.** 조용한 손상이라 다음 사람이 못 알아본다.
+
+    ⚠️ 판정은 **없어진 추적 파일**(` D`)만 본다. 「변경됨」까지 실패로 세면 CRLF·clean
+    필터가 있는 레포에서 정상 생성을 고장으로 오판한다 — 이 검사가 막으려는 것은
+    「파일이 아예 안 쓰였다」이다.
+    """
+    # ⚠️ `git_text` 를 쓰지 말 것 — 그것은 git 이 실패하면 **빈 문자열**을 돌려주고,
+    #    그러면 「없어진 파일 0개」로 읽혀 이 검사가 **공허하게 통과**한다.
+    #    검사가 스스로 죽는 것과 대상이 멀쩡한 것을 같은 출구로 보내면 안 된다.
+    out = git(path, "status", "--porcelain", "-z", "--untracked-files=no",
+              timeout=120).stdout
+    missing = [e[3:] for e in out.split("\0") if e[:2] == " D"]
+    if not missing:
+        return
+    # 깨진 워크트리를 남기지 않는다 — 남기면 다음 실행이 「이미 존재합니다」로 막힌다.
+    git(main, "worktree", "remove", "--force", path, check=False, timeout=60)
+    git(main, "branch", "-D", branch, check=False)
+    raise RuntimeError(
+        f"체크아웃이 불완전합니다 — 추적 파일 {len(missing)}개가 기록되지 않았습니다"
+        f"(예: {', '.join(missing[:3])}). 워크트리를 지웠습니다. 다시 실행하십시오."
+    )
+
+
 def create(name):
     if not NAME_RE.fullmatch(name):
         raise ValueError("이름은 1~64자의 소문자·숫자·점·밑줄·하이픈만 사용할 수 있습니다")
@@ -150,6 +183,7 @@ def create(name):
     if os.path.islink(claude_dir) or os.path.islink(root):
         raise RuntimeError("생성 중 워크트리 루트가 심링크로 바뀌었습니다")
     git(main, "worktree", "add", "-b", branch, path, start_sha, timeout=None)
+    verify_checkout(main, path, branch)
     record_owner(common, path)
     return {"path": path, "branch": branch, "base": start, "base_sha": start_sha}
 
