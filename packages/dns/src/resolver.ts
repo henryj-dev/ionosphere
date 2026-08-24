@@ -239,8 +239,23 @@ export class RecursiveResolver implements DnsResolver {
         continue;
       }
 
-      // 답 없음 → 위임(referral)인지 NODATA인지 판별.
-      const nsRecords = msg.authorities.filter((r) => r.type === RRType.NS && r.rdata.kind === "NS");
+      /**
+       * 답 없음 → 위임(referral)인지 NODATA인지 판별.
+       *
+       * ★**bailiwick 검사**: NS 레코드의 소유 이름이 질의 이름의 조상이어야 한다. 이게 없으면
+       * `evil.test`의 네임서버가 `gmail.com NS ns.evil.test`를 authority에 실어 우리를 다른
+       * zone으로 끌고 갈 수 있다. 우리 캐시는 질의 이름으로만 저장하므로 다른 이름을 오염시키진
+       * 못하지만, **이 질의의 해석 경로**를 남에게 넘기는 것은 그 자체로 표준이 금지하는 형태다
+       * (RFC 1034 §4.3.2의 "이 zone에 대한 위임"이라는 전제).
+       */
+      const inBailiwick = (owner: string): boolean => {
+        const o = normName(owner);
+        const q = normName(currentName);
+        return o === "" || q === o || q.endsWith(`.${o}`);
+      };
+      const nsRecords = msg.authorities.filter(
+        (r) => r.type === RRType.NS && r.rdata.kind === "NS" && inBailiwick(r.name),
+      );
       const hasSoa = msg.authorities.some((r) => r.type === RRType.SOA);
       if (nsRecords.length === 0 || hasSoa) {
         // 권한 응답인데 해당 타입 없음(NODATA) → 영구 없음.
@@ -264,6 +279,17 @@ export class RecursiveResolver implements DnsResolver {
     for (const r of nsRecords) {
       if (r.rdata.kind === "NS") nsNames.add(normName(r.rdata.target));
     }
+    /**
+     * ★글루에는 zone 제약을 걸지 **않는다.** 실제 위임의 상당수가 zone 밖 NS 이름을 쓴다
+     * (`example.com NS ns1.provider.net`). 그걸 거부하면 그 이름을 따로 재귀 해석해야 하는데,
+     * `MAX_NS_RESOLVE`(2)에 걸려 정상 도메인이 해석되지 않을 수 있다 — 표준이 금지하는
+     * 형태를 막으려다 표준을 따르는 도메인을 죽이는 셈이다.
+     *
+     * 안전한 이유: 캐시 키가 **질의 이름**이라(`resolve()`) 글루가 다른 이름의 캐시를 오염시킬
+     * 수 없다. 글루가 가리키는 주소로 잘못 물어도 그 답은 위 `collectAnswers`가 질의 이름으로
+     * 다시 거른다. 정말 막아야 하는 것 — "다른 zone으로 해석 경로를 넘기는 것" — 은 위의
+     * NS bailiwick 검사가 이미 닫았다.
+     */
 
     // 글루(additional의 A/AAAA) 수집.
     const glue: string[] = [];
