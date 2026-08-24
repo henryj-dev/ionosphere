@@ -4,7 +4,8 @@
  * WebhookWorker/MtaWorker와 동형(interval + 재진입 가드 + 수동 tick).
  */
 import { noopLogger, type Logger } from "@ionosphere/core";
-import type { Store } from "@ionosphere/store";
+import { runRetention, type RetentionOptions, type Store } from "@ionosphere/store";
+import type { DbDriver } from "@ionosphere/db";
 
 export interface MailboxReaperOptions {
   store: Store;
@@ -21,6 +22,14 @@ export interface MailboxReaperOptions {
    * 치우는 게 맞다. 리퍼가 이미 "주기적으로 남은 것을 치우는" 역할이라 여기 둔다.
    */
   maildropLock?: { sweepExpired(now?: number, graceMs?: number): Promise<number> };
+  /**
+   * 보존창 스윕 — 지정 시 `change_log`·`thread_refs`·종료된 `mta_queue` 행을 잘라낸다.
+   * **생략하면 돌지 않는다**(기존 배포와 하위호환 — 보존 정책은 운영자가 켜는 것이다).
+   *
+   * 왜 리퍼가 하는가: 이미 "주기적으로 남은 것을 치우는" 역할이고 maildrop 만료 락도 여기서
+   * 쓸고 있다. 워커를 하나 더 만들면 주기·재진입 가드가 또 한 벌 생긴다.
+   */
+  retention?: RetentionOptions & { db: DbDriver };
 }
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
@@ -31,6 +40,7 @@ export class MailboxReaper {
   private readonly intervalMs: number;
   private readonly batchSize: number;
   private readonly maildropLock?: { sweepExpired(now?: number, graceMs?: number): Promise<number> };
+  private readonly retention?: RetentionOptions & { db: DbDriver };
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
 
@@ -40,6 +50,7 @@ export class MailboxReaper {
     this.intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.batchSize = opts.batchSize ?? 50;
     if (opts.maildropLock) this.maildropLock = opts.maildropLock;
+    if (opts.retention) this.retention = opts.retention;
   }
 
   start(): void {
@@ -81,6 +92,20 @@ export class MailboxReaper {
           if (swept > 0) this.log.info("maildrop 만료 락 정리", { swept });
         } catch (err) {
           this.log.warn("maildrop 락 정리 실패", { error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+      /**
+       * 보존창 스윕 — 메일함 수거와 별개다. 실패해도 삼킨다(부가 작업이고, 다음 주기에
+       * 다시 돈다). 첫 스윕은 누적분을 지우느라 길 수 있다 — `runRetention` 주석 참조.
+       */
+      if (this.retention) {
+        try {
+          const r = await runRetention(this.retention.db, this.retention);
+          if (r.changeLog > 0 || r.threadRefs > 0 || r.queue > 0 || r.floorsAdvanced > 0) {
+            this.log.info("보존창 스윕", { ...r });
+          }
+        } catch (err) {
+          this.log.warn("보존창 스윕 실패", { error: err instanceof Error ? err.message : String(err) });
         }
       }
       return reaped;

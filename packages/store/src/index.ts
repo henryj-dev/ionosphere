@@ -90,3 +90,5 @@ export { createBayesStore } from "./bayes-store.ts";
  * 한도의 소유자는 이 패키지다(`chunk.ts MAX_PARAMS_PER_STATEMENT`).
  */
 export { queryInChunks } from "./chunk.ts";
+
+export { runRetention, type RetentionOptions, type RetentionResult } from "./retention.ts";

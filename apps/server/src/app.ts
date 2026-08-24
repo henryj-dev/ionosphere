@@ -1327,6 +1327,12 @@ export class IonosphereApp {
         logger: log,
         // 폐기된 계정의 maildrop 락 행이 영원히 남지 않게 함께 정리한다.
         maildropLock: this.maildropLock,
+        /**
+         * 보존창 스윕 — change_log·thread_refs·종료된 mta_queue 행을 잘라낸다.
+         * 이것들은 주석이 "주기 스위퍼가 수렴시킨다"고 약속해 두고 구현이 없어 무한히 자랐다.
+         * 기본값(30일·180일·7일)은 `runRetention`이 소유한다 — 여기서 다시 적으면 갈라진다.
+         */
+        retention: { db: this.db },
         ...(this.opts.reaperIntervalMs !== undefined ? { intervalMs: this.opts.reaperIntervalMs } : {}),
       });
       this.reaper.start();
