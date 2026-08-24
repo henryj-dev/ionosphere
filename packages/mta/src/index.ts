@@ -19,6 +19,7 @@ export {
   type DeliveryOutcome,
   type DkimHook,
   type DkimKeyLookup,
+  type DsnHook,
   type MtaWorkerOptions,
   type MxRecord,
   type TlsaLookup,

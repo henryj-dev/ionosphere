@@ -65,6 +65,16 @@ export interface SmtpClientOptions {
 export interface RcptOutcome {
   code: number;
   permanent: boolean;
+  /**
+   * 그 수신자에 대한 **원격의 문구**.
+   *
+   * ★왜 필요한가: 전원 거절이면 세션 결과의 `message`가 우리가 합성한
+   * `"all recipients rejected"`라 원격이 왜 거절했는지가 사라진다. 그 값이 그대로
+   * `mta_queue.last_error`(테넌트가 `GET /v1/queue`로 본다)와 DSN의 `Diagnostic-Code`로
+   * 가므로, 사유가 없으면 둘 다 "실패했다"를 두 번 말하는 것에 가깝다 —
+   * `rejectionText()` 주석이 2026-08-03 라이브 사고로 적어 둔 것이 정확히 이 문제다.
+   */
+  message: string;
 }
 
 export interface SmtpClientResult {
@@ -601,7 +611,7 @@ export async function sendSmtp(opts: SmtpClientOptions): Promise<SmtpClientResul
       socket.write(`RCPT TO:<${rcpt}>\r\n`);
       const r = await reader.read();
       const ok = r.code >= 200 && r.code < 300;
-      rcptResults.set(rcpt, { code: r.code, permanent: isPermanent(r.code) });
+      rcptResults.set(rcpt, { code: r.code, permanent: isPermanent(r.code), message: r.lines.join(" ") });
       if (ok) acceptedRcpts.push(rcpt);
     }
 

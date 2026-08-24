@@ -59,7 +59,8 @@ describe("sendSmtp — 정상 발송", () => {
     expect(result.ok).toBe(true);
     expect(result.code).toBe(250);
     expect(result.permanent).toBe(false);
-    expect(result.rcptResults.get("bob@example.test")).toEqual({ code: 250, permanent: false });
+    expect(result.rcptResults.get("bob@example.test")?.code).toBe(250);
+    expect(result.rcptResults.get("bob@example.test")?.permanent).toBe(false);
 
     expect(delivered).toHaveLength(1);
     expect(delivered[0]?.mailFrom).toBe("alice@sender.test");
@@ -153,7 +154,11 @@ describe("sendSmtp — 수신자 거부", () => {
 
     expect(result.ok).toBe(false);
     expect(result.permanent).toBe(true);
-    expect(result.rcptResults.get("nouser@example.test")).toEqual({ code: 550, permanent: true });
+    expect(result.rcptResults.get("nouser@example.test")?.code).toBe(550);
+    expect(result.rcptResults.get("nouser@example.test")?.permanent).toBe(true);
+    // ★원격의 문구가 수신자별로 실려야 한다 — 전원 거절이면 세션 message는 우리가 합성한
+    //   "all recipients rejected"라 사유가 사라진다(last_error·DSN 진단이 그 값을 쓴다).
+    expect((result.rcptResults.get("nouser@example.test")?.message ?? "").length > 0).toBe(true);
   });
 
   test("일부 rcpt만 거부돼도 수락된 rcpt로 DATA까지 진행(부분 성공)", async () => {
@@ -180,8 +185,10 @@ describe("sendSmtp — 수신자 거부", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(result.rcptResults.get("bad@example.test")).toEqual({ code: 550, permanent: true });
-    expect(result.rcptResults.get("good@example.test")).toEqual({ code: 250, permanent: false });
+    expect(result.rcptResults.get("bad@example.test")?.code).toBe(550);
+    expect(result.rcptResults.get("bad@example.test")?.permanent).toBe(true);
+    expect(result.rcptResults.get("good@example.test")?.code).toBe(250);
+    expect(result.rcptResults.get("good@example.test")?.permanent).toBe(false);
     expect(delivered).toHaveLength(1);
     expect(delivered[0]?.rcptTo).toEqual(["good@example.test"]);
   });

@@ -9,6 +9,7 @@
 import { type Logger, noopLogger } from "@ionosphere/core";
 import { isLocallyRoutableDomain, lookupBlob, MTA_QUEUE_STATUS, SUPPRESSION_REASON, type DbDriver, type Statement } from "@ionosphere/db";
 import { dkimSign, RELAY_SAFE_SIGNED_HEADERS, type DkimAlgorithm } from "@ionosphere/mail-auth";
+import { buildDsn, DSN_ACTION, enhancedStatusFor, type DsnRecipient } from "./dsn.ts";
 
 import { fetchMtaStsPolicy, mxMatchesPolicy, stsEnforcement, type MtaStsFetchDeps, type MtaStsLookup } from "@ionosphere/mta-sts";
 import type { SmarthostOptions, SmarthostResolver } from "./smarthost.ts";
@@ -59,6 +60,20 @@ export interface DkimHook {
 
 export interface BlobReader {
   get(blobId: string, generation?: number): Promise<Uint8Array>;
+}
+
+/**
+ * DSN 발송 훅 — **워커가 무엇을 보낼지 정하고, 어댑터가 그것을 저장·적재한다.**
+ *
+ * ★왜 훅인가: DSN을 큐에 넣으려면 블롭을 **써야** 하는데 워커의 `BlobReader`는 읽기 전용이고,
+ * `putBlob`은 `@ionosphere/store`에 있다. `@ionosphere/mta`가 store에 의존하면 이 저장소가
+ * 정한 의존 방향(core → db → store → … )을 거스른다. 그래서 정책(무엇을 언제 보내는가)은
+ * 여기 두고 I/O만 조립층으로 내린다 — `dkim`·`resolveTlsa`·`onResult`와 같은 형태다.
+ *
+ * 구현은 **던지지 말 것**. DSN 실패가 발송 결과 기록을 막으면 큐 행이 열린 채 남는다.
+ */
+export interface DsnHook {
+  send(input: { tenantId: string; to: string; message: Uint8Array }): Promise<void>;
 }
 
 /** 릴레이 설정·해석기는 smarthost.ts가 소유한다(코덱과 같이 두기 위해). */
@@ -117,6 +132,11 @@ export interface MtaWorkerOptions {
     /** 스윕 주기(ms). 기본 1h. */
     sweepIntervalMs?: number;
   };
+  /**
+   * DSN 발송 훅 — 지정 시 영구 실패·상한 소진에 발신자에게 바운스를 보낸다.
+   * **생략하면 DSN을 만들지 않는다**(기존 동작·테스트와 하위호환).
+   */
+  dsn?: DsnHook;
   /**
    * 배달 결과 관측 훅 — 각 수신자 상태 전이(sent/bounced/deferred)와 계정 자동
    * 정지(suspended) 시 호출. @ionosphere/metrics 의존 없이 콜백만 받는다(의존성 역전).
@@ -272,6 +292,7 @@ export class MtaWorker {
   private readonly batchSize: number;
   private readonly abuseOptions: AbuseOptions | undefined;
   private readonly abuseSweepIntervalMs: number;
+  private readonly dsn: DsnHook | undefined;
   private readonly onResult: ((outcome: DeliveryOutcome) => void) | undefined;
   private readonly mtaSts: (MtaStsFetchDeps & { cacheTtlMs?: number }) | undefined;
   /**
@@ -306,6 +327,7 @@ export class MtaWorker {
     this.batchSize = opts.batchSize ?? DEFAULT_BATCH_SIZE;
     this.abuseOptions = opts.abuse?.enabled ? opts.abuse : undefined;
     this.abuseSweepIntervalMs = opts.abuse?.sweepIntervalMs ?? DEFAULT_ABUSE_SWEEP_INTERVAL_MS;
+    this.dsn = opts.dsn;
     this.onResult = opts.onResult;
     this.mtaSts = opts.mtaSts;
   }
@@ -778,8 +800,8 @@ export class MtaWorker {
       }
 
       // 청크 단위로 판정한다. 한 청크가 실패해도 이미 성공한 청크의 결과를 되돌리지 않는다.
-      if (!result || !usedMx) await this.deferAll(chunk, { tenant: lastErr, detail: lastErr });
-      else await this.applyOutcome(chunk, result, usedMx, domain, smarthost !== undefined);
+      if (!result || !usedMx) await this.deferAll(chunk, { tenant: lastErr, detail: lastErr }, raw);
+      else await this.applyOutcome(chunk, result, usedMx, domain, smarthost !== undefined, raw);
     }
   }
 
@@ -794,10 +816,13 @@ export class MtaWorker {
     mx: MxRecord,
     domain: string,
     viaSmarthost: boolean,
+    raw: Uint8Array,
   ): Promise<void> {
     const now = Date.now();
     const stmts: Statement[] = [];
     const suppressRows: unknown[][] = [];
+    /** 이 그룹에서 발신자에게 알려야 할 실패들 — 배치 커밋 뒤에 한 통으로 묶어 보낸다. */
+    const dsnRows: DsnRecipient[] = [];
 
     for (const row of rows) {
       const rc = result.rcptResults.get(row.rcpt);
@@ -817,6 +842,12 @@ export class MtaWorker {
        */
       const code = rcptAccepted ? result.code : rc ? rc.code : result.code;
       const permanent = rcptAccepted ? result.permanent : rc ? rc.permanent : result.permanent;
+      /**
+       * 문구도 **같은 단계**에서 가져온다. RCPT가 거절됐으면 원격이 그 수신자에게 준 문구가
+       * 사유이고, 세션 결과의 `message`는 전원 거절일 때 우리가 합성한
+       * `"all recipients rejected"`라 사유를 지운다(`RcptOutcome.message` 주석).
+       */
+      const detail = rcptAccepted ? result.message : rc ? rc.message : result.message;
 
       if (result.ok && rcptAccepted) {
         stmts.push({ sql: `UPDATE mta_queue SET status = ${STATUS.done}, last_error = NULL WHERE id = ?`, params: [row.id] });
@@ -828,7 +859,7 @@ export class MtaWorker {
       if (permanent) {
         stmts.push({
           sql: `UPDATE mta_queue SET status = ${STATUS.bounced}, last_error = ? WHERE id = ?`,
-          params: [rejectionText(code, result.message), row.id],
+          params: [rejectionText(code, detail), row.id],
         });
         /**
          * ★수신자를 억제할지는 **누가 거절했는가**에 달렸다 — 5xx라는 사실만으로는 부족하다.
@@ -868,6 +899,13 @@ export class MtaWorker {
           via: viaSmarthost ? "smarthost" : "mx",
           suppressed: !viaSmarthost,
         });
+        dsnRows.push({
+          rcpt: row.rcpt,
+          action: DSN_ACTION.failed,
+          status: enhancedStatusFor(code, DSN_ACTION.failed),
+          diagnostic: rejectionText(code, detail),
+          ...(viaSmarthost ? {} : { remoteMta: mx.exchange }),
+        });
         this.emitResult("bounced");
         continue;
       }
@@ -878,7 +916,7 @@ export class MtaWorker {
         stmts.push({
           sql: `UPDATE mta_queue SET status = ${STATUS.bounced}, attempts = ?, last_error = ? WHERE id = ?`,
           // 마지막 시도의 거절 문구까지 남긴다 — 8회를 소모한 이유가 코드 하나로는 드러나지 않는다.
-          params: [attempts, `max attempts exhausted: ${rejectionText(code, result.message)}`, row.id],
+          params: [attempts, `max attempts exhausted: ${rejectionText(code, detail)}`, row.id],
         });
         // 여기까지 온 건 **상대가 계속 4xx를 준** 경우다(연결 자체가 안 되는 경우는 deferAll로 빠진다).
         // 영구 거절이 아니라 우리가 포기한 것이므로 사유를 갈라 둔다 — 운영자가 해제할 수 있어야 한다.
@@ -896,6 +934,13 @@ export class MtaWorker {
           via: viaSmarthost ? "smarthost" : "mx",
           suppressed: !viaSmarthost,
         });
+        dsnRows.push({
+          rcpt: row.rcpt,
+          action: DSN_ACTION.failed,
+          status: enhancedStatusFor(code, DSN_ACTION.failed),
+          diagnostic: `max attempts exhausted: ${rejectionText(code, detail)}`,
+          ...(viaSmarthost ? {} : { remoteMta: mx.exchange }),
+        });
         this.emitResult("bounced");
       } else {
         const next = now + backoffMs(attempts);
@@ -903,7 +948,7 @@ export class MtaWorker {
           sql: `UPDATE mta_queue SET status = ${STATUS.deferred}, attempts = ?, next_attempt = ?, lease_until = NULL, last_error = ? WHERE id = ?`,
           // 4xx도 사유를 남긴다 — 재시도 중인 건이 "왜" 밀리는지 알아야 개입 시점을 판단할 수 있다
           // (상대 큐 과부하면 기다리면 되고, 정책 거절이면 기다려도 안 된다).
-          params: [attempts, next, rejectionText(code, result.message), row.id],
+          params: [attempts, next, rejectionText(code, detail), row.id],
         });
         // ★코드와 실패 단계를 로그에 남긴다. 예전엔 attempts·next만 찍어서, 재시도가 도는데
         // 왜 도는지 로그만으로는 알 수 없었다(2026-08-03 포워딩 사고). `stage`가 있으면
@@ -922,6 +967,44 @@ export class MtaWorker {
 
     this.appendSuppressions(stmts, suppressRows);
     await this.db.batch(stmts);
+    // ★배치 커밋 **뒤에** 보낸다. DSN 적재가 실패해도 큐 행은 이미 올바르게 닫혀 있어야 한다.
+    await this.sendDsn(rows[0], dsnRows, raw);
+  }
+
+  /**
+   * 실패를 발신자에게 통보한다 (RFC 5321 §6.1 MUST).
+   *
+   * ★**이중 바운스를 여기서 끊는다.** 봉투 발신자가 null(`<>`)이면 그 메시지 자체가 이미
+   * 바운스이거나 시스템 발송이다(`enqueue.ts`의 `SystemRelay.envFrom:"null-sender"`).
+   * 거기에 또 바운스를 보내면 무한 반사가 된다 — RFC 5321 §4.5.5가 reverse-path를 null로
+   * 요구하는 이유가 정확히 이 종결이다.
+   *
+   * 훅 실패는 삼킨다. 여기서 던지면 이미 커밋된 발송 결과 위에 예외가 얹혀 tick이 중단되고,
+   * 그러면 같은 그룹이 리스 만료 후 통째로 재처리된다.
+   */
+  private async sendDsn(row: QueueRow | undefined, recipients: readonly DsnRecipient[], raw: Uint8Array): Promise<void> {
+    if (!this.dsn || !row || recipients.length === 0) return;
+    if (row.envFrom.trim() === "") {
+      // 이중 바운스 차단 — 조용히 넘기지 않고 남긴다(바운스가 사라지는 것도 진단 대상이다).
+      this.logger.info("dsn 생략 — null 발신자(이중 바운스 차단)", { rcpts: recipients.length });
+      return;
+    }
+    try {
+      const message = buildDsn({
+        originalEnvelopeFrom: row.envFrom,
+        reportingMta: this.ehloName,
+        recipients,
+        originalMessage: raw,
+      });
+      if (!message) return;
+      await this.dsn.send({ tenantId: row.tenantId, to: row.envFrom, message });
+      this.logger.info("dsn 발송", { to: row.envFrom, rcpts: recipients.length });
+    } catch (err) {
+      this.logger.warn("dsn 발송 실패 — 발신자가 실패를 통보받지 못한다", {
+        to: row.envFrom,
+        error: errMsg(err),
+      });
+    }
   }
 
   /**
@@ -948,11 +1031,17 @@ export class MtaWorker {
     }
   }
 
-  private async deferAll(rows: QueueRow[], failure: QueueFailure): Promise<void> {
+  private async deferAll(rows: QueueRow[], failure: QueueFailure, raw?: Uint8Array): Promise<void> {
     const now = Date.now();
     const stmts: Statement[] = [];
     // 저장되는 값은 테넌트 노출용뿐이다 — 운영자용 상세는 로그로만 나간다(M-11).
     const stored = redactForTenant(failure.tenant);
+    /**
+     * 상한을 소진해 포기한 건만 통보한다. **재시도 중(deferred)에는 보내지 않는다** —
+     * 아직 배달될 수 있는 메일에 실패 통보를 보내면 사용자가 두 번 보내게 된다.
+     * (지연 통보는 별도 항목이다 — RFC 5321 §4.5.4.1은 4시간 경과 시 1회를 권고한다.)
+     */
+    const dsnRows: DsnRecipient[] = [];
 
     for (const row of rows) {
       const attempts = row.attempts + 1;
@@ -962,6 +1051,13 @@ export class MtaWorker {
           params: [attempts, stored, row.id],
         });
         this.logger.info("bounced", { rcpt: row.rcpt, attempts, reason: "max-attempts", suppressed: false, error: failure.detail });
+        dsnRows.push({
+          rcpt: row.rcpt,
+          action: DSN_ACTION.failed,
+          // 수신자와 한 마디도 못 나눈 실패다 — 원격 코드가 없으므로 일반값을 쓴다.
+          status: "5.0.0",
+          diagnostic: stored,
+        });
         this.emitResult("bounced");
       } else {
         const next = now + backoffMs(attempts);
@@ -975,6 +1071,8 @@ export class MtaWorker {
     }
 
     await this.db.batch(stmts);
+    // 블롭을 못 읽어 여기 온 경우엔 원문이 없다 — 헤더 없는 DSN이라도 보내는 편이 낫다.
+    await this.sendDsn(rows[0], dsnRows, raw ?? new Uint8Array(0));
   }
 
   private appendSuppressions(stmts: Statement[], suppressRows: readonly unknown[][]): void {

@@ -7,13 +7,14 @@ import {
   DbMaildropLock,
   FsBlobStore,
   LayeredBlobStore,
+  putBlob,
   scramAuthorize,
   scramKeysFor,
   Store,
   type BlobGcMode,
   type BlobStore,
 } from "@ionosphere/store";
-import type { OutboundPolicy } from "@ionosphere/mta";
+import { DEFAULT_RELAY_PER_HOUR, enqueueMessage, type OutboundPolicy } from "@ionosphere/mta";
 import { SmtpServer } from "@ionosphere/proto-smtp";
 import { Pop3Server } from "@ionosphere/proto-pop3";
 import { ImapServer } from "@ionosphere/proto-imap";
@@ -486,8 +487,11 @@ export interface IonosphereAppOptions {
   requireSenderOwnership?: boolean;
 }
 
-/** relay 총량 기본 상한 — 계정 제출 기본값(500/h)보다 넉넉해 정상 포워딩을 막지 않는다. */
-const DEFAULT_RELAY_PER_HOUR = 1000;
+/**
+ * relay 총량 기본 상한은 **@ionosphere/mta가 소유한다**(`enqueue.ts DEFAULT_RELAY_PER_HOUR`).
+ * 여기 같은 값(1000)이 따로 선언돼 있었는데, 그러면 소유자 쪽을 조정해도 조립층이 옛 값을
+ * 계속 쓴다 — "같은 상수가 두 곳에 복제되면 소유자를 정해 올린다"(CLAUDE.md 응집도).
+ */
 
 export class IonosphereApp {
   readonly opts: IonosphereAppOptions;
@@ -1201,6 +1205,30 @@ export class IonosphereApp {
         dkim: new StoreDkimHook(this.db, this.opts.masterKey),
         logger: ctx.log,
         ehloName: this.opts.hostname,
+        /**
+         * DSN 발송 — 워커가 "무엇을 보낼지"를 정하고 여기서 저장·적재만 한다
+         * (`DsnHook` 주석: @ionosphere/mta가 store에 의존하면 의존 방향이 뒤집힌다).
+         *
+         * ★`system` 선언이 필수 필드로 대체 방어를 요구한다(enqueue.ts SystemRelay):
+         *  · `envFrom: "null-sender"` — DSN의 reverse-path는 `<>`여야 한다(RFC 5321 §4.5.5).
+         *    이 한 줄이 **이중 바운스를 구조적으로 끊는다** — 이 DSN이 실패해도 그 실패에는
+         *    또 DSN이 만들어지지 않는다(워커가 빈 envFrom을 걸러 낸다).
+         *  · `relayPerHour` — 귀속 계정이 없는 갈래라 이것이 유일한 상한이다.
+         */
+        dsn: {
+          send: async ({ tenantId, to, message }) => {
+            const { blobId, size, generation } = await putBlob(this.db, this.blobs, message);
+            await enqueueMessage(this.db, {
+              tenantId,
+              blobId,
+              sizeBytes: size,
+              blobGeneration: generation,
+              envFrom: "",
+              rcpts: [to],
+              system: { relayPerHour: this.opts.relayPerHour ?? DEFAULT_RELAY_PER_HOUR, envFrom: "null-sender" },
+            });
+          },
+        },
         ...(this.opts.outboundPort !== undefined ? { port: this.opts.outboundPort } : {}),
         ...(this.opts.smarthost !== undefined ? { smarthost: this.opts.smarthost } : {}),
         // DANE(opt-in) — TLSA를 DNSSEC 검증해 조회한다. 검증 실패는 미적용, 조작 신호는 지연.
