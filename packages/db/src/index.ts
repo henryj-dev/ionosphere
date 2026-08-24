@@ -100,7 +100,8 @@ import { m009Complaints } from "./migrations/009_complaints.ts";
 import { m010BayesTokens } from "./migrations/010_bayes_tokens.ts";
 import { m011QueueIndexes } from "./migrations/011_queue_indexes.ts";
 import { m012DsnDelayNotice } from "./migrations/012_dsn_delay_notice.ts";
+import { m013Vacation } from "./migrations/013_vacation.ts";
 import type { Migration } from "./migrate.ts";
 
 /** 전체 마이그레이션 목록 (버전 순). */
-export const allMigrations: readonly Migration[] = [m001Init, m002Webhooks, m003Forwarding, m004BlobGc, m005MaildropLock, m006AddressFanout, m007Smarthosts, m008SuppressionExpiry, m009Complaints, m010BayesTokens, m011QueueIndexes, m012DsnDelayNotice];
+export const allMigrations: readonly Migration[] = [m001Init, m002Webhooks, m003Forwarding, m004BlobGc, m005MaildropLock, m006AddressFanout, m007Smarthosts, m008SuppressionExpiry, m009Complaints, m010BayesTokens, m011QueueIndexes, m012DsnDelayNotice, m013Vacation];

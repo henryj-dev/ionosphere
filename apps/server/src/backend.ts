@@ -40,7 +40,7 @@ import {
   type VirusScanOptions,
   type VirusScanner,
 } from "@ionosphere/spam";
-import { runSieve, type SieveEnv } from "@ionosphere/sieve";
+import { runSieve, type SieveEnv, type VacationRequest } from "@ionosphere/sieve";
 import { isSrsAddress, srsForward, srsReverse } from "@ionosphere/srs";
 import {
   authenticate,
@@ -51,6 +51,7 @@ import {
   type BlobStore,
   scramKeysFor,
   scramAuthorize,
+  claimVacationReply,
 } from "@ionosphere/store";
 import type { SmtpAuthResult, SmtpBackend } from "@ionosphere/proto-smtp";
 import type { LmtpBackend, LmtpDelivery, LmtpDeliverEnv } from "@ionosphere/proto-lmtp";
@@ -60,6 +61,7 @@ import {
   type Pop3MaildropMessage,
 } from "@ionosphere/proto-pop3";
 import { toAppendAddresses } from "./addresses.ts";
+import { buildVacationReply, decideVacation } from "./vacation.ts";
 
 /** ParsedMessage + 봉투 → Sieve 실행 환경(헤더 소문자 키). */
 function buildSieveEnv(parsed: ParsedMessage, env: { mailFrom: string; rcptTo: readonly string[] }, size: number): SieveEnv {
@@ -537,8 +539,8 @@ export class IonosphereSmtpBackend implements SmtpBackend {
     parsed: ParsedMessage,
     env: { mailFrom: string; rcptTo: readonly string[] },
     size: number,
-  ): Promise<{ mailboxIds: string[]; keywords: string[]; redirect: string[]; discard: boolean; fileintoUsed: boolean; reject: string | null }> {
-    const fallback = { mailboxIds: [inboxId], keywords: [] as string[], redirect: [] as string[], discard: false, fileintoUsed: false, reject: null };
+  ): Promise<{ mailboxIds: string[]; keywords: string[]; redirect: string[]; discard: boolean; fileintoUsed: boolean; reject: string | null; vacation: VacationRequest | null }> {
+    const fallback = { mailboxIds: [inboxId], keywords: [] as string[], redirect: [] as string[], discard: false, fileintoUsed: false, reject: null, vacation: null };
     const script = await this.store.getActiveSieveScript(accountId);
     if (!script) return fallback;
 
@@ -569,9 +571,9 @@ export class IonosphereSmtpBackend implements SmtpBackend {
      * 앞선다(§2.1: 다른 액션과 함께 쓸 수 없다 — 평가기가 그 우선순위를 이미 적용한다).
      */
     if (result.reject !== null) {
-      return { mailboxIds: [], keywords: [], redirect: [], discard: false, fileintoUsed: false, reject: result.reject };
+      return { mailboxIds: [], keywords: [], redirect: [], discard: false, fileintoUsed: false, reject: result.reject, vacation: null };
     }
-    if (result.discarded) return { mailboxIds: [], keywords: [], redirect: [], discard: true, fileintoUsed: false, reject: null };
+    if (result.discarded) return { mailboxIds: [], keywords: [], redirect: [], discard: true, fileintoUsed: false, reject: null, vacation: result.vacation };
 
     // fileinto 대상(경로)을 mailboxId로 — 없으면 INBOX 폴백
     const mailboxIds = new Set<string>();
@@ -592,6 +594,7 @@ export class IonosphereSmtpBackend implements SmtpBackend {
       redirect: result.redirect,
       discard: false,
       reject: null,
+      vacation: result.vacation,
       // 사용자가 fileinto로 자리를 명시했는가 — junk 재배치가 이걸 존중한다.
       fileintoUsed: result.fileinto.length > 0,
     };
@@ -1067,6 +1070,65 @@ export class IonosphereSmtpBackend implements SmtpBackend {
   }
 
   /**
+   * `vacation` 자동 응답 발송 (RFC 5230).
+   *
+   * 판정(§4.6 루프 방지)과 조립은 `vacation.ts`가, 중복 억제(§4.5)는 스토어가 한다 —
+   * 여기서는 **계정 주소를 모아 넘기고 큐에 넣는** 일만 한다.
+   *
+   * ★봉투 발신자는 `<>`(null sender)다. 자동 응답이 실패해도 그 바운스가 우리에게 돌아와
+   * 다시 자동 응답을 부르는 일이 없어야 한다 — RFC 5230 §4.6이 요구하는 종결이고,
+   * `enqueue.ts`의 `SystemRelay.envFrom: "null-sender"`가 그것을 **강제**한다.
+   */
+  private async sendVacationReply(
+    accountId: string,
+    rcpt: string,
+    request: VacationRequest,
+    parsed: ParsedMessage,
+    env: InboundEnv,
+    tenantId: string | null,
+  ): Promise<void> {
+    // "내 주소" — 계정 대표 주소 + 이 계정을 가리키는 알리아스. `:addresses`는 판정 함수가 합친다.
+    const { rows } = await this.db.query({ sql: "SELECT email FROM accounts WHERE id = ?", params: [accountId] });
+    const own = [rcpt, ...rows.map((r) => String(r.email))];
+
+    const decision = decideVacation({ request, parsed, envelopeFrom: env.mailFrom, ownAddresses: own });
+    if (!decision.send) {
+      // 이유를 남긴다 — 운영자가 "왜 답장이 안 갔나"에 답할 수 있어야 한다.
+      this.log.info("vacation 생략", { rcpt, reason: decision.reason });
+      return;
+    }
+
+    const first = await claimVacationReply(this.db, {
+      accountId,
+      handle: decision.handle,
+      recipient: decision.to,
+      days: decision.days,
+    });
+    if (!first) {
+      this.log.info("vacation 생략", { rcpt, reason: "already-replied" });
+      return;
+    }
+
+    const message = buildVacationReply({
+      request,
+      parsed,
+      to: decision.to,
+      from: String(rows[0]?.email ?? rcpt),
+    });
+    const { blobId, size, generation } = await putBlob(this.db, this.blobs, message);
+    await enqueueMessage(this.db, {
+      tenantId: tenantId ?? "",
+      blobId,
+      sizeBytes: size,
+      blobGeneration: generation,
+      envFrom: "",
+      rcpts: [decision.to],
+      system: { relayPerHour: this.relayPerHour, envFrom: "null-sender" },
+    });
+    this.log.info("vacation 자동 응답 발송", { rcpt, to: decision.to });
+  }
+
+  /**
    * 계정 1개 배달 — Sieve 라우팅(폐기·fileinto·redirect) 후 메일함에 append.
    * 팬아웃의 한 갈래이므로 forward_to 성패는 모르고, 자기 계정의 처분만 돌려준다.
    */
@@ -1095,6 +1157,20 @@ export class IonosphereSmtpBackend implements SmtpBackend {
        */
       this.log.info("sieve reject", { rcpt });
       return { status: "reject", reason: route.reject };
+    }
+    /**
+     * `vacation`(RFC 5230) — **배달과 별개**로 자동 응답을 보낸다(§4.3: 암묵 keep을 취소하지
+     * 않는다). discard와 함께 쓴 스크립트도 있으므로 discard 판정 **앞에서** 시도한다.
+     *
+     * 실패는 삼킨다 — 자동 응답이 안 갔다고 수신을 거절하면 발신자가 재시도하고, 그때 배달이
+     * 중복된다. 부가 기능이 본 기능을 망가뜨리면 안 된다.
+     */
+    if (route.vacation !== null && this.srsSecret) {
+      try {
+        await this.sendVacationReply(accountId, rcpt, route.vacation, parsed, env, tenantId);
+      } catch (err) {
+        this.log.warn("vacation 자동 응답 실패", { rcpt, error: err instanceof Error ? err.message : String(err) });
+      }
     }
     if (route.discard) {
       this.log.info("sieve discard", { rcpt });

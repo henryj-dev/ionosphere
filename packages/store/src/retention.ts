@@ -52,6 +52,8 @@ export interface RetentionOptions {
 
 export interface RetentionResult {
   changeLog: number;
+  /** 만료된 vacation 중복 억제 기록. */
+  vacationSent: number;
   threadRefs: number;
   queue: number;
   /** `changelog_floor`를 전진시킨 계정 수. */
@@ -115,6 +117,8 @@ export async function runRetention(db: DbDriver, opts: RetentionOptions = {}): P
       sql: `DELETE FROM mta_queue WHERE status IN (${MTA_QUEUE_STATUS.done}, ${MTA_QUEUE_STATUS.bounced}) AND created_at < ?`,
       params: [queueCutoff],
     },
+    // vacation 억제 기록은 **자체 만료 시각**을 들고 있다(`:days`가 스크립트마다 다르다).
+    { sql: `DELETE FROM vacation_sent WHERE expires_at <= ?`, params: [now] },
   ];
   const res = await db.batch(deletes);
 
@@ -123,5 +127,6 @@ export async function runRetention(db: DbDriver, opts: RetentionOptions = {}): P
     changeLog: res[0]?.changes ?? 0,
     threadRefs: res[1]?.changes ?? 0,
     queue: res[2]?.changes ?? 0,
+    vacationSent: res[3]?.changes ?? 0,
   };
 }

@@ -101,7 +101,7 @@ export class MailboxReaper {
       if (this.retention) {
         try {
           const r = await runRetention(this.retention.db, this.retention);
-          if (r.changeLog > 0 || r.threadRefs > 0 || r.queue > 0 || r.floorsAdvanced > 0) {
+          if (r.changeLog > 0 || r.threadRefs > 0 || r.queue > 0 || r.floorsAdvanced > 0 || r.vacationSent > 0) {
             this.log.info("보존창 스윕", { ...r });
           }
         } catch (err) {

@@ -45,13 +45,47 @@ export interface SieveResult {
    * (구분이 필요해지면 그때 필드를 나눈다 — 지금 나누면 소비처가 없는 갈래가 생긴다.)
    */
   reject: string | null;
+  /**
+   * `vacation`(RFC 5230) — 자동 응답 지시. `null`이면 없다.
+   *
+   * ★평가기는 **보낼지 말지를 정하지 않는다.** 중복 억제(§4.5)와 루프 방지(§4.6)는 저장소와
+   * 봉투·헤더를 봐야 하는 판단이라 배달 계층 몫이다. 여기서는 "사용자가 무엇을 요청했나"만
+   * 돌려준다 — 이 파일이 순수 함수라는 성질을 지키는 자리다.
+   */
+  vacation: VacationRequest | null;
 }
 
-const SUPPORTED_EXTENSIONS = new Set(["fileinto", "envelope", "imap4flags", "copy", "reject", "ereject"]);
+/** `vacation` 액션의 인자 (RFC 5230 §4). */
+export interface VacationRequest {
+  /** 본문(필수 위치 인자). */
+  reason: string;
+  /** `:days` — 같은 상대에게 다시 보내기까지의 최소 간격. 기본 7(§4.1). */
+  days: number;
+  /** `:subject` — 없으면 배달 계층이 원 제목에서 만든다. */
+  subject: string | null;
+  /** `:from` — 응답의 From. 없으면 배달 계층이 계정 주소를 쓴다. */
+  from: string | null;
+  /**
+   * `:addresses` — "내 주소"로 인정할 추가 주소들.
+   *
+   * §4.6이 요구하는 루프 방지의 핵심 입력이다: 수신자 헤더에 **내 주소가 없으면** 보내지
+   * 않는다(메일링리스트를 통해 온 메일에 전원 답장하는 사고를 막는다).
+   */
+  addresses: string[];
+  /**
+   * `:handle` — "같은 부재 응답인가"의 식별자(§4.4). 스크립트를 고쳐도 핸들이 같으면
+   * 억제가 이어진다. 없으면 배달 계층이 본문에서 유도한다.
+   */
+  handle: string | null;
+  /** `:mime` — reason이 이미 MIME 본문이다(헤더 포함). */
+  mime: boolean;
+}
+
+const SUPPORTED_EXTENSIONS = new Set(["fileinto", "envelope", "imap4flags", "copy", "reject", "ereject", "vacation"]);
 
 interface ExecState {
   env: SieveEnv;
-  result: { keep: boolean; fileinto: string[]; redirect: string[]; flags: Set<string>; canceledImplicit: boolean; explicitKeep: boolean; reject: string | null };
+  result: { keep: boolean; fileinto: string[]; redirect: string[]; flags: Set<string>; canceledImplicit: boolean; explicitKeep: boolean; reject: string | null; vacation: VacationRequest | null };
   stopped: boolean;
 }
 
@@ -60,7 +94,7 @@ export function runSieve(src: string, env: SieveEnv): SieveResult {
   const cmds = parseSieve(src);
   const state: ExecState = {
     env,
-    result: { keep: false, fileinto: [], redirect: [], flags: new Set(), canceledImplicit: false, explicitKeep: false, reject: null },
+    result: { keep: false, fileinto: [], redirect: [], flags: new Set(), canceledImplicit: false, explicitKeep: false, reject: null, vacation: null },
     stopped: false,
   };
   execBlock(cmds, state);
@@ -72,7 +106,8 @@ export function runSieve(src: string, env: SieveEnv): SieveResult {
    */
   const keep = r.reject !== null ? false : r.explicitKeep || !r.canceledImplicit;
   if (r.reject !== null) {
-    return { keep: false, fileinto: [], redirect: [], flags: [], discarded: false, reject: r.reject };
+    // 거절이면 자동 응답도 하지 않는다 — 받지 않겠다고 해 놓고 답장을 보내는 것은 모순이다.
+    return { keep: false, fileinto: [], redirect: [], flags: [], discarded: false, reject: r.reject, vacation: null };
   }
   return {
     keep,
@@ -81,6 +116,7 @@ export function runSieve(src: string, env: SieveEnv): SieveResult {
     flags: [...r.flags],
     discarded: !keep && r.fileinto.length === 0 && r.redirect.length === 0,
     reject: null,
+    vacation: r.vacation,
   };
 }
 
@@ -152,6 +188,37 @@ function execAction(cmd: SieveCommand, st: ExecState): void {
       if (!addr) throw new SieveError("redirect requires an address");
       r.redirect.push(addr);
       if (!copy) r.canceledImplicit = true;
+      return;
+    }
+    case "vacation": {
+      /**
+       * RFC 5230. `vacation`은 **암묵 keep을 취소하지 않는다**(§4.3) — 자동 응답은 배달에
+       * 더해지는 것이지 배달을 대신하는 것이 아니다.
+       *
+       * ★같은 스크립트에서 두 번 실행되면 첫 번째만 유효하다(§4: "한 번의 실행에 한 번").
+       * 조건 분기로 여러 vacation이 쓰인 스크립트가 흔하므로 파서에서 막지 않는다.
+       */
+      if (r.vacation !== null) return;
+      /**
+       * ★본문은 **태그가 소비하지 않은** 문자열 인자다. `firstStrings`를 쓰면
+       * `vacation :subject "Away" "본문"`에서 `"Away"`가 본문으로 들어간다 — 실제로 그렇게
+       * 썼다가 테스트가 잡았다. Sieve 인자는 위치가 의미를 가지므로 태그 소비를 먼저 셈해야 한다.
+       */
+      const reason = positionalStrings(cmd.args, VACATION_VALUE_TAGS)[0];
+      if (reason === undefined) throw new SieveError("vacation requires a reason string");
+      const days = tagNumber(cmd.args, "days");
+      if (days !== null && (!Number.isInteger(days) || days < 1)) {
+        throw new SieveError("vacation :days must be a positive integer");
+      }
+      r.vacation = {
+        reason,
+        days: days ?? DEFAULT_VACATION_DAYS,
+        subject: tagString(cmd.args, "subject"),
+        from: tagString(cmd.args, "from"),
+        addresses: tagStrings(cmd.args, "addresses"),
+        handle: tagString(cmd.args, "handle"),
+        mime: hasTag(cmd.args, "mime"),
+      };
       return;
     }
     case "setflag":
@@ -265,6 +332,79 @@ function anyMatch(values: readonly string[], keys: readonly string[], kind: Matc
 }
 
 // ── 인자 헬퍼 ──────────────────────────────────────────────────────────────────
+
+/**
+ * 태그가 소비하지 않은 **위치 인자** 문자열들.
+ *
+ * `:tag "값"` 형태에서 `"값"`은 그 태그의 것이지 위치 인자가 아니다. 이 구분이 없으면
+ * 태그를 쓴 스크립트와 안 쓴 스크립트가 다른 값을 본문으로 읽는다.
+ */
+function positionalStrings(args: readonly SieveArg[], valueTags: ReadonlySet<string>): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a?.kind === "tag") {
+      /**
+       * ★**값을 받는 태그만** 다음 인자를 소비한다. `:mime`·`:copy`처럼 값 없는 태그까지
+       * 소비하면 `vacation :mime "본문"`에서 본문이 사라진다 — 태그 목록을 넘기게 한 이유다
+       * (모든 태그가 값을 받는다고 가정했다가 그 갈래를 만들 뻔했다).
+       */
+      if (valueTags.has(a.name)) {
+        const next = args[i + 1];
+        if (next?.kind === "strings" || next?.kind === "number") i++;
+      }
+      continue;
+    }
+    if (a?.kind === "strings") out.push(...a.values);
+  }
+  return out;
+}
+
+/** `vacation`에서 **값을 받는** 태그(RFC 5230 §4). `:mime`은 값이 없다. */
+const VACATION_VALUE_TAGS = new Set(["days", "subject", "from", "addresses", "handle"]);
+
+/** RFC 5230 §4.1 — `:days` 기본값. */
+const DEFAULT_VACATION_DAYS = 7;
+
+/**
+ * `:tag "value"` 형태의 인자에서 값을 꺼낸다.
+ *
+ * ★태그 **바로 뒤**의 값만 본다. Sieve 인자는 위치가 의미를 갖는데(`vacation :subject "x" "본문"`),
+ * "첫 문자열"을 쓰면 태그 값과 위치 인자가 섞인다 — `:subject` 없이 쓴 스크립트의 본문이
+ * 제목으로 들어가는 식이다.
+ */
+function tagString(args: readonly SieveArg[], name: string): string | null {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a?.kind !== "tag" || a.name !== name) continue;
+    const next = args[i + 1];
+    if (next?.kind === "strings") return next.values[0] ?? null;
+    return null;
+  }
+  return null;
+}
+
+/** `:tag ["a", "b"]` — 목록형 태그 값. 없으면 빈 배열. */
+function tagStrings(args: readonly SieveArg[], name: string): string[] {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a?.kind !== "tag" || a.name !== name) continue;
+    const next = args[i + 1];
+    return next?.kind === "strings" ? [...next.values] : [];
+  }
+  return [];
+}
+
+/** `:tag 7` — 숫자형 태그 값. */
+function tagNumber(args: readonly SieveArg[], name: string): number | null {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a?.kind !== "tag" || a.name !== name) continue;
+    const next = args[i + 1];
+    return next?.kind === "number" ? next.value : null;
+  }
+  return null;
+}
 
 function hasTag(args: readonly SieveArg[], name: string): boolean {
   return args.some((a) => a.kind === "tag" && a.name === name);
