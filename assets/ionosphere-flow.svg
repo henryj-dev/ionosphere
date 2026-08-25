@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
+  <title id="title">Ionosphere mail flow</title>
+  <desc id="desc">Mail clients connect through protocol surfaces to the ionosphere core, shared storage, and workers</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#080d20"/>
+      <stop offset="1" stop-color="#111b3d"/>
+    </linearGradient>
+    <linearGradient id="core" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#67e8f9"/>
+      <stop offset="1" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="line" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#67e8f9" stop-opacity=".25"/>
+      <stop offset=".5" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#86efac" stop-opacity=".25"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-30%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#020617" flood-opacity=".6"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="420" rx="28" fill="url(#bg)"/>
+  <g fill="none" stroke="url(#line)" stroke-width="3" stroke-linecap="round">
+    <path d="M235 125H355"/><path d="M235 210H355"/><path d="M235 295H355"/>
+    <path d="M845 125H965"/><path d="M845 210H965"/><path d="M845 295H965"/>
+  </g>
+  <g fill="#67e8f9">
+    <circle cx="355" cy="125" r="5"/><circle cx="355" cy="210" r="5"/><circle cx="355" cy="295" r="5"/>
+    <circle cx="845" cy="125" r="5"/><circle cx="845" cy="210" r="5"/><circle cx="845" cy="295" r="5"/>
+  </g>
+  <g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" fill="#e2e8f0">
+    <g filter="url(#shadow)">
+      <rect x="48" y="78" width="187" height="94" rx="16" fill="#172554" stroke="#334f91"/>
+      <rect x="48" y="163" width="187" height="94" rx="16" fill="#172554" stroke="#334f91"/>
+      <rect x="48" y="248" width="187" height="94" rx="16" fill="#172554" stroke="#334f91"/>
+    </g>
+    <text x="72" y="112" font-size="15" fill="#a5b4fc">PROTOCOLS</text>
+    <text x="72" y="140" font-size="22" font-weight="700">SMTP · LMTP</text>
+    <text x="72" y="197" font-size="15" fill="#a5b4fc">CLIENT ACCESS</text>
+    <text x="72" y="225" font-size="22" font-weight="700">IMAP · POP3</text>
+    <text x="72" y="282" font-size="15" fill="#a5b4fc">MODERN API</text>
+    <text x="72" y="310" font-size="22" font-weight="700">JMAP · Sieve</text>
+    <g filter="url(#shadow)">
+      <rect x="355" y="70" width="490" height="280" rx="28" fill="#172554" stroke="url(#core)" stroke-width="2"/>
+      <circle cx="600" cy="174" r="70" fill="none" stroke="#67e8f9" stroke-opacity=".18" stroke-width="18"/>
+      <circle cx="600" cy="174" r="43" fill="url(#core)"/>
+      <path d="M563 174c20-17 50-19 74-5M568 194c19-9 39-9 61 0" fill="none" stroke="#ecfeff" stroke-width="5" stroke-linecap="round" opacity=".8"/>
+      <text x="600" y="275" text-anchor="middle" font-size="28" font-weight="700">ionosphere core</text>
+      <text x="600" y="304" text-anchor="middle" font-size="16" fill="#bfdbfe">pure engines · thin adapters · shared policy</text>
+    </g>
+    <g filter="url(#shadow)">
+      <rect x="965" y="78" width="187" height="94" rx="16" fill="#12352f" stroke="#3b806d"/>
+      <rect x="965" y="163" width="187" height="94" rx="16" fill="#12352f" stroke="#3b806d"/>
+      <rect x="965" y="248" width="187" height="94" rx="16" fill="#12352f" stroke="#3b806d"/>
+    </g>
+    <text x="989" y="112" font-size="15" fill="#86efac">STATE</text>
+    <text x="989" y="140" font-size="22" font-weight="700">DB</text>
+    <text x="989" y="197" font-size="15" fill="#86efac">MESSAGE DATA</text>
+    <text x="989" y="225" font-size="22" font-weight="700">Blobs</text>
+    <text x="989" y="282" font-size="15" fill="#86efac">BACKGROUND</text>
+    <text x="989" y="310" font-size="22" font-weight="700">Workers</text>
+  </g>
+</svg>

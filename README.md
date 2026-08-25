@@ -1,38 +1,133 @@
-# ionosphere
+<div align="center">
 
-TypeScript로 구현한 Node.js 올인원 메일 플랫폼입니다.
+<img src="assets/ionosphere-banner.svg" alt="ionosphere — a complete mail platform in one Node.js process" width="100%">
 
-SMTP 수신부터 IMAP·POP3·JMAP 접근, SMTP 발송, Sieve 필터, 도메인·계정 관리까지 하나의 저장소와 서버 프로세스에서 제공합니다. 프로토콜별 핵심 동작은 순수 상태머신으로 분리하고, 네트워크 소켓·HTTP·데이터베이스는 얇은 어댑터가 담당합니다.
+**[English](README.md)** · **[한국어](README.ko.md)**
 
-> 이 README는 소스 코드와 테스트에서 확인되는 동작을 설명합니다. 배포 환경의 실제 주소·자격증명·호스트별 절차는 이 저장소에 넣지 않습니다.
+<br><br>
 
-## 한눈에 보기
+<a href="#quick-start">Quick start</a> · <a href="#administration-cli">CLI</a> · <a href="#storage-configuration">Storage</a> · <a href="#mail-security-policy">Security</a>
 
-| 영역 | 제공 기능 |
+</div>
+
+<div align="center">
+
+<table>
+<tr>
+<td align="center" width="25%"><strong>Receive</strong><br><sub>SMTP · LMTP<br>aliases · Sieve</sub></td>
+<td align="center" width="25%"><strong>Access</strong><br><sub>IMAP · POP3<br>JMAP · push</sub></td>
+<td align="center" width="25%"><strong>Deliver</strong><br><sub>MX · smarthost<br>queue · DKIM</sub></td>
+<td align="center" width="25%"><strong>Control</strong><br><sub>REST · CLI<br>audit · metrics</sub></td>
+</tr>
+</table>
+
+</div>
+
+Ionosphere provides SMTP reception, IMAP and POP3 access, JMAP, outbound delivery, Sieve filtering, forwarding, domain and account administration, and operational tooling from one repository and one application process. Protocol behavior is implemented as isolated state machines; sockets, HTTP, and database access are thin adapters around them.
+
+> [!NOTE]
+> This README describes behavior visible in the source code and tests. Production addresses, credentials, host fingerprints, and private deployment procedures are intentionally not included.
+
+## Contents
+
+- [Features](#features)
+- [Quick start](#quick-start)
+- [Administration CLI](#administration-cli)
+- [Storage configuration](#storage-configuration)
+- [Listeners and networking](#listeners-and-networking)
+- [TLS and certificates](#tls-and-certificates)
+- [HTTP, JMAP, and autoconfiguration](#http-jmap-and-autoconfiguration)
+- [Administration REST API](#administration-rest-api)
+- [Mail security policy](#mail-security-policy)
+- [Environment variables](#environment-variable-reference)
+- [Development and verification](#development-and-verification)
+- [Operations checklist](#operations-checklist)
+
+---
+
+## Features
+
+| Area | Features |
 | --- | --- |
-| 메일 수신 | SMTP, LMTP, alias, catch-all, forwarding, Sieve |
-| 메일 접근 | IMAP, IMAPS, POP3, POP3S, JMAP |
-| 메일 발송 | 큐, 재시도, MX 직송, 스마트호스트, DSN, DKIM |
-| 인증 | PLAIN, LOGIN, SCRAM-SHA-256, XOAUTH2, OAUTHBEARER |
-| 메일 보안 | SPF, DKIM, DMARC, MTA-STS, DANE/TLSA, SRS |
-| 관리 | REST API, CLI, 브라우저 관리 콘솔 |
-| 저장소 | SQLite, PostgreSQL, MySQL, 로컬 블롭, S3 호환 저장소 |
-| 운영 | 메트릭, 감사 로그, blob GC, retention/reaper, webhook, push |
+| Mail reception | SMTP, LMTP, aliases, catch-all, forwarding, Sieve |
+| Mail access | IMAP, IMAPS, POP3, POP3S, JMAP |
+| Outbound delivery | Queue, retries, direct MX delivery, smarthost, DSN, DKIM |
+| Authentication | PLAIN, LOGIN, SCRAM-SHA-256, XOAUTH2, OAUTHBEARER |
+| Mail security | SPF, DKIM, DMARC, MTA-STS, DANE/TLSA, SRS |
+| Administration | REST API, CLI, browser administration console |
+| Storage | SQLite, PostgreSQL, MySQL, local blobs, S3-compatible storage |
+| Operations | Metrics, audit logs, blob GC, retention/reaper, webhooks, push |
 
-## 요구 사항
+### Architecture at a glance
 
-- Node.js 24 이상
+<div align="center">
+<img src="assets/ionosphere-flow.svg" alt="Ionosphere mail flow from protocol surfaces through the core to shared state, message blobs, and workers" width="900">
+</div>
+
+The same administration command registry powers the CLI, REST API, and browser console, keeping the three management surfaces aligned.
+
+<div align="center">
+
+<table>
+<tr>
+<td valign="top" width="33%"><h3>🧩 One platform</h3><sub>Inbound, outbound, storage, authentication, and administration share the same domain model.</sub></td>
+<td valign="top" width="33%"><h3>🔒 Fail closed</h3><sub>TLS, host routing, scopes, limits, and secret handling reject ambiguous configuration early.</sub></td>
+<td valign="top" width="33%"><h3>🧪 Testable core</h3><sub>Protocol engines are deterministic state machines, separated from sockets and external I/O.</sub></td>
+</tr>
+</table>
+
+</div>
+
+### Choose a starting shape
+
+| If you need… | Start with… | Add later… |
+| --- | --- | --- |
+| A local development server | SQLite + filesystem blobs + self-signed TLS | IMAP, JMAP, and the admin API |
+| A single production node | SQLite or PostgreSQL + filesystem/S3 blobs | ACME, metrics, audit, and workers |
+| Multiple mail nodes | PostgreSQL/MySQL + shared S3-compatible blobs | Per-listener TLS and role-specific workers |
+
+### Defaults that protect you
+
+| Boundary | Default behavior |
+| --- | --- |
+| Secrets at rest | Startup requires a master key; plaintext storage is an explicit opt-in |
+| Optional listeners | Disabled until their port is configured |
+| Plaintext authentication | Blocked when TLS is unavailable |
+| Administration | Scope checks are enforced by HTTP method |
+| S3 configuration | Partial configuration fails startup instead of falling back silently |
+| Listener binding | Ambiguous numeric addresses are rejected |
+
+## Protocol map
+
+| Surface | Typical listener | Transport | What it is for |
+| --- | --- | --- | --- |
+| SMTP | 25 / 2525 | Plain + STARTTLS | Inbound mail from other MTAs |
+| Submission | 587 | STARTTLS | Authenticated client submission |
+| SMTPS | 465 | Implicit TLS | Authenticated client submission over TLS |
+| IMAP | 143 | STARTTLS | Mailbox access and synchronization |
+| IMAPS | 993 | Implicit TLS | Mailbox access over TLS |
+| POP3 | 110 / 1110 | Plain + TLS policy | Simple maildrop retrieval |
+| POP3S | 995 | Implicit TLS | Maildrop retrieval over TLS |
+| JMAP | HTTP | HTTP + TLS front | Modern mail and submission API |
+| ManageSieve | 4190 | STARTTLS | Sieve script management |
+| LMTP | Local port | Trusted local channel | Per-recipient local delivery |
+
+## Requirements
+
+- Node.js 24 or newer
 - npm
-- 기본 구성에서는 별도의 DB 서버나 외부 npm 런타임 의존성이 필요하지 않음
-- PostgreSQL 사용 시 `pg`, MySQL 사용 시 `mysql2`
+- No database server or external runtime service is required for the default configuration
+- pg for PostgreSQL or mysql2 for MySQL
 
-패키지의 런타임 코드는 `node:` 내장 모듈을 사용합니다. 테스트와 타입체크를 위해 루트 개발 의존성이 설치됩니다.
+Runtime code uses Node built-in node: modules. Development dependencies are installed for testing and type checking.
 
-## 빠른 시작
+---
 
-아래는 로컬 SQLite, 로컬 블롭, 자체서명 인증서를 사용하는 개발용 구성입니다. `example.com`은 문서용 예시 도메인입니다.
+## Quick start
 
-```bash
+The following is a development configuration using local SQLite, local blob storage, and a self-signed certificate. example.com is a documentation-only example domain.
+
+~~~bash
 npm install
 
 export IONOSPHERE_DB="$PWD/ionosphere.db"
@@ -45,20 +140,45 @@ IONOSPHERE_TLS_DIR="$PWD/tls" \
 IONOSPHERE_SMTP_STARTTLS=1 \
 IONOSPHERE_SMTP_PORT=2525 \
 node apps/server/src/main.ts
-```
+~~~
 
-기본으로 열리는 포트는 개발용 비특권 포트입니다.
+The default development listeners use unprivileged ports:
 
-- SMTP: `2525`
-- POP3: `1110`
+- SMTP: 2525
+- POP3: 1110
 
-IMAP, IMAPS, Submission, JMAP, ManageSieve, 관리 API 등은 해당 포트 환경변수를 지정했을 때만 시작됩니다.
+IMAP, IMAPS, Submission, JMAP, ManageSieve, the administration API, and other optional listeners start only when their port is configured.
 
-## 관리 CLI
+### Loading a .env file
 
-관리 CLI는 서버와 같은 DB 선택 규칙을 사용합니다.
+The server does not load the npm `dotenv` package. Node.js 24 provides the required behavior natively through `--env-file`:
 
-```bash
+~~~bash
+node --env-file=.env apps/server/src/main.ts
+node --env-file=.env apps/server/src/cli.ts help
+~~~
+
+Example `.env`:
+
+~~~dotenv
+IONOSPHERE_DB=./ionosphere.db
+IONOSPHERE_BLOBS=./blobs
+IONOSPHERE_MASTER_KEY=replace-with-a-long-random-secret
+IONOSPHERE_HOSTNAME=mail.example.com
+IONOSPHERE_TLS_MODE=selfsigned
+IONOSPHERE_SMTP_STARTTLS=1
+IONOSPHERE_SMTP_PORT=2525
+~~~
+
+Keep `.env` out of version control. It may contain database passwords, API tokens, private keys, and the master key. Add it to `.gitignore` for local development.
+
+---
+
+## Administration CLI
+
+The CLI follows the same database selection rules as the server.
+
+~~~bash
 export IONOSPHERE_DB="$PWD/ionosphere.db"
 export IONOSPHERE_MASTER_KEY="$(openssl rand -hex 32)"
 
@@ -66,70 +186,70 @@ node apps/server/src/cli.ts help
 node apps/server/src/cli.ts help domain-add
 node apps/server/src/cli.ts domain-add example.com
 node apps/server/src/cli.ts account-create alice@example.com 'change-this-password'
-```
+~~~
 
-일반 형식:
+General syntax:
 
-```text
+~~~text
 node apps/server/src/cli.ts <command> [--key=value ...]
 node apps/server/src/cli.ts help
 node apps/server/src/cli.ts help <command>
-```
+~~~
 
-스마트호스트 비밀번호와 TLS private key는 argv 대신 stdin 또는 환경변수로 입력하는 것이 안전합니다.
+Avoid placing secrets in argv. Smarthost passwords and TLS private keys can be supplied through stdin or environment variables:
 
-```bash
+~~~bash
 export IONOSPHERE_CLI_SECRET='secret-value'
 export IONOSPHERE_SMARTHOST_SECRET='relay-password'
-```
+~~~
 
-### 명령 목록
+### Available commands
 
-도메인:
+Domains:
 
-- `domain-list`, `domain-add`, `domain-verify`
-- `domain-disable`, `domain-enable`, `domain-release`
+- domain-list, domain-add, domain-verify
+- domain-disable, domain-enable, domain-release
 
-계정·자격증명:
+Accounts and credentials:
 
-- `account-list`, `account-create`, `account-suspend`
-- `account-activate`, `account-delete`
-- `app-password-list`, `app-password-create`
-- `oauth-token-list`, `oauth-token-create`, `credential-revoke`
+- account-list, account-create, account-suspend
+- account-activate, account-delete
+- app-password-list, app-password-create
+- oauth-token-list, oauth-token-create, credential-revoke
 
-라우팅:
+Routing:
 
-- `alias-list`, `alias-add`, `alias-remove`
+- alias-list, alias-add, alias-remove
 
-발송 운영:
+Delivery operations:
 
-- `queue-list`, `queue-retry`, `queue-cancel`
-- `suppression-list`, `suppression-remove`, `usage`
-- `smarthost-list`, `smarthost-set`, `smarthost-remove`
+- queue-list, queue-retry, queue-cancel
+- suppression-list, suppression-remove, usage
+- smarthost-list, smarthost-set, smarthost-remove
 
-테넌트·API key·TLS:
+Tenants, API keys, and TLS:
 
-- `tenant-list`, `tenant-create`
-- `api-key-list`, `api-key-create`, `api-key-revoke`
-- `tls-status`, `tls-refresh`, `tls-upload`
+- tenant-list, tenant-create
+- api-key-list, api-key-create, api-key-revoke
+- tls-status, tls-refresh, tls-upload
 
-도메인은 REST 경로에서 소유권 TXT·MX·SPF 검증을 통과해야 사용할 수 있습니다. CLI는 로컬 운영 도구라는 전제 때문에 기본적으로 검증 완화 호환 동작을 사용하며, 필요하면 `--preVerified=false`를 지정할 수 있습니다.
+REST domain operations require ownership TXT, MX, and SPF verification before a domain can be used. The CLI is a local operator tool and preserves a compatibility path with relaxed verification defaults; use --preVerified=false when the verification flow is required.
 
-계정 삭제는 되돌릴 수 없는 드레인 작업입니다. 잠시 사용을 막으려면 `account-suspend`를 사용합니다. 앱 비밀번호와 OAuth token의 평문은 생성 시 한 번만 출력됩니다.
+Account deletion starts an irreversible drain. Use account-suspend for a reversible lock. App passwords and OAuth tokens are shown in plaintext only when they are created.
 
-alias는 로컬 계정 여러 개 또는 외부 주소로 라우팅할 수 있으며 localpart가 `*`이면 catch-all입니다. 외부 forwarding에는 SRS 비밀키가 필요합니다.
+Aliases can route to multiple local accounts or external addresses. A local part of * creates a catch-all. External forwarding requires an SRS secret:
 
-```bash
+~~~bash
 export IONOSPHERE_SRS_SECRET="$(openssl rand -hex 32)"
-```
+~~~
 
-API key scope는 `read`, `write`, `admin`입니다. `read`는 조회, `write`는 조회와 변경, `admin`은 전권입니다.
+API key scopes are read, write, and admin. read permits reads, write permits reads and changes, and admin grants full access.
 
-## 저장소 구성
+## Storage configuration
 
-### 데이터베이스
+### Database
 
-```bash
+~~~bash
 # SQLite
 IONOSPHERE_DB=./ionosphere.db
 
@@ -138,23 +258,23 @@ IONOSPHERE_DB_URL=postgres://user:password@db.example.com:5432/ionosphere
 
 # MySQL
 IONOSPHERE_DB_URL=mysql://user:password@db.example.com:3306/ionosphere
-```
+~~~
 
-`IONOSPHERE_DB_URL`이 있으면 `IONOSPHERE_DB`보다 우선합니다. SQLite는 단일 writer 구성에 적합하고, 여러 서버가 동시에 상태를 공유하려면 PostgreSQL 또는 MySQL을 사용해야 합니다.
+IONOSPHERE_DB_URL takes precedence over IONOSPHERE_DB. SQLite is intended for a single-writer deployment. Use PostgreSQL or MySQL when multiple servers must share state.
 
-DB 드라이버는 지연 로드되므로 SQLite만 사용할 때 `pg`와 `mysql2`를 설치할 필요가 없습니다.
+Database drivers are loaded lazily, so SQLite-only deployments do not need pg or mysql2 at runtime.
 
-### 메시지 본문 블롭
+### Message blobs
 
-기본 저장소는 로컬 파일시스템입니다.
+The default blob store is the local filesystem:
 
-```bash
+~~~bash
 IONOSPHERE_BLOBS=./blobs
-```
+~~~
 
-S3 호환 저장소:
+For S3-compatible storage, all four core settings are required:
 
-```bash
+~~~bash
 IONOSPHERE_S3_ENDPOINT=https://s3.example.com
 IONOSPHERE_S3_BUCKET=ionosphere-mail
 IONOSPHERE_S3_ACCESS_KEY=access-key
@@ -163,69 +283,59 @@ IONOSPHERE_S3_REGION=us-east-1
 IONOSPHERE_S3_PREFIX=mail/
 IONOSPHERE_S3_PATH_STYLE=1
 IONOSPHERE_S3_TIMEOUT_MS=30000
-```
+~~~
 
-S3의 endpoint, bucket, access key, secret key는 모두 지정해야 합니다. 일부만 지정하면 서버가 시작하지 않습니다. 로컬 파일에서 S3로 이전할 때는 다음을 사용해 기존 파일을 읽기 폴백으로 유지할 수 있습니다.
+Partial S3 configuration stops startup instead of silently falling back to local storage. During a filesystem-to-S3 migration, keep the local filesystem as a read fallback with IONOSPHERE_S3_MIGRATE_FROM_FS=1.
 
-```bash
-IONOSPHERE_S3_MIGRATE_FROM_FS=1
-```
+### Secrets at rest
 
-### 비밀값 저장
+Production deployments should set:
 
-운영 구성의 기본:
-
-```bash
+~~~bash
 IONOSPHERE_MASTER_KEY=strong-random-master-key
-```
+~~~
 
-master key는 DKIM private key와 스마트호스트 비밀번호 등 저장 비밀을 봉인합니다. 개발 환경에서만 다음으로 평문 저장을 명시적으로 허용할 수 있습니다.
+The master key seals stored secrets such as DKIM private keys and smarthost passwords. Development-only plaintext storage can be explicitly enabled with IONOSPHERE_ALLOW_PLAINTEXT_SECRETS=1. This emits a warning and stores applicable values with a plain$ prefix.
 
-```bash
-IONOSPHERE_ALLOW_PLAINTEXT_SECRETS=1
-```
+## Listeners and networking
 
-이 경우 경고가 발생하고 일부 비밀값이 `plain$` 형식으로 저장됩니다.
-
-## 리스너와 네트워크
-
-| 서비스 | 환경변수 | 기본값 |
+| Service | Environment variable | Default |
 | --- | --- | --- |
-| SMTP 수신 | `IONOSPHERE_SMTP_PORT` | `2525` |
-| POP3 | `IONOSPHERE_POP3_PORT` | `1110` |
-| IMAP | `IONOSPHERE_IMAP_PORT` | 없음 |
-| IMAPS | `IONOSPHERE_IMAPS_PORT` | 없음 |
-| POP3S | `IONOSPHERE_POP3S_PORT` | 없음 |
-| LMTP | `IONOSPHERE_LMTP_PORT` | 없음 |
-| Submission | `IONOSPHERE_SUBMISSION_PORT` | 없음 |
-| SMTPS | `IONOSPHERE_SMTPS_PORT` | 없음 |
-| ManageSieve | `IONOSPHERE_MANAGESIEVE_PORT` | 없음 |
-| JMAP | `IONOSPHERE_JMAP_PORT` | 없음 |
-| 관리 API | `IONOSPHERE_ADMIN_PORT` | 없음 |
-| Autoconfig | `IONOSPHERE_AUTOCONFIG_PORT` | 없음 |
-| HTTPS front | `IONOSPHERE_HTTPS_FRONT_PORT` | 없음 |
-| HTTP redirect | `IONOSPHERE_HTTP_REDIRECT_PORT` | 없음 |
-| Metrics | `IONOSPHERE_METRICS_PORT` | 없음 |
+| SMTP reception | IONOSPHERE_SMTP_PORT | 2525 |
+| POP3 | IONOSPHERE_POP3_PORT | 1110 |
+| IMAP | IONOSPHERE_IMAP_PORT | none |
+| IMAPS | IONOSPHERE_IMAPS_PORT | none |
+| POP3S | IONOSPHERE_POP3S_PORT | none |
+| LMTP | IONOSPHERE_LMTP_PORT | none |
+| Submission | IONOSPHERE_SUBMISSION_PORT | none |
+| SMTPS | IONOSPHERE_SMTPS_PORT | none |
+| ManageSieve | IONOSPHERE_MANAGESIEVE_PORT | none |
+| JMAP | IONOSPHERE_JMAP_PORT | none |
+| Administration API | IONOSPHERE_ADMIN_PORT | none |
+| Autoconfig | IONOSPHERE_AUTOCONFIG_PORT | none |
+| HTTPS front | IONOSPHERE_HTTPS_FRONT_PORT | none |
+| HTTP redirect | IONOSPHERE_HTTP_REDIRECT_PORT | none |
+| Metrics | IONOSPHERE_METRICS_PORT | none |
 
-포트 값은 `0`부터 `65535`까지의 정수입니다. SMTP와 POP3의 직접 포트 설정에서는 `0`을 테스트용 임시 포트로 사용할 수 있습니다. 포트를 끄려면 `off`, `false`, `no`, `disabled`를 사용합니다.
+Port values must be integers from 0 through 65535. For direct SMTP and POP3 settings, 0 may be used as an ephemeral test port. Disable a listener with off, false, no, or disabled.
 
-바인딩 주소와 포트는 `IONOSPHERE_LISTEN_<SERVICE>`로 덮어쓸 수 있습니다.
+Override a listener bind address and port with IONOSPHERE_LISTEN_<SERVICE>:
 
-```bash
+~~~bash
 IONOSPHERE_LISTEN_ADMIN=127.0.0.1:8080
 IONOSPHERE_LISTEN_METRICS=10.0.0.10:9090
 IONOSPHERE_LISTEN_IMAP=0.0.0.0:143
 IONOSPHERE_LISTEN_IMAPS='[::]:993'
 IONOSPHERE_LISTEN_SMTP=off
-```
+~~~
 
-지원 형식은 `8080`, `0.0.0.0:8080`, `127.0.0.1:`, `[::]:8080`, `off`입니다. IPv6 주소는 대괄호로 감싸야 하며, 인식할 수 없는 주소나 숫자형 IP 표기는 시작 시 거부됩니다.
+Supported forms include 8080, 0.0.0.0:8080, 127.0.0.1:, [::]:8080, and off. IPv6 addresses require brackets. Invalid or ambiguous numeric address forms are rejected at startup.
 
-## TLS와 인증서
+## TLS and certificates
 
-전체 기본 인증서 소스:
+Select the default certificate source with IONOSPHERE_TLS_MODE:
 
-```bash
+~~~bash
 IONOSPHERE_TLS_MODE=none
 IONOSPHERE_TLS_MODE=selfsigned
 IONOSPHERE_TLS_MODE=file
@@ -234,269 +344,246 @@ IONOSPHERE_TLS_MODE=acme
 IONOSPHERE_TLS_DIR=/var/lib/ionosphere/tls
 IONOSPHERE_TLS_CN=mail.example.com
 IONOSPHERE_TLS_SANS=mail.example.com,imap.example.com
-```
+~~~
 
-파일 인증서:
+File certificates:
 
-```bash
+~~~bash
 IONOSPHERE_TLS_MODE=file
 IONOSPHERE_TLS_CERT=/etc/ionosphere/tls/fullchain.pem
 IONOSPHERE_TLS_KEY=/etc/ionosphere/tls/privkey.pem
-```
+~~~
 
-기존 IMAPS 호환 변수:
+Legacy IMAPS certificate variables are also supported:
 
-```bash
+~~~bash
 IONOSPHERE_IMAPS_TLS_CERT=/etc/ionosphere/tls/fullchain.pem
 IONOSPHERE_IMAPS_TLS_KEY=/etc/ionosphere/tls/privkey.pem
-```
+~~~
 
-원격 인증서:
+Remote certificates:
 
-```bash
+~~~bash
 IONOSPHERE_TLS_MODE=url
 IONOSPHERE_TLS_URL_CERT=https://cert.example.com/mail/cert.pem
 IONOSPHERE_TLS_URL_KEY=https://cert.example.com/mail/key.pem
 IONOSPHERE_TLS_URL_AUTH='Bearer token'
-```
+~~~
 
 ACME:
 
-```bash
+~~~bash
 IONOSPHERE_TLS_MODE=acme
 IONOSPHERE_TLS_ACME_DOMAINS=mail.example.com
 IONOSPHERE_TLS_ACME_EMAIL=admin@example.com
 IONOSPHERE_TLS_ACME_CHALLENGE=http-01
 IONOSPHERE_TLS_ACME_HTTP_PORT=80
-```
+~~~
 
-`http-01`이 기본이며 발급 시점에만 challenge listener가 열립니다. Cloudflare DNS-01은 다음처럼 사용합니다.
+http-01 is the default and opens its challenge listener only while issuing or renewing a certificate. Cloudflare DNS-01 uses IONOSPHERE_TLS_ACME_CHALLENGE=dns-01, IONOSPHERE_CF_DNS_TOKEN, IONOSPHERE_CF_ZONE_ID, and IONOSPHERE_TLS_ACME_DNS_PROVIDER=cloudflare.
 
-```bash
-IONOSPHERE_TLS_ACME_CHALLENGE=dns-01
-IONOSPHERE_CF_DNS_TOKEN=cloudflare-api-token
-IONOSPHERE_CF_ZONE_ID=zone-id
-IONOSPHERE_TLS_ACME_DNS_PROVIDER=cloudflare
-```
+Startup is rejected if the ACME http-01 port and the HTTP redirect port conflict.
 
-ACME `http-01` 포트와 HTTP redirect 포트가 같으면 서버는 시작하지 않습니다.
+Per-listener certificates use the IONOSPHERE_TLS_<LISTENER>_ prefix:
 
-리스너별 인증서는 `IONOSPHERE_TLS_<LISTENER>_` 접두어를 사용합니다.
-
-```bash
+~~~bash
 IONOSPHERE_TLS_SMTP_MODE=file
 IONOSPHERE_TLS_SMTP_CERT=/etc/ionosphere/tls/smtp-cert.pem
 IONOSPHERE_TLS_SMTP_KEY=/etc/ionosphere/tls/smtp-key.pem
 IONOSPHERE_TLS_SMTP_CN=mx.example.com
-```
+~~~
 
-지원 listener 이름은 `SMTP`, `SUBMISSION`, `SMTPS`, `IMAP`, `IMAPS`, `POP3`, `POP3S`, `MANAGESIEVE`, `HTTPS_FRONT`, `ADMIN_TLS`입니다.
+Supported listener names are SMTP, SUBMISSION, SMTPS, IMAP, IMAPS, POP3, POP3S, MANAGESIEVE, HTTPS_FRONT, and ADMIN_TLS.
 
-## HTTP, JMAP, Autoconfig
+## HTTP, JMAP, and autoconfiguration
 
 JMAP:
 
-```bash
+~~~bash
 IONOSPHERE_JMAP_PORT=8080
 IONOSPHERE_JMAP_BASE_URL=https://mail.example.com
-```
+~~~
 
-주요 경로:
+Main paths:
 
-```text
+~~~text
 GET  /jmap/session
 POST /jmap/api
 POST /jmap/upload
 GET  /jmap/download/<account>/<blob>
 GET  /jmap/eventsource
-```
+~~~
 
-Mailbox, Email, Email/query, EmailSubmission, Quota, VacationResponse, PushSubscription, SearchSnippet을 포함합니다. 요청 본문은 약 10 MB, 업로드 한 건은 50,000,000 bytes, SSE 연결은 256개, 인증 캐시는 10,000개로 제한됩니다.
+Implemented modules include Mailbox, Email, Email/query, EmailSubmission, Quota, VacationResponse, PushSubscription, and SearchSnippet. Request bodies are limited to about 10 MB, one upload to 50,000,000 bytes, SSE connections to 256, and the authentication cache to 10,000 entries.
 
-자동설정:
+Autoconfiguration:
 
-```bash
+~~~bash
 IONOSPHERE_AUTOCONFIG_PORT=8081
 IONOSPHERE_AUTOCONFIG_BRAND=Example Mail
 IONOSPHERE_IMAP_HOST=imap.example.com
 IONOSPHERE_SUBMISSION_HOST=smtp.example.com
 IONOSPHERE_POP3_HOST=pop3.example.com
-```
+~~~
 
-POP3 호스트는 포트를 열었다는 이유만으로 자동설정에 광고되지 않습니다. `IONOSPHERE_POP3_HOST`를 별도로 지정해야 합니다.
+POP3 is not advertised merely because its port is open; set IONOSPHERE_POP3_HOST when it should appear in client configuration.
 
-HTTPS front와 호스트 화이트리스트:
+HTTPS front and host allowlists:
 
-```bash
+~~~bash
 IONOSPHERE_HTTPS_FRONT_PORT=443
 IONOSPHERE_HTTP_REDIRECT_PORT=80
 IONOSPHERE_HOST_MTA_STS=mta-sts.example.com
 IONOSPHERE_HOST_ADMIN=admin.example.com
 IONOSPHERE_HOST_METRICS=metrics.example.com
-```
+~~~
 
-서비스별 호스트는 콤마로 구분합니다. 화이트리스트에 없는 Host는 라우팅되지 않습니다. 미지정 서비스는 기본적으로 해당 서비스의 localhost 이름만 허용합니다. 관리 콘솔은 이름뿐 아니라 내부 노출 정책도 적용합니다.
+Service hosts are comma-separated. Hosts not on the allowlist are not routed. When a service host is omitted, only its localhost default is accepted. The administration console also applies an internal-exposure check; hiding a name in DNS is not its security boundary.
 
-## 관리 REST API
+## Administration REST API
 
-관리 API는 `IONOSPHERE_ADMIN_PORT`를 지정했을 때 시작합니다.
+The administration API starts when IONOSPHERE_ADMIN_PORT is configured:
 
-```bash
+~~~bash
 IONOSPHERE_ADMIN_PORT=8080
 IONOSPHERE_ADMIN_TOKEN=bootstrap-root-token
-```
+~~~
 
-요청 인증:
+Authenticate with:
 
-```http
+~~~http
 Authorization: Bearer <api-key-or-root-token>
-```
+~~~
 
-기능 영역:
+The API covers tenants, accounts, domains, aliases, API keys, app passwords, OAuth tokens, credentials, queue, suppressions, usage, smarthosts, and TLS under the /v1/ path.
 
-```text
-/v1/tenants
-/v1/accounts
-/v1/domains
-/v1/aliases
-/v1/api-keys
-/v1/app-passwords
-/v1/oauth-tokens
-/v1/credentials
-/v1/queue
-/v1/suppressions
-/v1/usage
-/v1/smarthosts
-/v1/tls
-```
+GET requests require read; other methods require write. admin scope and the root token have full access. The root token is a bootstrap mechanism and has no automatic rotation implementation.
 
-GET은 `read`, 그 외 method는 `write`가 필요합니다. `admin` scope와 root token은 전권입니다. root token은 bootstrap 용도이며 자동 회전 기능은 없습니다.
+## Smarthost and outbound delivery
 
-## 스마트호스트와 발송
-
-```bash
+~~~bash
 IONOSPHERE_SMARTHOST=smtp.example.com
 IONOSPHERE_SMARTHOST_PORT=587
 IONOSPHERE_SMARTHOST_USER=relay-user
 IONOSPHERE_SMARTHOST_PASS=relay-password
 IONOSPHERE_SMARTHOST_TLS=required
-```
+~~~
 
-TLS 모드는 `required`, `opportunistic`, `implicit`, `never`입니다. 587은 STARTTLS, 465는 implicit TLS로 사용하는 구성이 기준입니다.
+TLS modes are required, opportunistic, implicit, and never. Port 587 is intended for STARTTLS and port 465 for implicit TLS.
 
-발송 제한:
+Outbound controls:
 
-```bash
+~~~bash
 IONOSPHERE_RATE_PER_MINUTE=...
 IONOSPHERE_RATE_PER_HOUR=...
 IONOSPHERE_RATE_PER_DAY=...
 IONOSPHERE_RELAY_PER_HOUR=...
 IONOSPHERE_LOCAL_ONLY=1
 IONOSPHERE_REQUIRE_SENDER_OWNERSHIP=0
-```
+~~~
 
-`LOCAL_ONLY=1`은 외부 도메인 발송을 막지만 실제 스마트호스트 경로가 있으면 예외가 생길 수 있습니다. 발신자 소유권 검사는 기본 활성입니다.
+IONOSPHERE_LOCAL_ONLY=1 blocks external-domain delivery, although a real smarthost route can provide an explicit outbound exception. Sender ownership checks are enabled by default.
 
-## 메일 보안 정책
+## Mail security policy
 
-TLS 자료가 없거나 STARTTLS를 실제로 수행할 수 없는 표면에서는 평문 인증이 기본적으로 차단됩니다. 지원 인증 방식은 표면에 따라 다르지만 PLAIN, LOGIN, SCRAM-SHA-256, XOAUTH2, OAUTHBEARER가 구현되어 있습니다.
+When TLS material is unavailable or STARTTLS cannot actually be performed, plaintext authentication is disabled by default. Depending on the protocol surface, the implementation supports PLAIN, LOGIN, SCRAM-SHA-256, XOAUTH2, and OAUTHBEARER.
 
-### SPF, DKIM, DMARC
+The inbound path evaluates and stores SPF, DKIM, and DMARC results. The outbound path can apply DKIM signatures. Domain provisioning generates DKIM keys and DNS record instructions.
 
-수신 경로에서 SPF·DKIM·DMARC 결과를 평가하고 저장하며, 발송 경로에서는 DKIM 서명을 적용할 수 있습니다. 도메인 등록 시 DKIM 키와 DNS 레코드 안내가 생성됩니다.
+MTA-STS modes are enforce, testing, and none:
 
-### MTA-STS와 DANE
-
-```bash
+~~~bash
 IONOSPHERE_MTA_STS_MODE=enforce
 IONOSPHERE_MTA_STS_ENFORCE=1
 IONOSPHERE_MX_HOST=mx.example.com
 IONOSPHERE_DANE=1
-```
+~~~
 
-MTA-STS 모드는 `enforce`, `testing`, `none`입니다. DANE를 켜면 DNSSEC로 검증된 TLSA 결과를 발송 TLS 연결에 사용할 수 있습니다. MTA-STS enforce는 MX, HTTPS front, Host whitelist가 모두 맞아야 합니다.
+DANE uses DNSSEC-validated TLSA results for outbound TLS. Before enabling MTA-STS enforcement, align the MX host, HTTPS front, and host allowlist.
 
-### SRS
+SRS enables external forwarding and forwarding bounce reversal:
 
-```bash
+~~~bash
 IONOSPHERE_SRS_SECRET=strong-random-secret
-```
+~~~
 
-외부 forwarding과 forwarding bounce reverse 경로를 활성화합니다. 값이 없거나 비어 있으면 활성화되지 않습니다.
+An unset or empty value leaves SRS forwarding disabled.
 
-## 스팸·남용·억제
+## Spam, abuse, and suppression
 
-코드에는 greylisting, SPF pass 발신자 면제, DNSBL 연동 지점, 계정별 Bayes 학습, bounce/complaint 감시, 자동 계정 정지, suppression 목록이 있습니다.
+The code includes greylisting, SPF-pass greylist exemptions, a DNSBL integration point, per-account Bayes training, bounce and complaint monitoring, automatic account suspension, and suppression lists.
 
-abuse 판정 기본값:
+Default abuse thresholds:
 
-- 관찰 창: 24시간
-- 최소 표본: 20건
-- bounce rate: 10% 초과
-- complaint rate: 0.3% 초과
+- Observation window: 24 hours
+- Minimum sample: 20 messages
+- Bounce rate: over 10%
+- Complaint rate: over 0.3%
 
-## 주요 하드 리밋
+## Hard limits
 
-| 항목 | 값 |
+Protocol-wide safety limits are defined in packages/core/src/limits.ts.
+
+| Limit | Value |
 | --- | ---: |
-| 최대 메시지 | 25 MiB |
-| SMTP/LMTP 세션당 RCPT | 1000 |
-| SMTP 세션당 오류 | 20 |
-| listener 최대 연결 | 1024 |
-| Received hop | 30 |
-| SMTP/LMTP/POP3 명령 라인 | 4096 bytes |
-| 헤더 전체 | 1 MiB |
-| 헤더 한 줄 | 64 KiB |
-| IMAP 라인 | 64 KiB |
-| pending pipeline | 1 MiB |
-| 인증 전 IMAP literal | 8 KiB |
-| IMAP queued line | 1 MiB |
+| Maximum message | 25 MiB |
+| SMTP/LMTP recipients per session | 1000 |
+| SMTP errors per session | 20 |
+| Maximum listener connections | 1024 |
+| Received hops | 30 |
+| SMTP/LMTP/POP3 command line | 4096 bytes |
+| Header section | 1 MiB |
+| Header line | 64 KiB |
+| IMAP line | 64 KiB |
+| Pending pipeline | 1 MiB |
+| Pre-auth IMAP literal | 8 KiB |
+| Queued IMAP line | 1 MiB |
 | MIME depth | 20 |
-| MIME part 수 | 1024 |
-| thread reference 수 | 64 |
-| 헤더별 주소 수 | 256 |
+| MIME parts | 1024 |
+| Thread references | 64 |
+| Addresses per header | 256 |
 | JMAP upload | 50,000,000 bytes |
 
-이 값들은 환경변수로 바꾸는 설정값이 아니라 코드에서 보호하는 안전 상한입니다.
+These are code-level safety limits, not ordinary environment configuration.
 
-## 백그라운드 작업과 보존
+## Background workers and retention
 
-```bash
+~~~bash
 IONOSPHERE_RUN_MTA_WORKER=1
 IONOSPHERE_RUN_WEBHOOK_WORKER=1
 IONOSPHERE_RUN_REAPER=1
-```
+~~~
 
-MTA worker는 Submission이 켜져 있으면 기본 활성이고, webhook worker와 reaper는 기본 활성입니다.
+The MTA worker is enabled by default when Submission is enabled. The webhook worker and reaper are enabled by default.
 
-블롭 GC:
+Blob GC:
 
-```bash
+~~~bash
 IONOSPHERE_BLOB_GC=off
 IONOSPHERE_BLOB_GC=mark
 IONOSPHERE_BLOB_GC=sweep
 IONOSPHERE_BLOB_GC_GRACE_MS=...
 IONOSPHERE_BLOB_UPLOAD_TTL_MS=...
-```
+~~~
 
-기본 GC 모드는 `mark`입니다. `sweep`은 실제 파일 삭제를 수행할 수 있습니다.
+The default GC mode is mark. sweep can delete files and should be enabled only after reviewing mark results.
 
-스토어 retention의 코드 기본값은 change log 30일, thread reference 180일, 완료·실패 큐 7일입니다.
+Store retention defaults are 30 days for the change log, 180 days for thread references, and 7 days for completed or failed queue entries.
 
-## 감사 로그
+## Audit logs
 
-```bash
+~~~bash
 IONOSPHERE_AUDIT=1
 IONOSPHERE_AUDIT_DIR=/var/lib/ionosphere/audit
 IONOSPHERE_AUDIT_FLUSH_MS=1000
 IONOSPHERE_AUDIT_SHIP_INTERVAL_MS=60000
 IONOSPHERE_AUDIT_LOCAL_RETAIN_DAYS=30
 IONOSPHERE_AUDIT_SHIP_HOST=server-1
-```
+~~~
 
-S3 이관:
+S3 shipping:
 
-```bash
+~~~bash
 IONOSPHERE_AUDIT_S3_ENDPOINT=https://audit-s3.example.com
 IONOSPHERE_AUDIT_S3_BUCKET=ionosphere-audit
 IONOSPHERE_AUDIT_S3_ACCESS_KEY=audit-access-key
@@ -504,17 +591,18 @@ IONOSPHERE_AUDIT_S3_SECRET_KEY=audit-secret-key
 IONOSPHERE_AUDIT_S3_REGION=us-east-1
 IONOSPHERE_AUDIT_S3_PREFIX=audit/
 IONOSPHERE_AUDIT_S3_PATH_STYLE=1
-```
+~~~
 
-감사 S3 설정이 일부만 있으면 서버는 시작하지 않습니다. 메일 블롭 버킷과 감사 버킷은 별도로 운영해야 합니다.
+Partial audit S3 configuration stops startup. Keep audit storage in a separate bucket and permission scope from message blobs.
 
-## 환경변수 요약
+<details>
+<summary><strong>Show the complete environment variable reference</strong></summary>
 
-서버·CLI에서 참조되는 환경변수는 다음 범주로 나뉩니다.
+## Environment variable reference
 
-### 기본·DB·저장소
+Core, database, and storage:
 
-```text
+~~~text
 IONOSPHERE_HOSTNAME
 IONOSPHERE_DB
 IONOSPHERE_DB_URL
@@ -530,11 +618,11 @@ IONOSPHERE_S3_PREFIX
 IONOSPHERE_S3_PATH_STYLE
 IONOSPHERE_S3_TIMEOUT_MS
 IONOSPHERE_S3_MIGRATE_FROM_FS
-```
+~~~
 
-### 포트·바인딩
+Ports and binding:
 
-```text
+~~~text
 IONOSPHERE_SMTP_PORT
 IONOSPHERE_SUBMISSION_PORT
 IONOSPHERE_SMTPS_PORT
@@ -552,11 +640,11 @@ IONOSPHERE_HTTP_REDIRECT_PORT
 IONOSPHERE_METRICS_PORT
 IONOSPHERE_METRICS_HOST
 IONOSPHERE_LISTEN_<SERVICE>
-```
+~~~
 
-### TLS·ACME
+TLS and ACME:
 
-```text
+~~~text
 IONOSPHERE_TLS_MODE
 IONOSPHERE_TLS_DIR
 IONOSPHERE_TLS_CN
@@ -581,11 +669,11 @@ IONOSPHERE_TLS_<LISTENER>_URL_CERT
 IONOSPHERE_TLS_<LISTENER>_URL_KEY
 IONOSPHERE_CF_DNS_TOKEN
 IONOSPHERE_CF_ZONE_ID
-```
+~~~
 
-### 정책·발송·서비스 호스트
+Policy, delivery, and service hosts:
 
-```text
+~~~text
 IONOSPHERE_HOST_<SERVICE>
 IONOSPHERE_IMAP_HOST
 IONOSPHERE_SUBMISSION_HOST
@@ -612,11 +700,11 @@ IONOSPHERE_MTA_STS_ENFORCE
 IONOSPHERE_DANE
 IONOSPHERE_SMTP_STARTTLS
 IONOSPHERE_RECURSIVE_DNS
-```
+~~~
 
-### 워커·GC·감사·로그
+Workers, GC, audit, and logging:
 
-```text
+~~~text
 IONOSPHERE_RUN_MTA_WORKER
 IONOSPHERE_RUN_WEBHOOK_WORKER
 IONOSPHERE_RUN_REAPER
@@ -638,54 +726,63 @@ IONOSPHERE_AUDIT_S3_PREFIX
 IONOSPHERE_AUDIT_S3_PATH_STYLE
 IONOSPHERE_LOG_LEVEL
 IONOSPHERE_LOG_FORMAT
-```
+~~~
 
-## 개발과 검증
+</details>
 
-```bash
+## Development and verification
+
+~~~bash
 npm run lint
 npm run typecheck
 npm test
 npm run smoke
 npm run verify
-```
+~~~
 
-`npm run verify`는 lint, typecheck, 전체 테스트, smoke를 순서대로 실행합니다.
+`npm run verify` runs lint, type checking, the complete test suite, and smoke checks.
 
-주요 패키지:
+Repository areas:
 
-```text
-apps/server/             실행 가능한 메일 서버·CLI
-packages/core/           공통 한도·인증·로깅·보안 유틸리티
-packages/db/             SQLite/PostgreSQL/MySQL 추상화와 migration
-packages/store/          계정·메일박스·메시지·블롭 저장소
-packages/proto-*/        프로토콜 상태머신과 소켓 어댑터
-packages/mta/            큐·SMTP client·발송 worker
-packages/admin-cmd/      CLI·REST·GUI가 공유하는 관리 명령
-packages/api/            관리 HTTP API
-packages/tls/            인증서·ACME·TLS 자료 관리
-packages/dns/            DNS wire·resolver·DNSSEC
-packages/mail-auth/      SPF·DKIM·DMARC 관련 기능
-packages/spam/           greylist·Bayes·스팸 연동
-packages/webhook/        webhook worker와 저장소
-scripts/                 검증·migration·보조 운영 스크립트
-```
+~~~text
+apps/server/             Runnable server and CLI
+packages/core/           Shared limits, authentication, logging, security
+packages/db/             SQLite/PostgreSQL/MySQL abstractions and migrations
+packages/store/          Accounts, mailboxes, messages, blob storage
+packages/proto-*/        Protocol state machines and socket adapters
+packages/mta/            Queue, SMTP client, outbound worker
+packages/admin-cmd/      Shared administration commands
+packages/api/            Administration HTTP API
+packages/tls/            Certificate, ACME, and TLS material management
+packages/dns/            DNS wire protocol, resolver, DNSSEC
+packages/mail-auth/      SPF, DKIM, and DMARC functionality
+packages/spam/           Greylisting, Bayes, spam integration
+packages/webhook/        Webhook worker and storage
+scripts/                 Verification, migration, and operational helpers
+~~~
 
-프로토콜 엔진은 네트워크 I/O 없이 테스트할 수 있도록 `engine.ts`에 상태 전이를 두고, 실제 연결은 `server.ts`가 처리합니다.
+Protocol engines keep state transitions in engine.ts so they can be tested without a network. server.ts handles actual connections.
 
-## 운영 체크리스트
+## Operations checklist
 
-1. 모든 서버와 CLI에 동일한 `IONOSPHERE_MASTER_KEY`가 설정되어 있는지 확인합니다.
-2. 여러 서버가 같은 DB를 사용할 경우 메일 본문도 공용 S3로 둡니다.
-3. 관리 API와 root/API key가 외부에 불필요하게 노출되지 않는지 확인합니다.
-4. ACME `http-01`과 HTTP redirect가 같은 포트를 사용하지 않는지 확인합니다.
-5. MTA-STS `enforce` 전에 MX, HTTPS front, Host whitelist를 맞춥니다.
-6. 외부 forwarding을 사용하면 `IONOSPHERE_SRS_SECRET`이 비어 있지 않은지 확인합니다.
-7. `IONOSPHERE_BLOB_GC=sweep` 전 mark 결과와 fallback read 상태를 확인합니다.
-8. 감사 로그 S3는 메일 블롭과 다른 버킷·권한으로 운영합니다.
-9. CLI의 일반 비밀번호를 argv로 넣으면 shell history에 남을 수 있습니다.
-10. 시작 실패를 무시하지 말고 포트·TLS·S3·master key 설정 오류를 먼저 해결합니다.
+1. Set the same IONOSPHERE_MASTER_KEY for every server and CLI process that shares encrypted data.
+2. When multiple servers share a database, use shared S3-compatible blob storage as well.
+3. Protect the administration API, root token, and API keys from unnecessary external exposure.
+4. Ensure ACME http-01 and HTTP redirect do not use the same port.
+5. Before enabling MTA-STS enforce, align the MX host, HTTPS front, and host allowlist.
+6. If external forwarding is enabled, verify that IONOSPHERE_SRS_SECRET is non-empty.
+7. Review blob GC mark results and fallback reads before enabling IONOSPHERE_BLOB_GC=sweep.
+8. Use separate buckets and permissions for audit logs and mail blobs.
+9. Do not put ordinary passwords in CLI argv when shell history exposure matters.
+10. Treat startup validation errors as configuration failures; fix port, TLS, S3, and master-key settings before continuing.
 
-## 라이선스
+## License
 
 [MIT](LICENSE)
+
+<br>
+
+<div align="center">
+<sub>Built for reliable mail delivery, clear boundaries, and boring operations.</sub><br>
+<a href="README.md">English</a> · <a href="README.ko.md">한국어</a>
+</div>

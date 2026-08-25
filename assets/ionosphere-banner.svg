@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 520" role="img" aria-labelledby="title desc">
+  <title id="title">ionosphere — all-in-one mail platform</title>
+  <desc id="desc">A dark blue space-inspired banner with a glowing planet, orbital communication rings, and protocol labels</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#050816"/>
+      <stop offset=".48" stop-color="#11183d"/>
+      <stop offset="1" stop-color="#172554"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="50%" cy="50%">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity=".23"/>
+      <stop offset=".45" stop-color="#8b5cf6" stop-opacity=".1"/>
+      <stop offset="1" stop-color="#8b5cf6" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="planet" cx="30%" cy="25%">
+      <stop offset="0" stop-color="#ecfeff"/>
+      <stop offset=".25" stop-color="#67e8f9"/>
+      <stop offset="1" stop-color="#3730a3"/>
+    </radialGradient>
+    <linearGradient id="orbit" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#67e8f9"/>
+      <stop offset=".5" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#86efac"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="soft" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="26"/>
+    </filter>
+  </defs>
+  <rect width="1400" height="520" rx="32" fill="url(#bg)"/>
+  <circle cx="1090" cy="250" r="255" fill="url(#halo)" filter="url(#soft)"/>
+  <g fill="#fff">
+    <circle cx="72" cy="74" r="2" opacity=".8"/><circle cx="180" cy="420" r="1.5" opacity=".55"/>
+    <circle cx="390" cy="75" r="1.5" opacity=".7"/><circle cx="710" cy="102" r="2" opacity=".6"/>
+    <circle cx="930" cy="68" r="1.5" opacity=".55"/><circle cx="1290" cy="92" r="2" opacity=".75"/>
+    <circle cx="1330" cy="420" r="1.5" opacity=".65"/><circle cx="860" cy="450" r="2" opacity=".5"/>
+  </g>
+  <g transform="translate(1090 250)" fill="none" stroke="url(#orbit)" stroke-linecap="round" filter="url(#glow)">
+    <ellipse rx="285" ry="93" transform="rotate(-18)" stroke-width="5" opacity=".78"/>
+    <ellipse rx="275" ry="86" transform="rotate(25)" stroke-width="3" opacity=".7"/>
+    <ellipse rx="224" ry="68" transform="rotate(90)" stroke-width="2" opacity=".55"/>
+    <circle cx="-245" cy="-44" r="7" fill="#a7f3d0" stroke="none"/>
+    <circle cx="216" cy="85" r="6" fill="#67e8f9" stroke="none"/>
+  </g>
+  <g transform="translate(1090 250)">
+    <circle r="76" fill="url(#planet)" filter="url(#glow)"/>
+    <path d="M-55-8c30-25 71-27 111-7M-47 29c29-14 61-14 96 0" fill="none" stroke="#ecfeff" stroke-width="8" stroke-linecap="round" opacity=".72"/>
+  </g>
+  <g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif">
+    <text x="90" y="176" fill="#67e8f9" font-size="18" font-weight="700" letter-spacing="5">MAIL INFRASTRUCTURE, REIMAGINED</text>
+    <text x="86" y="270" fill="#f8fafc" font-size="90" font-weight="800" letter-spacing="-4">ionosphere</text>
+    <text x="92" y="323" fill="#cbd5e1" font-size="26">A complete mail platform in one Node.js process.</text>
+    <g fill="#dbeafe" font-size="16" font-weight="600">
+      <rect x="92" y="374" width="94" height="38" rx="19" fill="#1e3a8a"/><text x="112" y="399">SMTP</text>
+      <rect x="198" y="374" width="94" height="38" rx="19" fill="#312e81"/><text x="219" y="399">IMAP</text>
+      <rect x="304" y="374" width="104" height="38" rx="19" fill="#3b0764"/><text x="323" y="399">JMAP</text>
+      <rect x="420" y="374" width="104" height="38" rx="19" fill="#164e63"/><text x="441" y="399">DKIM</text>
+      <rect x="536" y="374" width="122" height="38" rx="19" fill="#14532d"/><text x="556" y="399">Node.js 24+</text>
+    </g>
+    <text x="92" y="463" fill="#94a3b8" font-size="15">pure protocol engines  ·  shared policy  ·  operationally boring</text>
+  </g>
+</svg>
