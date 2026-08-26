@@ -103,9 +103,28 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: gitleaks
-        # **액션 대신 바이너리를 직접 받는다.** 받은 것이 무엇인지 체크섬으로 확인할 수
-        # 있고, 남의 액션 안으로 토큰을 넘기지 않아도 된다.
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        # 조직 소유 저장소는 gitleaks-action 라이선스가 필수다(개인 계정은 무료).
+        # org 시크릿으로 둔다 — 다섯 저장소가 같은 값을 쓰고, 한 군데서만 돈다.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+          # **설정을 못 박는다.** 자동 탐지에 맡기면 `.gitleaks.toml` 이 안 읽혀도
+          # 조용히 통과하고, 그러면 예외가 아니라 검사가 사라진 것을 통과로 읽는다.
+          GITLEAKS_CONFIG: .gitleaks.toml
+
+      # **두 번째 눈 — 이력 전체.** 위의 액션은 이벤트 범위만 본다(push 면 밀린 커밋,
+      # PR 이면 PR 커밋). 그것만으로는 **이미 이력에 있는 것**을 다시 훑지 않는다 —
+      # 새 규칙이 추가돼 어제까지 조용하던 옛 커밋이 오늘 걸리는 경우를 놓친다.
+      #
+      # 같은 스캐너를 범위만 달리해 한 번 더 돌린다. 둘 다 통과해야 한다.
+      # `!cancelled()` 로 걸어 **위가 빨개져도 반드시 돈다** — 한쪽 실패가 다른 쪽 신호를
+      # 가리면 무엇이 깨졌는지 한 번에 못 본다.
+      #
+      # ⚠️ 여기 버전·체크섬은 dependabot 이 못 갱신한다(URL 로 받는 파일이다).
+      #    위 액션이 올라가는 PR 에서 이 두 줄도 같이 본다.
+      - name: gitleaks (이력 전체)
+        if: ${{ !cancelled() }}
         env:
           GITLEAKS_VERSION: "8.30.1"
           GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
@@ -115,7 +134,7 @@ jobs:
           curl -fsSL --retry 3 -o /tmp/gitleaks.tgz "$url"
           echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tgz" | sha256sum -c -
           tar xzf /tmp/gitleaks.tgz -C /tmp gitleaks
-          /tmp/gitleaks git --no-banner --redact --exit-code 1 .
+          /tmp/gitleaks git --no-banner --redact --exit-code 1 --config .gitleaks.toml .
 
   # **워크플로 자체가 공격면이다.** 러너는 밖에서 온 코드를 실행하고, `${{ }}` 가
   # `run:` 본문에 박히면 그게 곧 셸 코드가 된다. 사람은 리뷰에서 반드시 놓친다.
