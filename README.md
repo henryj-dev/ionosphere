@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/ionosphere-banner.svg" alt="ionosphere — a complete mail platform in one Node.js process" width="100%">
+<h1>ionosphere</h1>
 
 ### **A complete mail platform in one Node.js process.**
 
@@ -13,7 +13,6 @@ HTTP, and database access are thin adapters around them.
 
 [![ci](https://github.com/henryj-dev/ionosphere/actions/workflows/ci.yml/badge.svg)](https://github.com/henryj-dev/ionosphere/actions/workflows/ci.yml)
 [![codeql](https://github.com/henryj-dev/ionosphere/actions/workflows/codeql.yml/badge.svg)](https://github.com/henryj-dev/ionosphere/actions/workflows/codeql.yml)
-[![dependency-review](https://github.com/henryj-dev/ionosphere/actions/workflows/dependency-review.yml/badge.svg)](https://github.com/henryj-dev/ionosphere/actions/workflows/dependency-review.yml)
 
 <br/>
 
@@ -40,6 +39,7 @@ English · [한국어](README.ko.md)
 
 ## Contents
 
+- [The problem](#the-problem)
 - [What it does](#what-it-does)
 - [Quick start](#quick-start)
 - [How it fits together](#how-it-fits-together)
@@ -54,7 +54,24 @@ English · [한국어](README.ko.md)
 - [Hard limits](#hard-limits)
 - [Operations](#operations)
 - [Development](#development)
+- [Status & limitations](#status--limitations)
 - [License](#license)
+
+---
+
+## The problem
+
+Running mail means running a stack. One daemon accepts messages, another serves IMAP and POP3,
+another filters, another signs outbound with DKIM, and something else holds the accounts and
+aliases they all read. Each speaks its own configuration language, keeps its own state, and fails
+in its own way. The seams are where mail goes missing — accepted by one component, refused by the
+next, reconciled by nobody.
+
+Ionosphere is one repository and one process. Reception, access, delivery, storage, authentication
+and administration share a single domain model, and one administration command registry backs the
+CLI, the REST API and the browser console, so those three cannot drift apart. Protocol behavior is
+implemented as isolated state machines; sockets, HTTP and database access are thin adapters around
+them, which is what makes the protocol layer testable without a socket.
 
 ---
 
@@ -821,6 +838,21 @@ scripts/                 Verification, migration, and operational helpers
 ~~~
 
 Protocol engines keep state transitions in engine.ts so they can be tested without a network. server.ts handles actual connections.
+
+---
+
+## Status & limitations
+
+**What works.** SMTP and LMTP reception with aliases, catch-all, forwarding and Sieve; IMAP,
+IMAPS, POP3, POP3S and JMAP access; an outbound queue with retries, direct MX delivery,
+smarthost, DSN and DKIM; PLAIN, LOGIN, SCRAM-SHA-256, XOAUTH2 and OAUTHBEARER authentication;
+SPF, DKIM, DMARC, MTA-STS, DANE/TLSA and SRS; a REST API, a CLI and a browser administration
+console over one command registry; SQLite, PostgreSQL or MySQL with local or S3-compatible blob
+storage; metrics, audit logs, blob GC, retention and webhooks.
+
+**Not frozen.** Every one of the 24 packages in this repository is at version `0.0.1`. The
+database schema, the environment-variable surface and the administration API are all expected to
+change. Pin what you deploy, and read [`SCHEMA.md`](docs/SCHEMA.md) before upgrading.
 
 ---
 

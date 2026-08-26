@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/ionosphere-banner.svg" alt="ionosphere — 하나의 Node.js 프로세스로 완성하는 메일 플랫폼" width="100%">
+<h1>ionosphere</h1>
 
 ### **하나의 Node.js 프로세스로 완성하는 메일 플랫폼.**
 
@@ -13,7 +13,6 @@ SMTP 수신, IMAP·POP3 접근, JMAP, 발송, Sieve 필터링, 포워딩, 도메
 
 [![ci](https://github.com/henryj-dev/ionosphere/actions/workflows/ci.yml/badge.svg)](https://github.com/henryj-dev/ionosphere/actions/workflows/ci.yml)
 [![codeql](https://github.com/henryj-dev/ionosphere/actions/workflows/codeql.yml/badge.svg)](https://github.com/henryj-dev/ionosphere/actions/workflows/codeql.yml)
-[![dependency-review](https://github.com/henryj-dev/ionosphere/actions/workflows/dependency-review.yml/badge.svg)](https://github.com/henryj-dev/ionosphere/actions/workflows/dependency-review.yml)
 
 <br/>
 
@@ -40,6 +39,7 @@ SMTP 수신, IMAP·POP3 접근, JMAP, 발송, Sieve 필터링, 포워딩, 도메
 
 ## 목차
 
+- [문제](#문제)
 - [무엇을 하는가](#무엇을-하는가)
 - [빠른 시작](#빠른-시작)
 - [구조](#구조)
@@ -54,7 +54,23 @@ SMTP 수신, IMAP·POP3 접근, JMAP, 발송, Sieve 필터링, 포워딩, 도메
 - [주요 하드 리밋](#주요-하드-리밋)
 - [운영](#운영)
 - [개발](#개발)
+- [현재 상태와 한계](#현재-상태와-한계)
 - [라이선스](#라이선스)
+
+---
+
+## 문제
+
+메일을 운영한다는 것은 스택을 운영한다는 뜻입니다. 한 데몬이 메일을 받고, 다른 데몬이 IMAP 과
+POP3 를 제공하고, 또 다른 것이 필터링하고, 또 다른 것이 DKIM 으로 서명하고, 그 모두가 읽는
+계정과 별칭은 다시 다른 곳에 있습니다. 각각이 자기 설정 언어를 쓰고, 자기 상태를 들고, 자기
+방식으로 깨집니다. **메일이 사라지는 곳은 그 이음매입니다** — 한쪽이 받았고 다음이 거절했는데
+아무도 대조하지 않은 자리.
+
+Ionosphere 는 하나의 저장소이자 하나의 프로세스입니다. 수신·접근·발송·저장·인증·관리가 하나의
+도메인 모델을 공유하고, 하나의 관리 명령 레지스트리가 CLI 와 REST API 와 브라우저 콘솔을 함께
+받치므로 셋이 갈라질 수 없습니다. 프로토콜 동작은 격리된 상태 기계로 구현되고 소켓·HTTP·DB
+접근은 그 둘레의 얇은 어댑터입니다 — 프로토콜 계층을 소켓 없이 시험할 수 있는 이유입니다.
 
 ---
 
@@ -856,6 +872,20 @@ scripts/                 검증·migration·보조 운영 스크립트
 ```
 
 프로토콜 엔진은 네트워크 I/O 없이 테스트할 수 있도록 `engine.ts`에 상태 전이를 두고, 실제 연결은 `server.ts`가 처리합니다.
+
+---
+
+## 현재 상태와 한계
+
+**되는 것.** 별칭·catch-all·포워딩·Sieve 를 포함한 SMTP·LMTP 수신, IMAP·IMAPS·POP3·POP3S·JMAP
+접근, 재시도·직접 MX 발송·스마트호스트·DSN·DKIM 을 갖춘 발송 큐, PLAIN·LOGIN·SCRAM-SHA-256·
+XOAUTH2·OAUTHBEARER 인증, SPF·DKIM·DMARC·MTA-STS·DANE/TLSA·SRS, 하나의 명령 레지스트리 위의
+REST API·CLI·브라우저 관리 콘솔, SQLite·PostgreSQL·MySQL 과 로컬 또는 S3 호환 블롭 저장소,
+메트릭·감사 로그·블롭 GC·보존·웹훅.
+
+**굳지 않았다.** 이 저장소의 패키지 24개가 전부 `0.0.1` 입니다. DB 스키마와 환경변수 표면과
+관리 API 는 모두 바뀔 수 있습니다. 배포하는 버전을 고정하고, 올리기 전에
+[`SCHEMA.md`](docs/SCHEMA.md) 를 읽으십시오.
 
 ---
 
