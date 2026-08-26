@@ -40,8 +40,10 @@
 ```
 
 `트리` 칸이 있는 이유 — 이 저장소의 `scripts/git-hooks/pre-commit`은 에이전트 하네스 환경변수가
-있을 때 메인 작업 트리 커밋을 **거부**한다(관례가 아니라 제약). 모든 작업은
-`python3 scripts/claude-hooks/enter-worktree.py <이름>`으로 만든 워크트리에서 한다.
+있을 때 메인 작업 트리 커밋을 **거부**하고, GitHub ruleset은 main 직접 push를 **거부**한다
+(`pull_request`·`required_status_checks`·`required_linear_history`; 2026-08-27 PR #12에서 확인).
+둘 다 관례가 아니라 제약이다. 모든 작업은 `python3 scripts/claude-hooks/enter-worktree.py <이름>`으로
+만든 워크트리에서 하고, 브랜치를 push해 PR로 머지한다. 작업 하나 = PR 하나.
 
 **테스트케이스(TC)** — `TC-P<n>.T<k>.<a|b|c…>`. 세 줄: **이름 · 단언 · 검출**.
 검출 줄은 "이 테스트가 없으면 놓치는 구체적 고장"이다. 못 쓰면 그 TC는 없다.
@@ -1776,8 +1778,8 @@ P6.T4의 `glob-golden.json`도 남긴다. 3. `RATCHET`에서 `app.ts` 외 전부
 **이동인지 변경인지 모른다** — `surface`가 답한다. 표면이 같고 numstat이 대칭이면 이동, 아니면
 변경이고 `red-green` 또는 테스트 초록이 필요하다. "이동하면서 조금 고쳤다"는 커밋을 둘로 쪼갠다.
 
-**위험한 단계 중간에 이탈해야 한다** — P1·P3·P6(T5)는 중간 커밋이 main에 있어도 안전하다
-(각 커밋이 `verify` 초록 조건으로 push된다). 단 **P3.T2 ①(마이그레이션)은 커밋이 나갔으면 롤포워드만** —
+**위험한 단계 중간에 이탈해야 한다** — P1·P3·P6(T5)는 중간 PR이 main에 머지돼 있어도 안전하다
+(각 PR이 CI `gate` 초록 조건으로만 머지된다). 단 **P3.T2 ①(마이그레이션)은 커밋이 나갔으면 롤포워드만** —
 계획서 §12. 이탈 전 `--status`로 현재 봉인 상태를 남기고, 워크트리는 `session-end-cleanup`이 회수한다.
 
 **일정이 부족하다** — 자를 수 있는 것: P2x(면제 봉인), P6.T6·T7, P7.T5·T6, P4.T7. 자를 수 없는 것:
