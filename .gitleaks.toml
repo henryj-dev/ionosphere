@@ -1,0 +1,11 @@
+# gitleaks 설정 — **예외는 좁게, 근거와 함께**
+#
+# 기본 규칙 묶음을 그대로 쓰고(`useDefault`), 여기서 빼는 것만 적는다. 규칙을 끄는
+# 대신 경로를 못 박아 빼는 이유는, 넓게 뚫어 둔 예외가 나중에 진짜를 삼키기 때문이다.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "STARTTLS 어댑터 테스트가 쓰는 자체 서명 키. `openssl req -x509 -newkey rsa:2048 -nodes` 로 만든 일회용이고, 이 저장소 밖의 무엇에도 붙지 않는다(test/starttls.test.ts 머리말에 만드는 법이 적혀 있다)."
+paths = ['''^packages/proto-smtp/test/fixtures/key2?\.pem$''']

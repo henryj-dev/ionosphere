@@ -16,8 +16,13 @@ jobs:
       IONOSPHERE_TEST_D1_ACCOUNT: ${{ secrets.IONOSPHERE_TEST_D1_ACCOUNT }}
       IONOSPHERE_TEST_D1_TOKEN: ${{ secrets.IONOSPHERE_TEST_D1_TOKEN }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # 체크아웃이 남기는 자격증명을 `.git/config` 에 두지 않는다. 이 잡의 어떤
+          # 단계도 그 토큰으로 밖에 나가지 않는다 — 트리에 두면 러너에서 도는
+          # 코드가 집을 수 있는 것만 남는다.
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
           cache: npm
