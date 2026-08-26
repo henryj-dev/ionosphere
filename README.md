@@ -13,7 +13,6 @@ HTTP, and database access are thin adapters around them.
 
 [![ci](https://github.com/henryj-dev/ionosphere/actions/workflows/ci.yml/badge.svg)](https://github.com/henryj-dev/ionosphere/actions/workflows/ci.yml)
 [![codeql](https://github.com/henryj-dev/ionosphere/actions/workflows/codeql.yml/badge.svg)](https://github.com/henryj-dev/ionosphere/actions/workflows/codeql.yml)
-[![dependency-review](https://github.com/henryj-dev/ionosphere/actions/workflows/dependency-review.yml/badge.svg)](https://github.com/henryj-dev/ionosphere/actions/workflows/dependency-review.yml)
 
 <br/>
 

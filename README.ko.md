@@ -13,7 +13,6 @@ SMTP 수신, IMAP·POP3 접근, JMAP, 발송, Sieve 필터링, 포워딩, 도메
 
 [![ci](https://github.com/henryj-dev/ionosphere/actions/workflows/ci.yml/badge.svg)](https://github.com/henryj-dev/ionosphere/actions/workflows/ci.yml)
 [![codeql](https://github.com/henryj-dev/ionosphere/actions/workflows/codeql.yml/badge.svg)](https://github.com/henryj-dev/ionosphere/actions/workflows/codeql.yml)
-[![dependency-review](https://github.com/henryj-dev/ionosphere/actions/workflows/dependency-review.yml/badge.svg)](https://github.com/henryj-dev/ionosphere/actions/workflows/dependency-review.yml)
 
 <br/>
 
