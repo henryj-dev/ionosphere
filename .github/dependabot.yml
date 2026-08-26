@@ -2,7 +2,8 @@ version: 2
 updates:
   # ★GitHub Actions만 본다. npm은 일부러 뺐다 — 이 저장소의 규약이 "의존성 최소"이고
   # devDependency가 다섯 개뿐이라, 자동 PR이 주는 이득보다 소음이 크다. 대신 액션은
-  # 참조가 태그(`@v5`)라 조용히 낡고, 낡은 액션은 공급망 문제로 직결된다.
+  # 참조가 이제 커밋 SHA 라 스스로는 절대 안 움직인다 — 움직여 주는 것이 여기뿐이다.
+  # 낡은 액션은 공급망 문제로 직결되므로, 이 항목이 없으면 핀은 그냥 화석이 된다.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

@@ -35,9 +35,14 @@ jobs:
       security-events: write
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # 체크아웃이 남기는 자격증명을 `.git/config` 에 두지 않는다. 이 잡의 어떤
+          # 단계도 그 토큰으로 밖에 나가지 않는다 — 트리에 두면 러너에서 도는
+          # 코드가 집을 수 있는 것만 남는다.
+          persist-credentials: false
 
-      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
         with:
           languages: javascript-typescript
           # 테스트 경로 제외 — 이유는 그 파일 안에 적었다.
@@ -48,6 +53,28 @@ jobs:
 
       # ★빌드 단계가 없다. 이 저장소는 트랜스파일하지 않고 `.ts`를 그대로 실행하므로
       # CodeQL이 소스를 직접 읽으면 된다(autobuild를 부르면 할 일이 없어 헛돈다).
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
         with:
           category: "/language:javascript-typescript"
+
+  # **브랜치 규칙이 거는 이름은 이것 하나다.** 잡 이름을 규칙에 직접 적으면 이름이
+  # 바뀌는 날 그 체크는 "존재하지 않는 체크" 가 되고, 보호는 조용히 사라진다.
+  #
+  # ⚠️ 이 체크가 묻는 것은 "분석이 돌았는가" 이지 "경고가 없는가" 가 아니다. 경고는
+  # Security 탭에 쌓이고 머지를 막지 않는다. 여기서 막는 것은 질의가 깨져 아무것도
+  # 훑지 않은 채로 초록이 되는 경우다.
+  codeql:
+    name: codeql
+    needs: [analyze]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 분석이 돌았는가
+        env:
+          RESULT: ${{ needs.analyze.result }}
+        run: |
+          set -euo pipefail
+          echo "analyze: $RESULT"
+          test "$RESULT" = "success" \
+            || { echo "::error::CodeQL 분석이 끝까지 돌지 않았다 ($RESULT)"; exit 1; }

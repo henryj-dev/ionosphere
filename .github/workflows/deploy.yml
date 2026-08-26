@@ -1,0 +1,73 @@
+# 배포 — **직접 부를 수 없는 파일**
+#
+# 여기에는 `workflow_call` 밖에 없다. `workflow_dispatch` 도 `push` 도 없으므로
+# Actions 탭에 뜨지 않고 `gh workflow run` 으로도 못 부른다. 배포에 닿는 길은
+# `release.yml` 하나뿐이고, 그 길에는 gate 확인이 박혀 있다.
+#
+# 시크릿은 `production` 환경에 둔다. 저장소 시크릿으로 두면 이 저장소의 **어떤**
+# 워크플로든 참조할 수 있다 — 환경에 두면 아래 잡에서만 보인다.
+
+name: Deploy signal
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+      sha:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  signal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # **여기부터 되돌릴 수 없다.** 승인자·배포 브랜치 제한·시크릿이 붙는 자리다.
+    #
+    # ⚠️ `OPS_APP_ID` · `OPS_APP_PRIVATE_KEY` 는 **이 환경의 시크릿이어야 한다.**
+    #    저장소 시크릿으로 두면 부르는 쪽이 `secrets: inherit` 을 해야 풀리고,
+    #    그러면 이 파일이 무엇에 닿는지가 다시 흐려진다.
+    environment:
+      name: production
+    steps:
+      - name: 운영 저장소 이름 분리
+        id: ops
+        env:
+          OPS_REPO: ${{ vars.OPS_REPO }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OPS_REPO:-}" ]; then
+            echo "::error::vars.OPS_REPO 가 비어 있다 — 어디로 신호를 보낼지 모른다." >&2
+            exit 1
+          fi
+          echo "name=${OPS_REPO##*/}" >> "$GITHUB_OUTPUT"
+
+      - name: 배포 신호용 토큰 발급
+        id: ops_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.OPS_APP_ID }}
+          private-key: ${{ secrets.OPS_APP_PRIVATE_KEY }}
+          repositories: ${{ steps.ops.outputs.name }}
+          permission-contents: write
+
+      - name: 배포 신호 전송
+        env:
+          GH_TOKEN: ${{ steps.ops_token.outputs.token }}
+          OPS_REPO: ${{ vars.OPS_REPO }}
+          TAG: ${{ inputs.tag }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::설치 토큰을 받지 못했다 — 배포 신호를 못 보냈다." >&2
+            exit 1
+          fi
+          jq -n --arg tag "$TAG" --arg sha "$SHA" \
+            '{event_type:"deploy", client_payload:{tag:$tag, sha:$sha}}' \
+            | gh api -X POST "repos/${OPS_REPO}/dispatches" --input -
+          echo "배포 신호를 보냈다 — 진행 상황은 ops 저장소의 Actions에서 본다."
