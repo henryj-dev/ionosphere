@@ -27,11 +27,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  # 배포는 중간에 자르지 않는다.
-  group: release
-  cancel-in-progress: false
-
 jobs:
   release:
     runs-on: ubuntu-latest

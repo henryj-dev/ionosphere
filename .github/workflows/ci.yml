@@ -26,12 +26,6 @@ on:
 permissions:
   contents: read
 
-# 같은 PR에 연달아 푸시하면 앞의 실행은 의미가 없다. main은 취소하지 않는다 —
-# 각 커밋의 검사 결과가 이력으로 남아야 한다.
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-
 jobs:
   verify:
     name: verify (node ${{ matrix.node }})
