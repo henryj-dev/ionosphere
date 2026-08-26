@@ -170,10 +170,41 @@ class MysqlDriver implements DbDriver {
     }
   }
 
+  /**
+   * §1-5 승인 분기. **중복이면 `changes`가 0이어야 한다** — 이건 취향이 아니라 계약이다.
+   *
+   * ★`ON DUPLICATE KEY UPDATE`로 바꾸지 말 것(2026-08-25에 한 번 바뀌었다가 되돌렸다).
+   *
+   * 그 형태는 중복일 때 `affectedRows`가 **1**로 나온다. 실측(MySQL 8):
+   *
+   *     INSERT IGNORE              신규 1 · 중복 0
+   *     ON DUPLICATE KEY UPDATE    신규 1 · 중복 1     ← 계약 위반
+   *
+   * 그리고 이 값에 `maildrop-lock.ts`의 상호배제가 걸려 있다 — `acquire()`가
+   * `changes === 1`을 "빈 자리를 잡았다"로 읽으므로, 중복이 1을 돌려주면 **살아 있는
+   * 남의 락을 자기 것으로 착각한다.** MySQL 배포에서만 두 프로세스가 같은 락을 쥔다.
+   *
+   * 플래그로는 못 푼다. `FOUND_ROWS`를 끄면 중복이 0이 되지만, 같은 플래그가 "값 무변경
+   * UPDATE도 changes=1"(§9-4 리스 규율)을 지탱하므로 그쪽이 0으로 무너진다. 두 계약이
+   * 같은 플래그를 반대 방향으로 요구한다.
+   *
+   * 키 컬럼을 알면 `WHERE NOT EXISTS`로 둘 다 만족시킬 수 있지만, 이 시그니처는 키를
+   * 받지 않는다. 호출부 대부분이 복합 키다(`bayes_tokens(account_id, token)`,
+   * `search_index(account_id, token, field, message_id)` …) — `columns[0]`을 키로 넘겨
+   * 짚으면 첫 컬럼만 같아도 삽입을 건너뛰어 **행이 조용히 사라진다.**
+   *
+   * ⚠️ 대가는 남아 있다. `INSERT IGNORE`는 중복뿐 아니라 NOT NULL 위반·데이터 잘림 같은
+   *    **진짜 에러까지 경고로 낮춘다** — 아무것도 안 넣고 `changes=1`로 성공을 보고한다.
+   *    이걸 닫으려면 `insertIgnore(table, columns, keyColumns)`로 키를 받아 다이얼렉트마다
+   *    정확한 충돌 대상을 적어야 한다(PG의 `ON CONFLICT (…) DO NOTHING`도 같이 좁혀진다).
+   *    그건 호출부 열넷을 건드리는 별개의 작업이고, 락이 깨진 채로 둘 이유는 없다.
+   *
+   * PG는 `ON CONFLICT DO NOTHING`, SQLite·D1은 `INSERT OR IGNORE` — 셋 다 중복에 0이다.
+   * MySQL만 어긋나 있었다.
+   */
   insertIgnore(table: string, columns: readonly string[]): string {
     const placeholders = columns.map(() => "?").join(", ");
-    const key = columns[0]!;
-    return `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${placeholders}) ON DUPLICATE KEY UPDATE ${key} = ${key}`;
+    return `INSERT IGNORE INTO ${table} (${columns.join(", ")}) VALUES (${placeholders})`;
   }
 
   async close(): Promise<void> {
