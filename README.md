@@ -2,15 +2,63 @@
 
 <img src="assets/ionosphere-banner.svg" alt="ionosphere — a complete mail platform in one Node.js process" width="100%">
 
-**[English](README.md)** · **[한국어](README.ko.md)**
+### **A complete mail platform in one Node.js process.**
 
-<br><br>
+SMTP reception, IMAP and POP3 access, JMAP, outbound delivery, Sieve filtering, forwarding,
+domain and account administration, and operational tooling — from one repository and one
+application process. Protocol behavior is implemented as isolated state machines; sockets,
+HTTP, and database access are thin adapters around them.
 
-<a href="#quick-start">Quick start</a> · <a href="#administration-cli">CLI</a> · <a href="#storage-configuration">Storage</a> · <a href="#mail-security-policy">Security</a>
+<br/>
+
+[![ci](https://github.com/henryj-dev/ionosphere/actions/workflows/ci.yml/badge.svg)](https://github.com/henryj-dev/ionosphere/actions/workflows/ci.yml)
+[![codeql](https://github.com/henryj-dev/ionosphere/actions/workflows/codeql.yml/badge.svg)](https://github.com/henryj-dev/ionosphere/actions/workflows/codeql.yml)
+[![dependency-review](https://github.com/henryj-dev/ionosphere/actions/workflows/dependency-review.yml/badge.svg)](https://github.com/henryj-dev/ionosphere/actions/workflows/dependency-review.yml)
+
+<br/>
+
+![node](https://img.shields.io/badge/node-24%2B-5FA04E?logo=node.js&logoColor=white)
+![typescript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
+![runtime deps](https://img.shields.io/badge/runtime%20deps-node%3A%20builtins-success)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+<br/>
+
+> *The ionosphere is the layer that reflects a radio signal back down to earth — how a
+> transmission reaches somewhere it has no straight line to.*
+
+English · [한국어](README.ko.md)
 
 </div>
 
-<div align="center">
+---
+
+> [!NOTE]
+> This README describes behavior visible in the source code and tests. Production addresses, credentials, host fingerprints, and private deployment procedures are intentionally not included.
+
+---
+
+## Contents
+
+- [What it does](#what-it-does)
+- [Quick start](#quick-start)
+- [How it fits together](#how-it-fits-together)
+- [Protocol map](#protocol-map)
+- [Configuration](#configuration)
+- [Command line](#command-line)
+- [HTTP API](#http-api)
+- [HTTP, JMAP, and autoconfiguration](#http-jmap-and-autoconfiguration)
+- [Smarthost and outbound delivery](#smarthost-and-outbound-delivery)
+- [Mail security policy](#mail-security-policy)
+- [Spam, abuse, and suppression](#spam-abuse-and-suppression)
+- [Hard limits](#hard-limits)
+- [Operations](#operations)
+- [Development](#development)
+- [License](#license)
+
+---
+
+## What it does
 
 <table>
 <tr>
@@ -20,32 +68,6 @@
 <td align="center" width="25%"><strong>Control</strong><br><sub>REST · CLI<br>audit · metrics</sub></td>
 </tr>
 </table>
-
-</div>
-
-Ionosphere provides SMTP reception, IMAP and POP3 access, JMAP, outbound delivery, Sieve filtering, forwarding, domain and account administration, and operational tooling from one repository and one application process. Protocol behavior is implemented as isolated state machines; sockets, HTTP, and database access are thin adapters around them.
-
-> [!NOTE]
-> This README describes behavior visible in the source code and tests. Production addresses, credentials, host fingerprints, and private deployment procedures are intentionally not included.
-
-## Contents
-
-- [Features](#features)
-- [Quick start](#quick-start)
-- [Administration CLI](#administration-cli)
-- [Storage configuration](#storage-configuration)
-- [Listeners and networking](#listeners-and-networking)
-- [TLS and certificates](#tls-and-certificates)
-- [HTTP, JMAP, and autoconfiguration](#http-jmap-and-autoconfiguration)
-- [Administration REST API](#administration-rest-api)
-- [Mail security policy](#mail-security-policy)
-- [Environment variables](#environment-variable-reference)
-- [Development and verification](#development-and-verification)
-- [Operations checklist](#operations-checklist)
-
----
-
-## Features
 
 | Area | Features |
 | --- | --- |
@@ -57,26 +79,6 @@ Ionosphere provides SMTP reception, IMAP and POP3 access, JMAP, outbound deliver
 | Administration | REST API, CLI, browser administration console |
 | Storage | SQLite, PostgreSQL, MySQL, local blobs, S3-compatible storage |
 | Operations | Metrics, audit logs, blob GC, retention/reaper, webhooks, push |
-
-### Architecture at a glance
-
-<div align="center">
-<img src="assets/ionosphere-flow.svg" alt="Ionosphere mail flow from protocol surfaces through the core to shared state, message blobs, and workers" width="900">
-</div>
-
-The same administration command registry powers the CLI, REST API, and browser console, keeping the three management surfaces aligned.
-
-<div align="center">
-
-<table>
-<tr>
-<td valign="top" width="33%"><h3>🧩 One platform</h3><sub>Inbound, outbound, storage, authentication, and administration share the same domain model.</sub></td>
-<td valign="top" width="33%"><h3>🔒 Fail closed</h3><sub>TLS, host routing, scopes, limits, and secret handling reject ambiguous configuration early.</sub></td>
-<td valign="top" width="33%"><h3>🧪 Testable core</h3><sub>Protocol engines are deterministic state machines, separated from sockets and external I/O.</sub></td>
-</tr>
-</table>
-
-</div>
 
 ### Choose a starting shape
 
@@ -97,22 +99,9 @@ The same administration command registry powers the CLI, REST API, and browser c
 | S3 configuration | Partial configuration fails startup instead of falling back silently |
 | Listener binding | Ambiguous numeric addresses are rejected |
 
-## Protocol map
+---
 
-| Surface | Typical listener | Transport | What it is for |
-| --- | --- | --- | --- |
-| SMTP | 25 / 2525 | Plain + STARTTLS | Inbound mail from other MTAs |
-| Submission | 587 | STARTTLS | Authenticated client submission |
-| SMTPS | 465 | Implicit TLS | Authenticated client submission over TLS |
-| IMAP | 143 | STARTTLS | Mailbox access and synchronization |
-| IMAPS | 993 | Implicit TLS | Mailbox access over TLS |
-| POP3 | 110 / 1110 | Plain + TLS policy | Simple maildrop retrieval |
-| POP3S | 995 | Implicit TLS | Maildrop retrieval over TLS |
-| JMAP | HTTP | HTTP + TLS front | Modern mail and submission API |
-| ManageSieve | 4190 | STARTTLS | Sieve script management |
-| LMTP | Local port | Trusted local channel | Per-recipient local delivery |
-
-## Requirements
+## Quick start
 
 - Node.js 24 or newer
 - npm
@@ -120,10 +109,6 @@ The same administration command registry powers the CLI, REST API, and browser c
 - pg for PostgreSQL or mysql2 for MySQL
 
 Runtime code uses Node built-in node: modules. Development dependencies are installed for testing and type checking.
-
----
-
-## Quick start
 
 The following is a development configuration using local SQLite, local blob storage, and a self-signed certificate. example.com is a documentation-only example domain.
 
@@ -174,78 +159,48 @@ Keep `.env` out of version control. It may contain database passwords, API token
 
 ---
 
-## Administration CLI
+## How it fits together
 
-The CLI follows the same database selection rules as the server.
+<div align="center">
+<img src="assets/ionosphere-flow.svg" alt="Ionosphere mail flow from protocol surfaces through the core to shared state, message blobs, and workers" width="900">
+</div>
 
-~~~bash
-export IONOSPHERE_DB="$PWD/ionosphere.db"
-export IONOSPHERE_MASTER_KEY="$(openssl rand -hex 32)"
+The same administration command registry powers the CLI, REST API, and browser console, keeping the three management surfaces aligned.
 
-node apps/server/src/cli.ts help
-node apps/server/src/cli.ts help domain-add
-node apps/server/src/cli.ts domain-add example.com
-node apps/server/src/cli.ts account-create alice@example.com 'change-this-password'
-~~~
+<div align="center">
 
-General syntax:
+<table>
+<tr>
+<td valign="top" width="33%"><h3>🧩 One platform</h3><sub>Inbound, outbound, storage, authentication, and administration share the same domain model.</sub></td>
+<td valign="top" width="33%"><h3>🔒 Fail closed</h3><sub>TLS, host routing, scopes, limits, and secret handling reject ambiguous configuration early.</sub></td>
+<td valign="top" width="33%"><h3>🧪 Testable core</h3><sub>Protocol engines are deterministic state machines, separated from sockets and external I/O.</sub></td>
+</tr>
+</table>
 
-~~~text
-node apps/server/src/cli.ts <command> [--key=value ...]
-node apps/server/src/cli.ts help
-node apps/server/src/cli.ts help <command>
-~~~
+</div>
 
-Avoid placing secrets in argv. Smarthost passwords and TLS private keys can be supplied through stdin or environment variables:
+---
 
-~~~bash
-export IONOSPHERE_CLI_SECRET='secret-value'
-export IONOSPHERE_SMARTHOST_SECRET='relay-password'
-~~~
+## Protocol map
 
-### Available commands
+| Surface | Typical listener | Transport | What it is for |
+| --- | --- | --- | --- |
+| SMTP | 25 / 2525 | Plain + STARTTLS | Inbound mail from other MTAs |
+| Submission | 587 | STARTTLS | Authenticated client submission |
+| SMTPS | 465 | Implicit TLS | Authenticated client submission over TLS |
+| IMAP | 143 | STARTTLS | Mailbox access and synchronization |
+| IMAPS | 993 | Implicit TLS | Mailbox access over TLS |
+| POP3 | 110 / 1110 | Plain + TLS policy | Simple maildrop retrieval |
+| POP3S | 995 | Implicit TLS | Maildrop retrieval over TLS |
+| JMAP | HTTP | HTTP + TLS front | Modern mail and submission API |
+| ManageSieve | 4190 | STARTTLS | Sieve script management |
+| LMTP | Local port | Trusted local channel | Per-recipient local delivery |
 
-Domains:
+---
 
-- domain-list, domain-add, domain-verify
-- domain-disable, domain-enable, domain-release
+## Configuration
 
-Accounts and credentials:
-
-- account-list, account-create, account-suspend
-- account-activate, account-delete
-- app-password-list, app-password-create
-- oauth-token-list, oauth-token-create, credential-revoke
-
-Routing:
-
-- alias-list, alias-add, alias-remove
-
-Delivery operations:
-
-- queue-list, queue-retry, queue-cancel
-- suppression-list, suppression-remove, usage
-- smarthost-list, smarthost-set, smarthost-remove
-
-Tenants, API keys, and TLS:
-
-- tenant-list, tenant-create
-- api-key-list, api-key-create, api-key-revoke
-- tls-status, tls-refresh, tls-upload
-
-REST domain operations require ownership TXT, MX, and SPF verification before a domain can be used. The CLI is a local operator tool and preserves a compatibility path with relaxed verification defaults; use --preVerified=false when the verification flow is required.
-
-Account deletion starts an irreversible drain. Use account-suspend for a reversible lock. App passwords and OAuth tokens are shown in plaintext only when they are created.
-
-Aliases can route to multiple local accounts or external addresses. A local part of * creates a catch-all. External forwarding requires an SRS secret:
-
-~~~bash
-export IONOSPHERE_SRS_SECRET="$(openssl rand -hex 32)"
-~~~
-
-API key scopes are read, write, and admin. read permits reads, write permits reads and changes, and admin grants full access.
-
-## Storage configuration
+### Storage configuration
 
 ### Database
 
@@ -297,7 +252,7 @@ IONOSPHERE_MASTER_KEY=strong-random-master-key
 
 The master key seals stored secrets such as DKIM private keys and smarthost passwords. Development-only plaintext storage can be explicitly enabled with IONOSPHERE_ALLOW_PLAINTEXT_SECRETS=1. This emits a warning and stores applicable values with a plain$ prefix.
 
-## Listeners and networking
+### Listeners and networking
 
 | Service | Environment variable | Default |
 | --- | --- | --- |
@@ -331,7 +286,7 @@ IONOSPHERE_LISTEN_SMTP=off
 
 Supported forms include 8080, 0.0.0.0:8080, 127.0.0.1:, [::]:8080, and off. IPv6 addresses require brackets. Invalid or ambiguous numeric address forms are rejected at startup.
 
-## TLS and certificates
+### TLS and certificates
 
 Select the default certificate source with IONOSPHERE_TLS_MODE:
 
@@ -395,210 +350,7 @@ IONOSPHERE_TLS_SMTP_CN=mx.example.com
 
 Supported listener names are SMTP, SUBMISSION, SMTPS, IMAP, IMAPS, POP3, POP3S, MANAGESIEVE, HTTPS_FRONT, and ADMIN_TLS.
 
-## HTTP, JMAP, and autoconfiguration
-
-JMAP:
-
-~~~bash
-IONOSPHERE_JMAP_PORT=8080
-IONOSPHERE_JMAP_BASE_URL=https://mail.example.com
-~~~
-
-Main paths:
-
-~~~text
-GET  /jmap/session
-POST /jmap/api
-POST /jmap/upload
-GET  /jmap/download/<account>/<blob>
-GET  /jmap/eventsource
-~~~
-
-Implemented modules include Mailbox, Email, Email/query, EmailSubmission, Quota, VacationResponse, PushSubscription, and SearchSnippet. Request bodies are limited to about 10 MB, one upload to 50,000,000 bytes, SSE connections to 256, and the authentication cache to 10,000 entries.
-
-Autoconfiguration:
-
-~~~bash
-IONOSPHERE_AUTOCONFIG_PORT=8081
-IONOSPHERE_AUTOCONFIG_BRAND=Example Mail
-IONOSPHERE_IMAP_HOST=imap.example.com
-IONOSPHERE_SUBMISSION_HOST=smtp.example.com
-IONOSPHERE_POP3_HOST=pop3.example.com
-~~~
-
-POP3 is not advertised merely because its port is open; set IONOSPHERE_POP3_HOST when it should appear in client configuration.
-
-HTTPS front and host allowlists:
-
-~~~bash
-IONOSPHERE_HTTPS_FRONT_PORT=443
-IONOSPHERE_HTTP_REDIRECT_PORT=80
-IONOSPHERE_HOST_MTA_STS=mta-sts.example.com
-IONOSPHERE_HOST_ADMIN=admin.example.com
-IONOSPHERE_HOST_METRICS=metrics.example.com
-~~~
-
-Service hosts are comma-separated. Hosts not on the allowlist are not routed. When a service host is omitted, only its localhost default is accepted. The administration console also applies an internal-exposure check; hiding a name in DNS is not its security boundary.
-
-## Administration REST API
-
-The administration API starts when IONOSPHERE_ADMIN_PORT is configured:
-
-~~~bash
-IONOSPHERE_ADMIN_PORT=8080
-IONOSPHERE_ADMIN_TOKEN=bootstrap-root-token
-~~~
-
-Authenticate with:
-
-~~~http
-Authorization: Bearer <api-key-or-root-token>
-~~~
-
-The API covers tenants, accounts, domains, aliases, API keys, app passwords, OAuth tokens, credentials, queue, suppressions, usage, smarthosts, and TLS under the /v1/ path.
-
-GET requests require read; other methods require write. admin scope and the root token have full access. The root token is a bootstrap mechanism and has no automatic rotation implementation.
-
-## Smarthost and outbound delivery
-
-~~~bash
-IONOSPHERE_SMARTHOST=smtp.example.com
-IONOSPHERE_SMARTHOST_PORT=587
-IONOSPHERE_SMARTHOST_USER=relay-user
-IONOSPHERE_SMARTHOST_PASS=relay-password
-IONOSPHERE_SMARTHOST_TLS=required
-~~~
-
-TLS modes are required, opportunistic, implicit, and never. Port 587 is intended for STARTTLS and port 465 for implicit TLS.
-
-Outbound controls:
-
-~~~bash
-IONOSPHERE_RATE_PER_MINUTE=...
-IONOSPHERE_RATE_PER_HOUR=...
-IONOSPHERE_RATE_PER_DAY=...
-IONOSPHERE_RELAY_PER_HOUR=...
-IONOSPHERE_LOCAL_ONLY=1
-IONOSPHERE_REQUIRE_SENDER_OWNERSHIP=0
-~~~
-
-IONOSPHERE_LOCAL_ONLY=1 blocks external-domain delivery, although a real smarthost route can provide an explicit outbound exception. Sender ownership checks are enabled by default.
-
-## Mail security policy
-
-When TLS material is unavailable or STARTTLS cannot actually be performed, plaintext authentication is disabled by default. Depending on the protocol surface, the implementation supports PLAIN, LOGIN, SCRAM-SHA-256, XOAUTH2, and OAUTHBEARER.
-
-The inbound path evaluates and stores SPF, DKIM, and DMARC results. The outbound path can apply DKIM signatures. Domain provisioning generates DKIM keys and DNS record instructions.
-
-MTA-STS modes are enforce, testing, and none:
-
-~~~bash
-IONOSPHERE_MTA_STS_MODE=enforce
-IONOSPHERE_MTA_STS_ENFORCE=1
-IONOSPHERE_MX_HOST=mx.example.com
-IONOSPHERE_DANE=1
-~~~
-
-DANE uses DNSSEC-validated TLSA results for outbound TLS. Before enabling MTA-STS enforcement, align the MX host, HTTPS front, and host allowlist.
-
-SRS enables external forwarding and forwarding bounce reversal:
-
-~~~bash
-IONOSPHERE_SRS_SECRET=strong-random-secret
-~~~
-
-An unset or empty value leaves SRS forwarding disabled.
-
-## Spam, abuse, and suppression
-
-The code includes greylisting, SPF-pass greylist exemptions, a DNSBL integration point, per-account Bayes training, bounce and complaint monitoring, automatic account suspension, and suppression lists.
-
-Default abuse thresholds:
-
-- Observation window: 24 hours
-- Minimum sample: 20 messages
-- Bounce rate: over 10%
-- Complaint rate: over 0.3%
-
-## Hard limits
-
-Protocol-wide safety limits are defined in packages/core/src/limits.ts.
-
-| Limit | Value |
-| --- | ---: |
-| Maximum message | 25 MiB |
-| SMTP/LMTP recipients per session | 1000 |
-| SMTP errors per session | 20 |
-| Maximum listener connections | 1024 |
-| Received hops | 30 |
-| SMTP/LMTP/POP3 command line | 4096 bytes |
-| Header section | 1 MiB |
-| Header line | 64 KiB |
-| IMAP line | 64 KiB |
-| Pending pipeline | 1 MiB |
-| Pre-auth IMAP literal | 8 KiB |
-| Queued IMAP line | 1 MiB |
-| MIME depth | 20 |
-| MIME parts | 1024 |
-| Thread references | 64 |
-| Addresses per header | 256 |
-| JMAP upload | 50,000,000 bytes |
-
-These are code-level safety limits, not ordinary environment configuration.
-
-## Background workers and retention
-
-~~~bash
-IONOSPHERE_RUN_MTA_WORKER=1
-IONOSPHERE_RUN_WEBHOOK_WORKER=1
-IONOSPHERE_RUN_REAPER=1
-~~~
-
-The MTA worker is enabled by default when Submission is enabled. The webhook worker and reaper are enabled by default.
-
-Blob GC:
-
-~~~bash
-IONOSPHERE_BLOB_GC=off
-IONOSPHERE_BLOB_GC=mark
-IONOSPHERE_BLOB_GC=sweep
-IONOSPHERE_BLOB_GC_GRACE_MS=...
-IONOSPHERE_BLOB_UPLOAD_TTL_MS=...
-~~~
-
-The default GC mode is mark. sweep can delete files and should be enabled only after reviewing mark results.
-
-Store retention defaults are 30 days for the change log, 180 days for thread references, and 7 days for completed or failed queue entries.
-
-## Audit logs
-
-~~~bash
-IONOSPHERE_AUDIT=1
-IONOSPHERE_AUDIT_DIR=/var/lib/ionosphere/audit
-IONOSPHERE_AUDIT_FLUSH_MS=1000
-IONOSPHERE_AUDIT_SHIP_INTERVAL_MS=60000
-IONOSPHERE_AUDIT_LOCAL_RETAIN_DAYS=30
-IONOSPHERE_AUDIT_SHIP_HOST=server-1
-~~~
-
-S3 shipping:
-
-~~~bash
-IONOSPHERE_AUDIT_S3_ENDPOINT=https://audit-s3.example.com
-IONOSPHERE_AUDIT_S3_BUCKET=ionosphere-audit
-IONOSPHERE_AUDIT_S3_ACCESS_KEY=audit-access-key
-IONOSPHERE_AUDIT_S3_SECRET_KEY=audit-secret-key
-IONOSPHERE_AUDIT_S3_REGION=us-east-1
-IONOSPHERE_AUDIT_S3_PREFIX=audit/
-IONOSPHERE_AUDIT_S3_PATH_STYLE=1
-~~~
-
-Partial audit S3 configuration stops startup. Keep audit storage in a separate bucket and permission scope from message blobs.
-
-<details>
-<summary><strong>Show the complete environment variable reference</strong></summary>
-
-## Environment variable reference
+### Environment variable reference
 
 Core, database, and storage:
 
@@ -730,7 +482,314 @@ IONOSPHERE_LOG_FORMAT
 
 </details>
 
-## Development and verification
+---
+
+## Command line
+
+The CLI follows the same database selection rules as the server.
+
+~~~bash
+export IONOSPHERE_DB="$PWD/ionosphere.db"
+export IONOSPHERE_MASTER_KEY="$(openssl rand -hex 32)"
+
+node apps/server/src/cli.ts help
+node apps/server/src/cli.ts help domain-add
+node apps/server/src/cli.ts domain-add example.com
+node apps/server/src/cli.ts account-create alice@example.com 'change-this-password'
+~~~
+
+General syntax:
+
+~~~text
+node apps/server/src/cli.ts <command> [--key=value ...]
+node apps/server/src/cli.ts help
+node apps/server/src/cli.ts help <command>
+~~~
+
+Avoid placing secrets in argv. Smarthost passwords and TLS private keys can be supplied through stdin or environment variables:
+
+~~~bash
+export IONOSPHERE_CLI_SECRET='secret-value'
+export IONOSPHERE_SMARTHOST_SECRET='relay-password'
+~~~
+
+### Available commands
+
+Domains:
+
+- domain-list, domain-add, domain-verify
+- domain-disable, domain-enable, domain-release
+
+Accounts and credentials:
+
+- account-list, account-create, account-suspend
+- account-activate, account-delete
+- app-password-list, app-password-create
+- oauth-token-list, oauth-token-create, credential-revoke
+
+Routing:
+
+- alias-list, alias-add, alias-remove
+
+Delivery operations:
+
+- queue-list, queue-retry, queue-cancel
+- suppression-list, suppression-remove, usage
+- smarthost-list, smarthost-set, smarthost-remove
+
+Tenants, API keys, and TLS:
+
+- tenant-list, tenant-create
+- api-key-list, api-key-create, api-key-revoke
+- tls-status, tls-refresh, tls-upload
+
+REST domain operations require ownership TXT, MX, and SPF verification before a domain can be used. The CLI is a local operator tool and preserves a compatibility path with relaxed verification defaults; use --preVerified=false when the verification flow is required.
+
+Account deletion starts an irreversible drain. Use account-suspend for a reversible lock. App passwords and OAuth tokens are shown in plaintext only when they are created.
+
+Aliases can route to multiple local accounts or external addresses. A local part of * creates a catch-all. External forwarding requires an SRS secret:
+
+~~~bash
+export IONOSPHERE_SRS_SECRET="$(openssl rand -hex 32)"
+~~~
+
+API key scopes are read, write, and admin. read permits reads, write permits reads and changes, and admin grants full access.
+
+---
+
+## HTTP API
+
+The administration API starts when IONOSPHERE_ADMIN_PORT is configured:
+
+~~~bash
+IONOSPHERE_ADMIN_PORT=8080
+IONOSPHERE_ADMIN_TOKEN=bootstrap-root-token
+~~~
+
+Authenticate with:
+
+~~~http
+Authorization: Bearer <api-key-or-root-token>
+~~~
+
+The API covers tenants, accounts, domains, aliases, API keys, app passwords, OAuth tokens, credentials, queue, suppressions, usage, smarthosts, and TLS under the /v1/ path.
+
+GET requests require read; other methods require write. admin scope and the root token have full access. The root token is a bootstrap mechanism and has no automatic rotation implementation.
+
+---
+
+## HTTP, JMAP, and autoconfiguration
+
+JMAP:
+
+~~~bash
+IONOSPHERE_JMAP_PORT=8080
+IONOSPHERE_JMAP_BASE_URL=https://mail.example.com
+~~~
+
+Main paths:
+
+~~~text
+GET  /jmap/session
+POST /jmap/api
+POST /jmap/upload
+GET  /jmap/download/<account>/<blob>
+GET  /jmap/eventsource
+~~~
+
+Implemented modules include Mailbox, Email, Email/query, EmailSubmission, Quota, VacationResponse, PushSubscription, and SearchSnippet. Request bodies are limited to about 10 MB, one upload to 50,000,000 bytes, SSE connections to 256, and the authentication cache to 10,000 entries.
+
+Autoconfiguration:
+
+~~~bash
+IONOSPHERE_AUTOCONFIG_PORT=8081
+IONOSPHERE_AUTOCONFIG_BRAND=Example Mail
+IONOSPHERE_IMAP_HOST=imap.example.com
+IONOSPHERE_SUBMISSION_HOST=smtp.example.com
+IONOSPHERE_POP3_HOST=pop3.example.com
+~~~
+
+POP3 is not advertised merely because its port is open; set IONOSPHERE_POP3_HOST when it should appear in client configuration.
+
+HTTPS front and host allowlists:
+
+~~~bash
+IONOSPHERE_HTTPS_FRONT_PORT=443
+IONOSPHERE_HTTP_REDIRECT_PORT=80
+IONOSPHERE_HOST_MTA_STS=mta-sts.example.com
+IONOSPHERE_HOST_ADMIN=admin.example.com
+IONOSPHERE_HOST_METRICS=metrics.example.com
+~~~
+
+Service hosts are comma-separated. Hosts not on the allowlist are not routed. When a service host is omitted, only its localhost default is accepted. The administration console also applies an internal-exposure check; hiding a name in DNS is not its security boundary.
+
+---
+
+## Smarthost and outbound delivery
+
+~~~bash
+IONOSPHERE_SMARTHOST=smtp.example.com
+IONOSPHERE_SMARTHOST_PORT=587
+IONOSPHERE_SMARTHOST_USER=relay-user
+IONOSPHERE_SMARTHOST_PASS=relay-password
+IONOSPHERE_SMARTHOST_TLS=required
+~~~
+
+TLS modes are required, opportunistic, implicit, and never. Port 587 is intended for STARTTLS and port 465 for implicit TLS.
+
+Outbound controls:
+
+~~~bash
+IONOSPHERE_RATE_PER_MINUTE=...
+IONOSPHERE_RATE_PER_HOUR=...
+IONOSPHERE_RATE_PER_DAY=...
+IONOSPHERE_RELAY_PER_HOUR=...
+IONOSPHERE_LOCAL_ONLY=1
+IONOSPHERE_REQUIRE_SENDER_OWNERSHIP=0
+~~~
+
+IONOSPHERE_LOCAL_ONLY=1 blocks external-domain delivery, although a real smarthost route can provide an explicit outbound exception. Sender ownership checks are enabled by default.
+
+---
+
+## Mail security policy
+
+When TLS material is unavailable or STARTTLS cannot actually be performed, plaintext authentication is disabled by default. Depending on the protocol surface, the implementation supports PLAIN, LOGIN, SCRAM-SHA-256, XOAUTH2, and OAUTHBEARER.
+
+The inbound path evaluates and stores SPF, DKIM, and DMARC results. The outbound path can apply DKIM signatures. Domain provisioning generates DKIM keys and DNS record instructions.
+
+MTA-STS modes are enforce, testing, and none:
+
+~~~bash
+IONOSPHERE_MTA_STS_MODE=enforce
+IONOSPHERE_MTA_STS_ENFORCE=1
+IONOSPHERE_MX_HOST=mx.example.com
+IONOSPHERE_DANE=1
+~~~
+
+DANE uses DNSSEC-validated TLSA results for outbound TLS. Before enabling MTA-STS enforcement, align the MX host, HTTPS front, and host allowlist.
+
+SRS enables external forwarding and forwarding bounce reversal:
+
+~~~bash
+IONOSPHERE_SRS_SECRET=strong-random-secret
+~~~
+
+An unset or empty value leaves SRS forwarding disabled.
+
+---
+
+## Spam, abuse, and suppression
+
+The code includes greylisting, SPF-pass greylist exemptions, a DNSBL integration point, per-account Bayes training, bounce and complaint monitoring, automatic account suspension, and suppression lists.
+
+Default abuse thresholds:
+
+- Observation window: 24 hours
+- Minimum sample: 20 messages
+- Bounce rate: over 10%
+- Complaint rate: over 0.3%
+
+---
+
+## Hard limits
+
+Protocol-wide safety limits are defined in packages/core/src/limits.ts.
+
+| Limit | Value |
+| --- | ---: |
+| Maximum message | 25 MiB |
+| SMTP/LMTP recipients per session | 1000 |
+| SMTP errors per session | 20 |
+| Maximum listener connections | 1024 |
+| Received hops | 30 |
+| SMTP/LMTP/POP3 command line | 4096 bytes |
+| Header section | 1 MiB |
+| Header line | 64 KiB |
+| IMAP line | 64 KiB |
+| Pending pipeline | 1 MiB |
+| Pre-auth IMAP literal | 8 KiB |
+| Queued IMAP line | 1 MiB |
+| MIME depth | 20 |
+| MIME parts | 1024 |
+| Thread references | 64 |
+| Addresses per header | 256 |
+| JMAP upload | 50,000,000 bytes |
+
+These are code-level safety limits, not ordinary environment configuration.
+
+---
+
+## Operations
+
+### Background workers and retention
+
+~~~bash
+IONOSPHERE_RUN_MTA_WORKER=1
+IONOSPHERE_RUN_WEBHOOK_WORKER=1
+IONOSPHERE_RUN_REAPER=1
+~~~
+
+The MTA worker is enabled by default when Submission is enabled. The webhook worker and reaper are enabled by default.
+
+Blob GC:
+
+~~~bash
+IONOSPHERE_BLOB_GC=off
+IONOSPHERE_BLOB_GC=mark
+IONOSPHERE_BLOB_GC=sweep
+IONOSPHERE_BLOB_GC_GRACE_MS=...
+IONOSPHERE_BLOB_UPLOAD_TTL_MS=...
+~~~
+
+The default GC mode is mark. sweep can delete files and should be enabled only after reviewing mark results.
+
+Store retention defaults are 30 days for the change log, 180 days for thread references, and 7 days for completed or failed queue entries.
+
+### Audit logs
+
+~~~bash
+IONOSPHERE_AUDIT=1
+IONOSPHERE_AUDIT_DIR=/var/lib/ionosphere/audit
+IONOSPHERE_AUDIT_FLUSH_MS=1000
+IONOSPHERE_AUDIT_SHIP_INTERVAL_MS=60000
+IONOSPHERE_AUDIT_LOCAL_RETAIN_DAYS=30
+IONOSPHERE_AUDIT_SHIP_HOST=server-1
+~~~
+
+S3 shipping:
+
+~~~bash
+IONOSPHERE_AUDIT_S3_ENDPOINT=https://audit-s3.example.com
+IONOSPHERE_AUDIT_S3_BUCKET=ionosphere-audit
+IONOSPHERE_AUDIT_S3_ACCESS_KEY=audit-access-key
+IONOSPHERE_AUDIT_S3_SECRET_KEY=audit-secret-key
+IONOSPHERE_AUDIT_S3_REGION=us-east-1
+IONOSPHERE_AUDIT_S3_PREFIX=audit/
+IONOSPHERE_AUDIT_S3_PATH_STYLE=1
+~~~
+
+Partial audit S3 configuration stops startup. Keep audit storage in a separate bucket and permission scope from message blobs.
+
+<details>
+<summary><strong>Show the complete environment variable reference</strong></summary>
+
+### Operations checklist
+
+1. Set the same IONOSPHERE_MASTER_KEY for every server and CLI process that shares encrypted data.
+2. When multiple servers share a database, use shared S3-compatible blob storage as well.
+3. Protect the administration API, root token, and API keys from unnecessary external exposure.
+4. Ensure ACME http-01 and HTTP redirect do not use the same port.
+5. Before enabling MTA-STS enforce, align the MX host, HTTPS front, and host allowlist.
+6. If external forwarding is enabled, verify that IONOSPHERE_SRS_SECRET is non-empty.
+7. Review blob GC mark results and fallback reads before enabling IONOSPHERE_BLOB_GC=sweep.
+8. Use separate buckets and permissions for audit logs and mail blobs.
+9. Do not put ordinary passwords in CLI argv when shell history exposure matters.
+10. Treat startup validation errors as configuration failures; fix port, TLS, S3, and master-key settings before continuing.
+
+---
+
+## Development
 
 ~~~bash
 npm run lint
@@ -763,26 +822,10 @@ scripts/                 Verification, migration, and operational helpers
 
 Protocol engines keep state transitions in engine.ts so they can be tested without a network. server.ts handles actual connections.
 
-## Operations checklist
-
-1. Set the same IONOSPHERE_MASTER_KEY for every server and CLI process that shares encrypted data.
-2. When multiple servers share a database, use shared S3-compatible blob storage as well.
-3. Protect the administration API, root token, and API keys from unnecessary external exposure.
-4. Ensure ACME http-01 and HTTP redirect do not use the same port.
-5. Before enabling MTA-STS enforce, align the MX host, HTTPS front, and host allowlist.
-6. If external forwarding is enabled, verify that IONOSPHERE_SRS_SECRET is non-empty.
-7. Review blob GC mark results and fallback reads before enabling IONOSPHERE_BLOB_GC=sweep.
-8. Use separate buckets and permissions for audit logs and mail blobs.
-9. Do not put ordinary passwords in CLI argv when shell history exposure matters.
-10. Treat startup validation errors as configuration failures; fix port, TLS, S3, and master-key settings before continuing.
+---
 
 ## License
 
-[MIT](LICENSE)
+MIT. See [LICENSE](LICENSE).
 
-<br>
-
-<div align="center">
-<sub>Built for reliable mail delivery, clear boundaries, and boring operations.</sub><br>
-<a href="README.md">English</a> · <a href="README.ko.md">한국어</a>
-</div>
+<sub>Built for reliable mail delivery, clear boundaries, and boring operations.</sub>
