@@ -1,5 +1,37 @@
-import { describe, expect, test } from "@ionosphere/testkit";
+import { afterEach, describe, expect, test } from "@ionosphere/testkit";
 import { allMigrations, BatchConflictError, migrate, openMysql, type DbDriver } from "@ionosphere/db";
+
+/**
+ * 연 드라이버를 적어 두고 테스트마다 반드시 닫는다.
+ *
+ * ★왜(2026-08-26 실사고): 각 테스트가 `await db.close()`를 **마지막 줄**에 두고 있었다.
+ * 단언이 하나 깨지면 그 줄은 실행되지 않고, 살아남은 풀이 이벤트 루프를 붙잡아 node가
+ * 종료하지 못한다. 그러면 "3초 만에 빨간 테스트"가 "25분 타임아웃"으로 둔갑한다 —
+ * 2026-08-24부터 main의 CI가 실제로 그 상태였고, 무엇이 깨졌는지는 로그 끝에서 잘려
+ * 보이지도 않았다. 느려진 게 아니라 멈춘 것이었다.
+ *
+ * `pool-error.test.ts`는 처음부터 try/finally로 이걸 지키고 있었다. 그 규율을 이 파일에도
+ * 둔다 — 다만 테스트 본문을 전부 고치는 대신 여는 자리에서 등록하고 훅에서 닫는다.
+ */
+const opened: DbDriver[] = [];
+
+function track(db: DbDriver): DbDriver {
+  opened.push(db);
+  return db;
+}
+
+afterEach(async () => {
+  while (opened.length > 0) {
+    // 테스트가 스스로 닫았으면 두 번째 close는 던질 수 있다. 정리가 실패를 가리면
+    // 안 되므로 여기서 삼킨다 — 판정은 테스트가 한다.
+    try {
+      await opened.pop()!.close();
+    } catch {
+      /* 이미 닫혔다 */
+    }
+  }
+});
+
 
 /**
  * MySQL/MariaDB는 로컬/CI에 리처블할 때만 실행 (IONOSPHERE_TEST_MYSQL_URL 미설정이면 스킵).
@@ -38,7 +70,7 @@ function scopedUrl(): string {
 /** 전용 DB를 통째로 재생성한다 — 테이블 단위 DROP보다 단순하고 잔여물이 남지 않는다. */
 async function freshTestDatabase(): Promise<void> {
   if (!baseUrl) return;
-  const admin = await openMysql(baseUrl);
+  const admin = track(await openMysql(baseUrl));
   await admin.query({ sql: `DROP DATABASE IF EXISTS \`${TEST_DB}\`` });
   await admin.query({ sql: `CREATE DATABASE \`${TEST_DB}\` CHARACTER SET utf8mb4` });
   await admin.close();
@@ -46,7 +78,7 @@ async function freshTestDatabase(): Promise<void> {
 
 async function freshDb(): Promise<DbDriver> {
   await freshTestDatabase();
-  const db = await openMysql(scopedUrl());
+  const db = track(await openMysql(scopedUrl()));
   await migrate(db, allMigrations);
   return db;
 }
@@ -54,7 +86,7 @@ async function freshDb(): Promise<DbDriver> {
 describe.skipIf(!baseUrl)("MySQL 어댑터 (SCHEMA.md §1-3 계약)", () => {
   test("마이그레이션 전체 적용 + 재실행 멱등 (DDL 호환 검증)", async () => {
     await freshTestDatabase();
-    const db = await openMysql(scopedUrl());
+    const db = track(await openMysql(scopedUrl()));
     const applied = await migrate(db, allMigrations);
     // postgres.test.ts와 같은 이유로 개수를 박지 않는다 — 계약은 "미적용분 전부"다.
     expect(applied).toBe(allMigrations.length);
