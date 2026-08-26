@@ -1,0 +1,70 @@
+# OpenSSF Scorecard — **저장소를 밖에서 본다**
+#
+# 다섯 저장소가 같은 정책을 쓰게 된 뒤로는, **점수가 갈리는 것 자체가 드리프트 신호**다.
+# 요일은 저장소마다 흩어 둔다 — 같은 시각에 다섯이 몰리면 러너를 서로 기다린다.
+#
+# 여기서 재는 것은 코드가 아니라 **저장소의 자세**다: 액션이 SHA 로 박혀 있는가, 토큰
+# 권한이 최소인가, 기본 브랜치가 보호되는가, 취약점 신고 경로가 있는가, 릴리스 산출물에
+# 출처가 붙는가. 전부 이 저장소가 스스로 정한 규칙이고, 전부 **사람이 지키기로 한 것**이라
+# 시간이 지나면 조용히 어긋난다.
+#
+# ⚠️ **이건 점수판이지 게이트가 아니다.** 처음 돌리면 빨간 항목이 여럿 잡힌다 —
+# 브랜치 보호나 서명된 릴리스처럼 저장소 설정 쪽 항목은 워크플로가 고칠 수 없다.
+# 점수를 올리려고 규칙을 만들지 않는다. **점수가 낮은 항목을 보고, 그것이 이 저장소에
+# 실제 위험인지를 그때 판단한다.**
+#
+# 몇 항목(Branch-Protection 등)은 저장소 관리 권한이 있는 토큰이 있어야 제대로 잰다.
+# 기본 `GITHUB_TOKEN` 으로는 "판정 불가" 로 남는다 — 그 자리를 PAT 으로 메우는 것은
+# 시크릿을 하나 더 만드는 일이라, **지금은 일부러 안 한다.**
+
+name: scorecard
+
+on:
+  # 브랜치 보호 규칙이 바뀌면 점수의 근거가 바뀐다. 그 즉시 다시 잰다.
+  branch_protection_rule:
+  schedule:
+    - cron: '30 4 * * 2'   # 매주 화요일 04:30 UTC
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  analysis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      # 결과를 Security 탭에 올린다.
+      security-events: write
+      # `publish_results` 가 OIDC 로 이 저장소임을 증명한다 — 배지의 근거다.
+      id-token: write
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 분석
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # **결과를 공개한다.** 공개 저장소의 점수를 숨기면 남는 것은 배지뿐이고,
+          # 배지만 있는 점수는 아무것도 말하지 않는다. 끄면 README 배지도 못 단다.
+          publish_results: true
+
+      # SARIF 원본을 남긴다. Security 탭은 해석된 결과만 보여 주므로,
+      # 항목별 근거를 되짚으려면 원본이 있어야 한다.
+      - name: 결과 보관
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scorecard-results
+          path: results.sarif
+          retention-days: 5
+
+      - name: Security 탭에 올린다
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        with:
+          sarif_file: results.sarif
