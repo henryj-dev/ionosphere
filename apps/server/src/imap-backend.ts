@@ -129,6 +129,37 @@ export class IonosphereImapBackend implements ImapBackend {
           return await this.deleteMailbox(accountId, req.name);
         case "renameMailbox":
           return await this.renameMailbox(accountId, req.from, req.to);
+        case "getAcl": {
+          const found = await this.findByPath(accountId, req.name);
+          if (!found) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
+          const context = await this.principalContext(accountId);
+          const acl = await this.store.getMailboxAcl(context.tenantId, found.row.id);
+          return { kind: "acl", mailbox: req.name, entries: acl.map((row) => ({ identifier: row.principalId, rights: row.rights })) };
+        }
+        case "setAcl": {
+          const found = await this.findByPath(accountId, req.name);
+          if (!found) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
+          const context = await this.principalContext(accountId);
+          await this.store.setMailboxAcl(context.tenantId, found.row.id, req.identifier, req.rights);
+          return { kind: "ok" };
+        }
+        case "deleteAcl": {
+          const found = await this.findByPath(accountId, req.name);
+          if (!found) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
+          const context = await this.principalContext(accountId);
+          const deleted = await this.store.deleteMailboxAcl(context.tenantId, found.row.id, req.identifier);
+          return deleted ? { kind: "ok" } : { kind: "no", code: "NONEXISTENT", message: "no such ACL" };
+        }
+        case "listRights":
+        case "myRights": {
+          const found = await this.findByPath(accountId, req.name);
+          if (!found) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
+          const context = await this.principalContext(accountId);
+          const identifier = req.kind === "myRights" ? context.principalId : req.identifier;
+          const acl = await this.store.getMailboxAcl(context.tenantId, found.row.id);
+          const row = acl.find((entry) => entry.principalId === identifier);
+          return { kind: "rights", mailbox: req.name, identifier, rights: row?.rights ?? "" };
+        }
         case "setSubscribed": {
           const found = await this.findByPath(accountId, req.name);
           if (!found) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
