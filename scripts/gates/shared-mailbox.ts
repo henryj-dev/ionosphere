@@ -64,7 +64,7 @@ const GATES: Record<string, Phase> = {
   },
   P4: {
     needs: ["P3"],
-    outputs: ["packages/store/src/authorization.ts", "packages/store/src/store.ts", "packages/store/test/authorization.test.ts", "packages/proto-imap/src/engine.ts", "packages/proto-imap/src/server.ts", "packages/proto-imap/test/acl-commands.test.ts"],
+    outputs: ["packages/store/src/authorization.ts", "packages/store/src/store.ts", "packages/store/test/authorization.test.ts", "packages/proto-imap/src/engine.ts", "packages/proto-imap/src/server.ts", "packages/proto-imap/test/acl-commands.test.ts", "apps/server/src/imap-backend.ts", "apps/server/test/imap-shared-namespace.test.ts"],
     checks: [
       { id: "G-P4.1", kind: "command", command: ["node", "--test", "packages/store/test/authorization.test.ts"] },
       { id: "G-P4.2", kind: "command", command: ["node", "--test", "packages/proto-imap/test/acl-commands.test.ts"] },
@@ -72,8 +72,10 @@ const GATES: Record<string, Phase> = {
       { id: "G-P4.4", kind: "grep", path: "packages/proto-imap/src/engine.ts", pattern: "GETACL" },
       { id: "G-P4.5", kind: "grep", path: "packages/store/src/authorization.ts", pattern: "setMailboxAcl" },
       { id: "G-P4.6", kind: "grep", path: "packages/store/src/authorization.ts", pattern: "deleteMailboxAcl" },
-      { id: "G-P4.7", kind: "command", command: ["npm", "run", "lint"] },
-      { id: "G-P4.8", kind: "command", command: ["npm", "run", "typecheck"] },
+      { id: "G-P4.7", kind: "command", command: ["node", "--test", "apps/server/test/imap-shared-namespace.test.ts"] },
+      { id: "G-P4.8", kind: "grep", path: "apps/server/src/imap-backend.ts", pattern: "hasMailboxRight" },
+      { id: "G-P4.9", kind: "command", command: ["npm", "run", "lint"] },
+      { id: "G-P4.10", kind: "command", command: ["npm", "run", "typecheck"] },
     ],
   },
   P5: { needs: ["P4"], outputs: ["apps/server/src/jmap-backend.ts"], checks: [] },

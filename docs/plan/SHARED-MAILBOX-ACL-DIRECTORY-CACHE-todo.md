@@ -72,7 +72,7 @@ node scripts/gates/shared-mailbox.ts --assert-order
 | P1 principal·ACL 스키마 | 봉인 | P0 | `node scripts/gates/shared-mailbox.ts P1 --seal` | `docs/plan/.gates/shared-mailbox/P1.json` |
 | P2 Store authorization | 봉인 | P1 | `node scripts/gates/shared-mailbox.ts P2 --seal` | `docs/plan/.gates/shared-mailbox/P2.json` |
 | P3 shared account·IMAP namespace | 봉인 | P2 | `node scripts/gates/shared-mailbox.ts P3 --seal` | `docs/plan/.gates/shared-mailbox/P3.json` |
-| P4 IMAP ACL 명령 | 열림 | P3 | `node scripts/gates/shared-mailbox.ts P4 --seal` | 없음 |
+| P4 IMAP ACL 명령 | 열림 | P3 | `node scripts/gates/shared-mailbox.ts P4 --seal` | P4 게이트 통과 후 생성 |
 | P5 JMAP shared account | 잠김 | P4 | `node scripts/gates/shared-mailbox.ts P5 --seal` | 없음 |
 | P6 LDAP/AD mapping | 잠김 | P5 | `node scripts/gates/shared-mailbox.ts P6 --seal` | 없음 |
 | P7 header projection·backfill | 잠김 | P6 | `node scripts/gates/shared-mailbox.ts P7 --seal` | 없음 |
@@ -252,7 +252,7 @@ negative 행은 저장하지 않고(`negative=0`) 후속 범위로 명시한다.
 | G-P3.2 | namespace | `node --test apps/server/test/imap-shared-namespace.test.ts` | TC-P3.T1.b, hidden mailbox 누출 0건 |
 | G-P3.3 | lint/typecheck | gate 내부 명령 | 종료 코드 0 |
 
-## P4 — IMAP ACL 명령 (열림, P3 봉인 완료)
+## P4 — IMAP ACL 명령 (진행 완료, P3 봉인 완료)
 
 ### 미착수 P4.T1 — ACL protocol engine·backend
 
@@ -270,14 +270,19 @@ APPEND/COPY flag별 권한, virtual `c/d`, READ-ONLY 교집합을 구현한다.
   - 단언: RENAME은 원본 x+새 parent k, COPY는 대상 i와 flag별 s/w/t를 적용한다.
   - 검출: mailbox 이동·flag 복사에서 권한보다 넓게 허용하는 회귀.
 
-【통과】 8개 TC-IMAP-ACL과 RFC fixture가 모두 pass한다.
+【통과】 Store authorization, IMAP ACL engine, IMAP backend namespace/mutation fixture가 모두 pass하고
+`hasMailboxRight` 호출이 backend 산출물에 존재한다. shared account의 메시지 기록은 mailbox 소유
+계정으로, 권한 판정은 요청 주체로 분리한다.
 
 ## 🚪 GATE P4
 
 | id | 검사 | 명령 | 통과 기준 |
 |---|---|---|---|
-| G-P4.1 | IMAP ACL | `npm test -- apps/server/test/imap-acl.test.ts` | 8개 TC pass |
-| G-P4.2 | RFC mapping | `node scripts/gates/shared-mailbox.ts P4` | standard 11, virtual 2, unknown 0 |
+| G-P4.1 | Store authorization | `node --test packages/store/test/authorization.test.ts` | 5개 TC pass |
+| G-P4.2 | ACL protocol engine | `node --test packages/proto-imap/test/acl-commands.test.ts` | 3개 TC pass |
+| G-P4.3 | backend namespace·mutation | `node --test apps/server/test/imap-shared-namespace.test.ts` | 4개 TC pass |
+| G-P4.4 | 권한 관문 존재 | gate 내부 grep | backend `hasMailboxRight` 검출 1건 이상 |
+| G-P4.5 | RFC mapping·품질 | `node scripts/gates/shared-mailbox.ts P4` | standard 11, virtual 2, lint/typecheck 0 |
 
 ## P5 — JMAP shared account (잠김, P4 봉인 필요)
 

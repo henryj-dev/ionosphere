@@ -63,4 +63,29 @@ describe("IMAP shared namespace", () => {
     expect(append).toEqual({ kind: "no", code: "TRYCREATE", message: "no such mailbox" });
     await db.close();
   });
+
+  test("ACL admin과 mailbox mutation은 권리별로 차단된다", async () => {
+    const db = await openSqlite(":memory:");
+    await migrate(db, allMigrations);
+    const store = new Store(db);
+    const blobs = new FsBlobStore(mkdtempSync(join(tmpdir(), "ion-shared-matrix-")));
+    const { tenantId } = await store.createTenant("tenant");
+    const owner = await store.createAccount({ tenantId, email: "owner3@ionosphere.test", kind: 1 });
+    const actor = await store.createAccount({ tenantId, email: "actor3@ionosphere.test" });
+    const principal = await db.query({ sql: "SELECT id FROM principals WHERE account_id = ?", params: [actor.accountId] });
+    const shared = await store.createMailbox({ accountId: owner.accountId, name: "Shared" });
+    const principalId = String(principal.rows[0]!.id);
+    await store.setMailboxAcl(tenantId, shared.mailboxId, principalId, "lri");
+    const backend = new IonosphereImapBackend(db, store, blobs);
+
+    const acl = await backend.request(actor.accountId, { kind: "getAcl", name: "Shared" });
+    expect(acl).toEqual({ kind: "no", code: "NOPERM", message: "permission denied" });
+    const selected = await backend.request(actor.accountId, { kind: "selectMailbox", name: "Shared" });
+    expect(selected.kind).toBe("selected");
+    const appended = await backend.request(actor.accountId, { kind: "appendMessage", name: "Shared", flags: [], internalDateMs: null, raw: new TextEncoder().encode("Subject: allowed\r\n\r\nbody") });
+    expect(appended.kind).toBe("appended");
+    const deleted = await backend.request(actor.accountId, { kind: "deleteMailbox", name: "Shared" });
+    expect(deleted).toEqual({ kind: "no", code: "NOPERM", message: "permission denied" });
+    await db.close();
+  });
 });
