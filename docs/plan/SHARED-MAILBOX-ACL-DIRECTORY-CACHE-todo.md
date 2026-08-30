@@ -73,10 +73,10 @@ node scripts/gates/shared-mailbox.ts --assert-order
 | P2 Store authorization | 봉인 | P1 | `node scripts/gates/shared-mailbox.ts P2 --seal` | `docs/plan/.gates/shared-mailbox/P2.json` |
 | P3 shared account·IMAP namespace | 봉인 | P2 | `node scripts/gates/shared-mailbox.ts P3 --seal` | `docs/plan/.gates/shared-mailbox/P3.json` |
 | P4 IMAP ACL 명령 | 봉인 | P3 | `node scripts/gates/shared-mailbox.ts P4 --seal` | `docs/plan/.gates/shared-mailbox/P4.json` |
-| P5 JMAP shared account | 열림 | P4 | `node scripts/gates/shared-mailbox.ts P5 --seal` | 없음 |
+| P5 JMAP shared account | 봉인 | P4 | `node scripts/gates/shared-mailbox.ts P5 --seal` | `docs/plan/.gates/shared-mailbox/P5.json` |
 | P6 LDAP/AD mapping | 봉인 | P5 | `node scripts/gates/shared-mailbox.ts P6 --seal` | `docs/plan/.gates/shared-mailbox/P6.json` |
-| P7 header projection·backfill | 열림 | P6 | `node scripts/gates/shared-mailbox.ts P7 --seal` | 없음 |
-| P8 listing query·LRU | 잠김 | P7 | `node scripts/gates/shared-mailbox.ts P8 --seal` | 없음 |
+| P7 header projection·backfill | 봉인 | P6 | `node scripts/gates/shared-mailbox.ts P7 --seal` | `docs/plan/.gates/shared-mailbox/P7.json` |
+| P8 listing query·LRU | 열림 | P7 | `node scripts/gates/shared-mailbox.ts P8 --seal` | 없음 |
 | P9 admin·관측성 | 잠김 | P8 | `node scripts/gates/shared-mailbox.ts P9 --seal` | 없음 |
 | P10 통합·성능·복구 | 잠김 | P9 | `node scripts/gates/shared-mailbox.ts P10 --seal` | 없음 |
 
@@ -362,9 +362,9 @@ password modify, referral 자동 추적은 1차에서 제외한다. provisioning
 | G-P6.4 | sync atomicity | `node --test packages/store/test/directory-sync.test.ts` | snapshot·version·idempotency pass |
 | G-P6.5 | 정적 품질 | `node scripts/gates/shared-mailbox.ts P6` | lint/typecheck 0 |
 
-## P7 — header projection·backfill (진행 예정, P6 봉인 완료)
+## P7 — header projection·backfill (봉인 완료)
 
-### 미착수 P7.T1 — typed projection
+### 완료 P7.T1 — typed projection
 
 선행: P6 · 산출: migration 022, typed projection, ingest parser · 되돌리기: projection table forward-fix; BlobStore 원본 삭제 금지 · 장치 요구: 원본 불변
 
@@ -384,7 +384,7 @@ sort 4 KiB, header별 occurrence 32개로 제한한다.
   - 단언: BlobStore read 실패 후 checkpoint가 전진하지 않고 재시작 시 중복·누락이 없다.
   - 검출: 대량 backfill 중단 후 메시지를 영구 누락하는 회귀.
 
-【통과】 migration 022와 7개 TC-HEADER가 pass하고 수치 원장의 190/16 KiB/4 KiB/32가 기록된다.
+【통과】 migration 022와 8개 TC-HEADER가 pass하고 수치 원장의 190/16 KiB/4 KiB/32가 기록된다.
 
 ## 🚪 GATE P7
 

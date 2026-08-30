@@ -22,6 +22,7 @@ describe("migrate", () => {
       "message_auth", "background_jobs", "blobs", "blob_refs",
       "principals", "mailbox_acl", "account_memberships",
       "directory_identities", "directory_group_members",
+      "message_header_projection", "header_backfill_checkpoints",
       "schema_migrations",
     ]) {
       expect(tables).toContain(t);

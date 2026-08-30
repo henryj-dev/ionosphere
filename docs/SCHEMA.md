@@ -2,7 +2,7 @@
 
 > 상태: **동결** (v1 → 이중 리뷰 → v2 → 이중 재검증 → v2.1) · 전제: [PLAN.md](../PLAN.md) + [PROTOCOLS.md](PROTOCOLS.md) §0
 >
-> **적용된 마이그레이션(2026-08-30 기준 020까지)** — 정본은 `packages/db/src/migrations/`다.
+> **적용된 마이그레이션(2026-08-30 기준 022까지)** — 정본은 `packages/db/src/migrations/`다.
 > 코어 DDL은 001이고, 그 뒤는 아래 절에 따로 적었다:
 >
 > | # | 이름 | 어디에 |
@@ -27,6 +27,8 @@
 > | 018 | push_subscriptions | §9-2 |
 > | 019 | identity_state | §4 |
 > | 020 | mailbox_acl | **§4-1** |
+> | 021 | directory_identity | **§4-2** |
+> | 022 | header_projection | **§5-4** |
 >
 > ⚠ 새 마이그레이션을 넣으면 **이 표와 해당 절을 같이 갱신할 것.** 009·010이 한동안 코드에만
 > 있고 이 문서에 없었다 — "동결 스키마"를 자처하는 문서가 실제 테이블을 빠뜨리면, 그것을 읽고
@@ -274,6 +276,36 @@ CREATE INDEX ix_account_memberships_principal ON account_memberships(principal_i
 다른 테넌트·디렉터리에서 충돌하지 않게 한다. FK는 공통 DDL 정책상 두지 않으며, 주체·ACL·멤버십
 삭제는 Store의 한 원자 배치에서 역순으로 처리한다.
 
+### 4-2. LDAP/AD directory identity (마이그레이션 021)
+
+```sql
+CREATE TABLE directory_identities (
+  id            VARCHAR(26) PRIMARY KEY,
+  tenant_id     VARCHAR(26) NOT NULL,
+  provider      VARCHAR(32) NOT NULL,
+  external_key  VARCHAR(512) NOT NULL,                -- objectGUID 우선, objectSid fallback
+  account_id    VARCHAR(26),
+  login_names   TEXT NOT NULL,                        -- UPN·sAMAccountName JSON 배열
+  email         VARCHAR(255),
+  display_name  VARCHAR(255),
+  last_seen_at  BIGINT NOT NULL,
+  status        SMALLINT NOT NULL DEFAULT 1
+);
+CREATE UNIQUE INDEX ux_directory_identity ON directory_identities(tenant_id, provider, external_key);
+
+CREATE TABLE directory_group_members (
+  tenant_id          VARCHAR(26) NOT NULL,
+  provider            VARCHAR(32) NOT NULL,
+  group_external_key  VARCHAR(512) NOT NULL,
+  member_external_key VARCHAR(512) NOT NULL,
+  last_seen_at        BIGINT NOT NULL,
+  PRIMARY KEY (tenant_id, provider, group_external_key, member_external_key)
+);
+```
+
+동기화는 완전 snapshot을 한 배치로 반영한다. 조회 실패 때는 호출하지 않고 기존 행을 삭제하지
+않으며, 성공한 snapshot에서 제거된 membership만 정리한 뒤 관련 `permissions_version`을 증가시킨다.
+
 ## 5. DDL — 메일 스토어 코어
 
 ### 5-1. mailboxes
@@ -340,6 +372,28 @@ CREATE TABLE message_mailbox (
 );
 CREATE UNIQUE INDEX ux_mm_message ON message_mailbox(mailbox_id, message_id);
 CREATE INDEX ix_mm_by_message ON message_mailbox(message_id);
+```
+
+### 5-4. typed header projection (마이그레이션 022)
+
+`message_header_projection`은 allowlist 11개만 저장하는 읽기 모델이다. `date`는 epoch,
+주소/참조는 JSON, 나머지는 display/sort 문자열로 분리한다. display 16 KiB, sort 4 KiB,
+header occurrence 32개 상한은 projection에만 적용하고 MIME blob 원본은 보존한다.
+
+```sql
+CREATE TABLE message_header_projection (
+  message_id    VARCHAR(26) NOT NULL,
+  occurrence    SMALLINT NOT NULL,
+  name          VARCHAR(190) NOT NULL,
+  kind          VARCHAR(16) NOT NULL,
+  display_value TEXT NOT NULL,
+  sort_value    TEXT NOT NULL,
+  date_value    BIGINT,
+  address_value TEXT,
+  PRIMARY KEY (message_id, name, occurrence)
+);
+CREATE INDEX ix_header_projection_date ON message_header_projection(name, date_value, message_id);
+CREATE INDEX ix_header_projection_sort ON message_header_projection(name, sort_value, message_id);
 ```
 
 - IMAP `FETCH (MODSEQ)`/`CHANGEDSINCE` = `message_mailbox ⋈ messages WHERE messages.modseq > ?`.

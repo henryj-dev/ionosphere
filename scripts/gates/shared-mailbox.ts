@@ -97,7 +97,7 @@ const GATES: Record<string, Phase> = {
   },
   P6: {
     needs: ["P5"],
-    outputs: ["packages/core/src/directory.ts", "packages/core/src/index.ts", "packages/core/test/directory.test.ts", "packages/db/src/migrations/021_directory_identity.ts", "packages/db/src/index.ts", "packages/db/test/migrate.test.ts", "packages/store/src/directory-sync.ts", "packages/store/test/directory-sync.test.ts", "apps/server/src/directory-ldap.ts", "apps/server/test/directory-ldap.test.ts"],
+    outputs: ["packages/core/src/directory.ts", "packages/core/src/index.ts", "packages/core/test/directory.test.ts", "packages/db/src/migrations/021_directory_identity.ts", "packages/store/src/directory-sync.ts", "packages/store/test/directory-sync.test.ts", "apps/server/src/directory-ldap.ts", "apps/server/test/directory-ldap.test.ts"],
     checks: [
       { id: "G-P6.1", kind: "command", command: ["node", "--test", "packages/core/test/directory.test.ts"] },
       { id: "G-P6.2", kind: "command", command: ["node", "--test", "packages/db/test/migrate.test.ts"] },
@@ -114,7 +114,20 @@ const GATES: Record<string, Phase> = {
       { id: "G-P6.13", kind: "command", command: ["npm", "run", "typecheck"] },
     ],
   },
-  P7: { needs: ["P6"], outputs: ["packages/store/src/header-projection.ts"], checks: [] },
+  P7: {
+    needs: ["P6"],
+    outputs: ["packages/store/src/header-projection.ts", "packages/store/test/header-projection.test.ts", "packages/db/src/migrations/022_header_projection.ts"],
+    checks: [
+      { id: "G-P7.1", kind: "command", command: ["node", "--test", "packages/store/test/header-projection.test.ts"] },
+      { id: "G-P7.2", kind: "command", command: ["node", "--test", "packages/db/test/migrate.test.ts"] },
+      { id: "G-P7.3", kind: "grep", path: "packages/store/src/header-projection.ts", pattern: "nameBytes: 190" },
+      { id: "G-P7.4", kind: "grep", path: "packages/store/src/header-projection.ts", pattern: "displayBytes: 16" },
+      { id: "G-P7.5", kind: "grep", path: "packages/store/src/header-projection.ts", pattern: "sortBytes: 4" },
+      { id: "G-P7.6", kind: "grep", path: "packages/store/src/header-projection.ts", pattern: "occurrence: 32" },
+      { id: "G-P7.7", kind: "command", command: ["npm", "run", "lint"] },
+      { id: "G-P7.8", kind: "command", command: ["npm", "run", "typecheck"] },
+    ],
+  },
   P8: { needs: ["P7"], outputs: ["packages/store/src/listing-cache.ts"], checks: [] },
   P9: { needs: ["P8"], outputs: ["packages/admin-cmd/src/registry.ts"], checks: [] },
   P10: { needs: ["P9"], outputs: [], checks: [{ id: "G-P10.1", kind: "command", command: ["npm", "run", "verify"] }] },
