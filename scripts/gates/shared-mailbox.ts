@@ -97,7 +97,7 @@ const GATES: Record<string, Phase> = {
   },
   P6: {
     needs: ["P5"],
-    outputs: ["packages/core/src/directory.ts", "packages/core/src/index.ts", "packages/core/test/directory.test.ts", "packages/db/src/migrations/021_directory_identity.ts", "packages/db/src/index.ts", "packages/db/test/migrate.test.ts"],
+    outputs: ["packages/core/src/directory.ts", "packages/core/src/index.ts", "packages/core/test/directory.test.ts", "packages/db/src/migrations/021_directory_identity.ts", "packages/db/src/index.ts", "packages/db/test/migrate.test.ts", "packages/store/src/directory-sync.ts", "packages/store/test/directory-sync.test.ts"],
     checks: [
       { id: "G-P6.1", kind: "command", command: ["node", "--test", "packages/core/test/directory.test.ts"] },
       { id: "G-P6.2", kind: "command", command: ["node", "--test", "packages/db/test/migrate.test.ts"] },
@@ -105,8 +105,10 @@ const GATES: Record<string, Phase> = {
       { id: "G-P6.4", kind: "grep", path: "packages/core/src/directory.ts", pattern: "objectGuid" },
       { id: "G-P6.5", kind: "grep", path: "packages/core/src/directory.ts", pattern: "resolveNestedGroups" },
       { id: "G-P6.6", kind: "grep", path: "packages/db/src/migrations/021_directory_identity.ts", pattern: "directory_identities" },
-      { id: "G-P6.7", kind: "command", command: ["npm", "run", "lint"] },
-      { id: "G-P6.8", kind: "command", command: ["npm", "run", "typecheck"] },
+      { id: "G-P6.7", kind: "grep", path: "packages/core/src/directory.ts", pattern: "class DirectoryProvider" },
+      { id: "G-P6.8", kind: "command", command: ["node", "--test", "packages/store/test/directory-sync.test.ts"] },
+      { id: "G-P6.9", kind: "command", command: ["npm", "run", "lint"] },
+      { id: "G-P6.10", kind: "command", command: ["npm", "run", "typecheck"] },
     ],
   },
   P7: { needs: ["P6"], outputs: ["packages/store/src/header-projection.ts"], checks: [] },

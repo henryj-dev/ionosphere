@@ -327,7 +327,7 @@ ACL 변경은 `permissions_version`을 증가시키고 shared account의 compoun
 
 ## P6 — LDAP/AD mapping (진행 중, P5 봉인 완료)
 
-### 미착수 P6.T1 — DirectoryProvider·external mapping
+### 진행 P6.T1 — DirectoryProvider·external mapping
 
 선행: P5 · 산출: DirectoryProvider, migration 021, group sync · 되돌리기: directory login flag off; mapping forward-fix · 장치 요구: fail closed
 
@@ -347,18 +347,20 @@ password modify, referral 자동 추적은 1차에서 제외한다. provisioning
   - 단언: group 추가·제거가 모든 참조 shared account의 permissions_version을 증가시킨 뒤에만 권한을 반영한다.
   - 검출: 여러 shared account 중 일부만 무효화되어 stale ACL이 남는 회귀.
 
-【통과】 directory transport 보안·immutable identity·nested group fixture 8개와 migration 021
-테이블 fixture가 pass한다. 실제 LDAP BER bind/search adapter와 directory sync의 계정·그룹 반영은
-아직 남아 있으므로 P6 봉인은 보류한다.
+【통과】 directory transport 보안·immutable identity·nested group fixture 10개, migration 021
+테이블 fixture, directory snapshot 원자 반영 fixture가 pass한다. 실제 LDAP BER bind/search adapter와
+운영 설정 배선은 별도 어댑터로 남아 있으므로 P6 봉인은 보류한다. Provider는 반드시
+`authenticateUser(loginName, password)`를 호출하며 서비스 계정 bind 성공만으로 인증하지 않는다.
 
 ## 🚪 GATE P6
 
 | id | 검사 | 명령 | 통과 기준 |
 |---|---|---|---|
-| G-P6.1 | directory contract | `node --test packages/core/test/directory.test.ts` | 8개 TC pass |
+| G-P6.1 | directory contract | `node --test packages/core/test/directory.test.ts` | 10개 TC pass |
 | G-P6.2 | migration 021 | `node --test packages/db/test/migrate.test.ts` | directory tables + rerun pass |
 | G-P6.3 | immutable/group mapping | gate 내부 grep | objectGuid/objectSid, UPN/sAMAccountName, nested cycle/depth 검출 |
-| G-P6.4 | 정적 품질 | `node scripts/gates/shared-mailbox.ts P6` | lint/typecheck 0 |
+| G-P6.4 | sync atomicity | `node --test packages/store/test/directory-sync.test.ts` | snapshot·version·idempotency pass |
+| G-P6.5 | 정적 품질 | `node scripts/gates/shared-mailbox.ts P6` | lint/typecheck 0 |
 
 ## P7 — header projection·backfill (잠김, P6 봉인 필요)
 

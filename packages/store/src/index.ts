@@ -89,6 +89,7 @@ export { scramSegment, buildScramSegment, scramKeysFor, scramAuthorize, type Sto
 // 여기 나가는 것은 표면 이름 목록과 판정 함수다(관리 명령이 입력 검증에 쓴다).
 export { AUTH_SURFACES, credentialAllowsSurface, type AuthSurface } from "./auth.ts";
 export { createBayesStore } from "./bayes-store.ts";
+export { syncDirectorySnapshot, type DirectoryGroupSync, type DirectoryIdentitySync, type DirectorySyncInput } from "./directory-sync.ts";
 
 /**
  * `IN (…)` 읽기 질의의 파라미터 청크 헬퍼 — 조립층(IMAP 백엔드)도 같은 한도를 지켜야 한다.

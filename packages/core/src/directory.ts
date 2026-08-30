@@ -65,6 +65,41 @@ export function mapDirectoryIdentity(entry: DirectoryEntry): DirectoryIdentity {
 
 export interface DirectoryGroup { id: string; memberGroupIds: readonly string[]; }
 
+export interface DirectoryClient {
+  bindService(bindDn: string, bindPassword: string): Promise<void>;
+  authenticateUser(loginName: string, password: string): Promise<DirectoryEntry | null>;
+  close(): Promise<void>;
+}
+
+/** 전송 구현을 주입받는 directory provider. 외부 장애·매핑 실패는 인증 실패로 수렴한다. */
+export class DirectoryProvider {
+  private readonly config: DirectoryConfig;
+  private readonly client: DirectoryClient;
+
+  constructor(config: DirectoryConfig, client: DirectoryClient) {
+    this.config = config;
+    this.client = client;
+  }
+
+  async authenticate(loginName: string, password: string): Promise<DirectoryIdentity | null> {
+    try {
+      validateDirectoryConfig(this.config);
+      await this.client.bindService(this.config.bindDn, this.config.bindPassword);
+      const entry = await this.client.authenticateUser(loginName, password);
+      if (!entry) return null;
+      const identity = mapDirectoryIdentity(entry);
+      if (identity.loginNames.length === 0) return null;
+      return identity;
+    } catch {
+      return null;
+    }
+  }
+
+  async close(): Promise<void> {
+    await this.client.close();
+  }
+}
+
 /** nested group 해석. cycle과 깊이 초과는 부분 권한을 반환하지 않고 모두 실패시킨다. */
 export function resolveNestedGroups(groups: readonly DirectoryGroup[], roots: readonly string[], maxDepth = 16): string[] {
   if (!Number.isInteger(maxDepth) || maxDepth < 1) throw new DirectoryError("nested group maxDepth는 양의 정수");
