@@ -410,6 +410,9 @@ CREATE INDEX ix_messages_subject_sort ON messages(account_id, subject_base, id);
 CREATE INDEX ix_header_projection_listing ON message_header_projection(name, sort_value, message_id);
 ```
 
+MySQL에서는 `sort_value`가 TEXT이므로 어댑터가 해당 인덱스의 정렬 키를 512자 prefix로 변환한다.
+원문 projection은 TEXT로 보존하고, SQLite·PostgreSQL에서는 전체 값을 인덱싱한다.
+
 - IMAP `FETCH (MODSEQ)`/`CHANGEDSINCE` = `message_mailbox ⋈ messages WHERE messages.modseq > ?`.
 - COPY 대상에 이미 있는 메시지: `ux_mm_message` 충돌 → **앱이 스냅샷에서 선검사해 no-op** (계약).
 - 키워드 모델(확정): `\Deleted`만 membership 단위, 나머지 전부 메시지 단위 공유(Gmail 모델).
