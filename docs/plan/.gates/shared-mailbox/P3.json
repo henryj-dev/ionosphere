@@ -1,15 +1,15 @@
 {
   "phase": "P3",
   "sealed": true,
-  "head": "1baaa44895bb7626f2719b03eddcb61a6619071a",
-  "at": "2026-08-30T10:45:17.798Z",
+  "head": "288d2fd2e0e16dbfce7e71182640acc422aa04b1",
+  "at": "2026-08-30T10:55:55.308Z",
   "waived": false,
   "reason": null,
   "checks": [
     {
       "id": "G-P3.1",
       "ok": true,
-      "measured": 2,
+      "measured": 7,
       "limit": 1
     },
     {
