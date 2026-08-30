@@ -10,6 +10,7 @@ export interface DirectoryConfig {
   bindPassword: string;
   timeoutMs: number;
   serverName?: string;
+  tlsCa?: string;
 }
 
 export interface DirectoryEntry {
@@ -91,6 +92,7 @@ export class DirectoryProvider {
       if (identity.loginNames.length === 0) return null;
       return identity;
     } catch {
+      await this.client.close().catch(() => undefined);
       return null;
     }
   }

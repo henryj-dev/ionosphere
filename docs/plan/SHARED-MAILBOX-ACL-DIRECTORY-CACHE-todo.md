@@ -74,8 +74,8 @@ node scripts/gates/shared-mailbox.ts --assert-order
 | P3 shared account·IMAP namespace | 봉인 | P2 | `node scripts/gates/shared-mailbox.ts P3 --seal` | `docs/plan/.gates/shared-mailbox/P3.json` |
 | P4 IMAP ACL 명령 | 봉인 | P3 | `node scripts/gates/shared-mailbox.ts P4 --seal` | `docs/plan/.gates/shared-mailbox/P4.json` |
 | P5 JMAP shared account | 열림 | P4 | `node scripts/gates/shared-mailbox.ts P5 --seal` | 없음 |
-| P6 LDAP/AD mapping | 열림 | P5 | `node scripts/gates/shared-mailbox.ts P6 --seal` | 없음 |
-| P7 header projection·backfill | 잠김 | P6 | `node scripts/gates/shared-mailbox.ts P7 --seal` | 없음 |
+| P6 LDAP/AD mapping | 봉인 | P5 | `node scripts/gates/shared-mailbox.ts P6 --seal` | `docs/plan/.gates/shared-mailbox/P6.json` |
+| P7 header projection·backfill | 열림 | P6 | `node scripts/gates/shared-mailbox.ts P7 --seal` | 없음 |
 | P8 listing query·LRU | 잠김 | P7 | `node scripts/gates/shared-mailbox.ts P8 --seal` | 없음 |
 | P9 admin·관측성 | 잠김 | P8 | `node scripts/gates/shared-mailbox.ts P9 --seal` | 없음 |
 | P10 통합·성능·복구 | 잠김 | P9 | `node scripts/gates/shared-mailbox.ts P10 --seal` | 없음 |
@@ -325,9 +325,9 @@ ACL 변경은 `permissions_version`을 증가시키고 shared account의 compoun
 | G-P5.6 | blob 인가 | gate 내부 grep | requested account와 ACL mailbox 집합을 함께 검사 |
 | G-P5.7 | 정적 품질 | `node scripts/gates/shared-mailbox.ts P5` | lint/typecheck 0 |
 
-## P6 — LDAP/AD mapping (진행 중, P5 봉인 완료)
+## P6 — LDAP/AD mapping (봉인 완료)
 
-### 진행 P6.T1 — DirectoryProvider·external mapping
+### 완료 P6.T1 — DirectoryProvider·external mapping
 
 선행: P5 · 산출: DirectoryProvider, migration 021, group sync · 되돌리기: directory login flag off; mapping forward-fix · 장치 요구: fail closed
 
@@ -349,7 +349,7 @@ password modify, referral 자동 추적은 1차에서 제외한다. provisioning
 
 【통과】 directory transport 보안·immutable identity·nested group fixture 10개, migration 021
 테이블 fixture, directory snapshot 원자 반영 fixture가 pass한다. 실제 LDAP BER bind/search adapter와
-운영 설정 배선은 별도 어댑터로 남아 있으므로 P6 봉인은 보류한다. Provider는 반드시
+운영 설정 배선까지 구현했고 LDAPS BER bind/search와 사용자 password bind fixture를 통과했다. Provider는 반드시
 `authenticateUser(loginName, password)`를 호출하며 서비스 계정 bind 성공만으로 인증하지 않는다.
 
 ## 🚪 GATE P6
@@ -362,7 +362,7 @@ password modify, referral 자동 추적은 1차에서 제외한다. provisioning
 | G-P6.4 | sync atomicity | `node --test packages/store/test/directory-sync.test.ts` | snapshot·version·idempotency pass |
 | G-P6.5 | 정적 품질 | `node scripts/gates/shared-mailbox.ts P6` | lint/typecheck 0 |
 
-## P7 — header projection·backfill (잠김, P6 봉인 필요)
+## P7 — header projection·backfill (진행 예정, P6 봉인 완료)
 
 ### 미착수 P7.T1 — typed projection
 

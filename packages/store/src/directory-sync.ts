@@ -32,6 +32,11 @@ export async function syncDirectorySnapshot(db: DbDriver, input: DirectorySyncIn
   if (!input.tenantId || !input.provider || !Number.isInteger(input.now)) throw new Error("directory sync 입력이 유효하지 않음");
   const statements: Statement[] = [];
   const affectedAccountIds = new Set<string>();
+  const existingMemberships = await db.query({ sql: "SELECT DISTINCT am.account_id FROM account_memberships am JOIN accounts a ON a.id = am.account_id WHERE am.source = ? AND a.tenant_id = ?", params: ["directory", input.tenantId] });
+  for (const row of existingMemberships.rows) affectedAccountIds.add(String(row.account_id));
+  for (const identity of input.identities) if (identity.accountId) affectedAccountIds.add(identity.accountId);
+  for (const accountId of affectedAccountIds) statements.push({ sql: "DELETE FROM account_memberships WHERE account_id = ? AND source = ?", params: [accountId, "directory"] });
+  statements.push({ sql: "DELETE FROM directory_group_members WHERE tenant_id = ? AND provider = ?", params: [input.tenantId, input.provider] });
   const groupKeys = [...new Set(input.identities.flatMap((identity) => identity.groupExternalKeys))];
   const groupPrincipalIds = new Map<string, string>();
   if (groupKeys.length > 0) {
@@ -51,7 +56,6 @@ export async function syncDirectorySnapshot(db: DbDriver, input: DirectorySyncIn
       params: [identity.accountId, JSON.stringify(identity.loginNames), identity.email, identity.displayName, input.now, input.tenantId, input.provider, identity.externalKey],
     });
     if (identity.accountId) {
-      affectedAccountIds.add(identity.accountId);
       statements.push({
         sql: db.insertIgnore("principals", ["id", "tenant_id", "kind", "account_id", "provider", "external_key", "display_name", "created_at"]).replace("?, ?, ?,", "?, ?, 0,"),
         params: [ulid(), input.tenantId, identity.accountId, input.provider, identity.externalKey, identity.displayName, input.now],

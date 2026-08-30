@@ -34,4 +34,17 @@ describe("directory sync", () => {
     expect(Number(memberships.rows[0]?.count)).toBe(1);
     await db.close();
   });
+
+  test("완전 snapshot에서 그룹 제거가 membership과 권한 버전을 함께 갱신한다", async () => {
+    const { db, tenantId, accountId } = await setupFixture();
+    const input = { tenantId, provider: "ad", now: 300, identities: [{ externalKey: "guid:2", loginNames: ["two"], email: null, displayName: null, accountId, groupExternalKeys: ["guid:g"] }], groups: [] } as const;
+    await syncDirectorySnapshot(db, input);
+    const before = await db.query({ sql: "SELECT permissions_version FROM accounts WHERE id = ?", params: [accountId] });
+    await syncDirectorySnapshot(db, { ...input, now: 301, identities: [{ ...input.identities[0], groupExternalKeys: [] }] });
+    const memberships = await db.query({ sql: "SELECT COUNT(*) AS count FROM account_memberships WHERE account_id = ? AND source = ?", params: [accountId, "directory"] });
+    const after = await db.query({ sql: "SELECT permissions_version FROM accounts WHERE id = ?", params: [accountId] });
+    expect(Number(memberships.rows[0]?.count)).toBe(0);
+    expect(Number(after.rows[0]?.permissions_version)).toBe(Number(before.rows[0]?.permissions_version) + 1);
+    await db.close();
+  });
 });
