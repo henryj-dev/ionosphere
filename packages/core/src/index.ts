@@ -98,6 +98,7 @@ export {
   type MailboxRight,
   type StandardMailboxRight,
 } from "./rights.ts";
+export { DIRECTORY_TRANSPORT, DirectoryError, externalIdentityKey, mapDirectoryIdentity, resolveNestedGroups, validateDirectoryConfig, type DirectoryConfig, type DirectoryEntry, type DirectoryGroup, type DirectoryIdentity, type DirectoryTransport } from "./directory.ts";
 export {
   compileGlob,
   globCaptures,

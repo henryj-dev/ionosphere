@@ -58,7 +58,7 @@ node scripts/gates/shared-mailbox.ts --assert-order
 |---|---|
 | principal 4종, `negative=0` 1차 | G-P0, G-P1 |
 | IMAP standard right 11개와 virtual `c/d` | G-P0, G-P4 |
-| migration 020~023 | G-P1, G-P10 |
+| migration 020~023 | G-P1, G-P6, G-P7, G-P8, G-P10 |
 | header name 190 bytes, display 16 KiB, sort 4 KiB, occurrence 32 | G-P7 |
 | listing 결과 2,000개, TTL 5~30초, bounded LRU | G-P8 |
 | LDAP 1차 3 transport 동작과 4 후순위 항목 | G-P6 |
@@ -74,7 +74,7 @@ node scripts/gates/shared-mailbox.ts --assert-order
 | P3 shared account·IMAP namespace | 봉인 | P2 | `node scripts/gates/shared-mailbox.ts P3 --seal` | `docs/plan/.gates/shared-mailbox/P3.json` |
 | P4 IMAP ACL 명령 | 봉인 | P3 | `node scripts/gates/shared-mailbox.ts P4 --seal` | `docs/plan/.gates/shared-mailbox/P4.json` |
 | P5 JMAP shared account | 열림 | P4 | `node scripts/gates/shared-mailbox.ts P5 --seal` | 없음 |
-| P6 LDAP/AD mapping | 잠김 | P5 | `node scripts/gates/shared-mailbox.ts P6 --seal` | 없음 |
+| P6 LDAP/AD mapping | 열림 | P5 | `node scripts/gates/shared-mailbox.ts P6 --seal` | 없음 |
 | P7 header projection·backfill | 잠김 | P6 | `node scripts/gates/shared-mailbox.ts P7 --seal` | 없음 |
 | P8 listing query·LRU | 잠김 | P7 | `node scripts/gates/shared-mailbox.ts P8 --seal` | 없음 |
 | P9 admin·관측성 | 잠김 | P8 | `node scripts/gates/shared-mailbox.ts P9 --seal` | 없음 |
@@ -167,7 +167,8 @@ version state 및 credential precedence를 고정한다.
   - 단언: 동일 external key가 tenant/provider별로 별도 principal이고 다른 tenant mailbox ACL 조회가 0행이다.
   - 검출: 다른 조직의 group 권한이 shared mailbox에 붙는 회귀.
 
-【통과】 schema introspection에 새 테이블·컬럼·index가 존재하고 migration 수가 20이 된다.
+【통과】 schema introspection에 새 테이블·컬럼·index가 존재하고 migration 020이 정확히 한 번
+등록된다. 후속 단계 migration이 추가되어도 020의 위치·정체성이 바뀌지 않는다.
 
 ### 완료 P1.T2 — rights parser·ACL 계산 계약
 
@@ -324,7 +325,7 @@ ACL 변경은 `permissions_version`을 증가시키고 shared account의 compoun
 | G-P5.6 | blob 인가 | gate 내부 grep | requested account와 ACL mailbox 집합을 함께 검사 |
 | G-P5.7 | 정적 품질 | `node scripts/gates/shared-mailbox.ts P5` | lint/typecheck 0 |
 
-## P6 — LDAP/AD mapping (잠김, P5 봉인 필요)
+## P6 — LDAP/AD mapping (진행 중, P5 봉인 완료)
 
 ### 미착수 P6.T1 — DirectoryProvider·external mapping
 
@@ -346,14 +347,18 @@ password modify, referral 자동 추적은 1차에서 제외한다. provisioning
   - 단언: group 추가·제거가 모든 참조 shared account의 permissions_version을 증가시킨 뒤에만 권한을 반영한다.
   - 검출: 여러 shared account 중 일부만 무효화되어 stale ACL이 남는 회귀.
 
-【통과】 8개 TC-DIR와 migration 021 재실행 fixture가 pass한다.
+【통과】 directory transport 보안·immutable identity·nested group fixture 8개와 migration 021
+테이블 fixture가 pass한다. 실제 LDAP BER bind/search adapter와 directory sync의 계정·그룹 반영은
+아직 남아 있으므로 P6 봉인은 보류한다.
 
 ## 🚪 GATE P6
 
 | id | 검사 | 명령 | 통과 기준 |
 |---|---|---|---|
-| G-P6.1 | directory tests | `npm test -- packages/store/test/directory.test.ts` | 8개 TC pass |
-| G-P6.2 | mapping | `node scripts/gates/shared-mailbox.ts P6` | transport 3개, 후순위 4개, provision=off |
+| G-P6.1 | directory contract | `node --test packages/core/test/directory.test.ts` | 8개 TC pass |
+| G-P6.2 | migration 021 | `node --test packages/db/test/migrate.test.ts` | directory tables + rerun pass |
+| G-P6.3 | immutable/group mapping | gate 내부 grep | objectGuid/objectSid, UPN/sAMAccountName, nested cycle/depth 검출 |
+| G-P6.4 | 정적 품질 | `node scripts/gates/shared-mailbox.ts P6` | lint/typecheck 0 |
 
 ## P7 — header projection·backfill (잠김, P6 봉인 필요)
 

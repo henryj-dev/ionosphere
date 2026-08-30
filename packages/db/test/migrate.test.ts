@@ -21,6 +21,7 @@ describe("migrate", () => {
       "dkim_keys", "sieve_scripts", "dedup_tracking", "push_subscriptions",
       "message_auth", "background_jobs", "blobs", "blob_refs",
       "principals", "mailbox_acl", "account_memberships",
+      "directory_identities", "directory_group_members",
       "schema_migrations",
     ]) {
       expect(tables).toContain(t);
@@ -28,7 +29,7 @@ describe("migrate", () => {
     await db.close();
   });
 
-  test("020 주체 식별자는 테넌트·provider 범위로 격리된다", async () => {
+  test("020·021 외부 식별자는 테넌트·provider 범위로 격리된다", async () => {
     const db = await openSqlite();
     await migrate(db, allMigrations);
     await db.batch([
