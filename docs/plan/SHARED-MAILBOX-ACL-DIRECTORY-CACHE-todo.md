@@ -68,8 +68,8 @@ node scripts/gates/shared-mailbox.ts --assert-order
 
 | 단계 | 상태 | 선행 | 게이트 | 봉인 |
 |---|---|---|---|---|
-| P0 계약·게이트 장치 | 열림 | 없음 | `node scripts/gates/shared-mailbox.ts P0 --seal` | 없음 |
-| P1 principal·ACL 스키마 | 잠김 | P0 | `node scripts/gates/shared-mailbox.ts P1 --seal` | 없음 |
+| P0 계약·게이트 장치 | 봉인 | 없음 | `node scripts/gates/shared-mailbox.ts P0 --seal` | `docs/plan/.gates/shared-mailbox/P0.json` |
+| P1 principal·ACL 스키마 | 열림 | P0 | `node scripts/gates/shared-mailbox.ts P1 --seal` | 없음 |
 | P2 Store authorization | 잠김 | P1 | `node scripts/gates/shared-mailbox.ts P2 --seal` | 없음 |
 | P3 shared account·IMAP namespace | 잠김 | P2 | `node scripts/gates/shared-mailbox.ts P3 --seal` | 없음 |
 | P4 IMAP ACL 명령 | 잠김 | P3 | `node scripts/gates/shared-mailbox.ts P4 --seal` | 없음 |

@@ -21,6 +21,7 @@ const GATES: Record<string, Phase> = {
     needs: [],
     outputs: ["scripts/gates/shared-mailbox.ts", "packages/core/src/principal.ts", "packages/core/src/rights.ts", "packages/core/test/principal-rights.test.ts"],
     checks: [
+      { id: "G-P0.1", kind: "command", command: ["node", "--test", "packages/core/test/gated-todo-gate.test.ts"] },
       { id: "G-P0.2", kind: "file", path: todoPath },
       { id: "G-P0.3", kind: "grep", path: "packages/core/src/principal.ts", pattern: "PRINCIPAL_KIND" },
       { id: "G-P0.4", kind: "grep", path: "packages/core/src/rights.ts", pattern: "STANDARD_MAILBOX_RIGHTS" },
