@@ -70,8 +70,8 @@ node scripts/gates/shared-mailbox.ts --assert-order
 |---|---|---|---|---|
 | P0 계약·게이트 장치 | 봉인 | 없음 | `node scripts/gates/shared-mailbox.ts P0 --seal` | `docs/plan/.gates/shared-mailbox/P0.json` |
 | P1 principal·ACL 스키마 | 봉인 | P0 | `node scripts/gates/shared-mailbox.ts P1 --seal` | `docs/plan/.gates/shared-mailbox/P1.json` |
-| P2 Store authorization | 진행 중 | P1 | `node scripts/gates/shared-mailbox.ts P2 --seal` | 없음 |
-| P3 shared account·IMAP namespace | 잠김 | P2 | `node scripts/gates/shared-mailbox.ts P3 --seal` | 없음 |
+| P2 Store authorization | 봉인 | P1 | `node scripts/gates/shared-mailbox.ts P2 --seal` | `docs/plan/.gates/shared-mailbox/P2.json` |
+| P3 shared account·IMAP namespace | 진행 중 | P2 | `node scripts/gates/shared-mailbox.ts P3 --seal` | 없음 |
 | P4 IMAP ACL 명령 | 잠김 | P3 | `node scripts/gates/shared-mailbox.ts P4 --seal` | 없음 |
 | P5 JMAP shared account | 잠김 | P4 | `node scripts/gates/shared-mailbox.ts P5 --seal` | 없음 |
 | P6 LDAP/AD mapping | 잠김 | P5 | `node scripts/gates/shared-mailbox.ts P6 --seal` | 없음 |
@@ -225,7 +225,7 @@ negative 행은 저장하지 않고(`negative=0`) 후속 범위로 명시한다.
 | G-P2.2 | authorization tests | `npm test -- packages/store/test/authorization.test.ts` | TC-P2.T1 전체 pass |
 | G-P2.3 | 회귀 | `npm run verify` | 종료 코드 0 |
 
-## P3 — shared account·IMAP namespace (잠김, P2 봉인 필요)
+## P3 — shared account·IMAP namespace (진행 중, P2 봉인 완료)
 
 ### 미착수 P3.T1 — provisioning·namespace
 
