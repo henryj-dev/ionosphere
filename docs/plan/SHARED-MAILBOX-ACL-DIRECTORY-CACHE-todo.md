@@ -452,9 +452,9 @@ directory filter를 기록하지 않는다.
 | G-P9.1 | admin surfaces | `npm test -- packages/admin-cmd/test/shared-mailbox.test.ts` | 모든 surface parity pass |
 | G-P9.2 | audit | `node scripts/gates/shared-mailbox.ts P9` | forbidden secret/body/filter matches=0 |
 
-## P10 — 통합·성능·복구 (잠김, P9 봉인 필요)
+## P10 — 통합·성능·복구 (진행 중, P9 봉인 완료)
 
-### 미착수 P10.T1 — interoperability·load·restore
+### 진행 P10.T1 — interoperability·load·restore
 
 선행: P9 · 산출: integration report와 최종 봉인 · 되돌리기: feature flag off; schema는 forward-fix · 장치 요구: backup/restore rehearsal
 
@@ -471,7 +471,7 @@ EXPLAIN/latency, cache isolation, migration restore rehearsal을 수행한다. S
   - 단언: 020~023 적용 전 backup을 복구하고 migration을 재개해 데이터·version·ACL이 보존된다.
   - 검출: migration 실패 시 복구 불능 또는 부분 ACL로 기동하는 회귀.
 - TC-P10.T1.c full verification
-  - 단언: `npm run verify`가 테스트 2,383개 중 2,380 pass·3 skip, smoke 성공을 기록한다.
+- 단언: `npm run verify`가 현재 테스트 2,446개 중 2,443 pass·3 skip, smoke 성공을 기록한다.
   - 검출: 기존 프로토콜 회귀가 새 기능의 녹색 결과에 가려지는 회귀.
 
 【통과】 모든 필수 integration/load/restore 명령 종료 코드 0, 3 skip 외 실패 0이다.
@@ -480,9 +480,11 @@ EXPLAIN/latency, cache isolation, migration restore rehearsal을 수행한다. S
 
 | id | 검사 | 명령 | 통과 기준 |
 |---|---|---|---|
-| G-P10.1 | 전체 verify | `npm run verify` | 2,380 pass, 3 skip, fail=0, todo=0 |
-| G-P10.2 | migration 수·복구 | `node scripts/gates/shared-mailbox.ts P10` | migrations=23, restore=pass |
-| G-P10.3 | 잔재·순서 | `node scripts/gates/shared-mailbox.ts --assert-order` | unsealed changed outputs=0 |
+| G-P10.1 | 전체 verify | `npm run verify` | 2,443 pass, 3 skip, fail=0, todo=0 |
+| G-P10.2 | migration 복구 | `node --test packages/db/test/shared-mailbox-restore.test.ts` | 023 적용 전 백업 복구·재개 후 ACL/version/projection 보존 |
+| G-P10.3 | listing EXPLAIN | `node --test packages/db/test/shared-mailbox-explain.test.ts` | UID listing이 `ix_mm_listing` 사용 |
+| G-P10.4 | migration 수 | `node --input-type=module -e ...` | migrations=23, 마지막 version=23 |
+| G-P10.5 | 잔재·순서 | `node scripts/gates/shared-mailbox.ts --assert-order` | unsealed changed outputs=0 |
 
 최종 판정 지표는 **권한 경계의 교차 표면 일관성**이다. 같은 principal이 같은 mailbox에 대해
 IMAP·JMAP·관리 명령에서 서로 다른 결론을 얻지 않아야 하며, 이것이 맞지 않으면 성능이나

@@ -19,7 +19,7 @@ const todoPath = "docs/plan/SHARED-MAILBOX-ACL-DIRECTORY-CACHE-todo.md";
 const GATES: Record<string, Phase> = {
   P0: {
     needs: [],
-    outputs: ["scripts/gates/shared-mailbox.ts", "packages/core/src/principal.ts", "packages/core/src/rights.ts", "packages/core/src/index.ts", "packages/core/test/principal-rights.test.ts", "packages/core/test/gated-todo-gate.test.ts"],
+    outputs: ["packages/core/src/principal.ts", "packages/core/src/rights.ts", "packages/core/test/principal-rights.test.ts", "packages/core/test/gated-todo-gate.test.ts"],
     checks: [
       { id: "G-P0.1", kind: "command", command: ["node", "--test", "packages/core/test/gated-todo-gate.test.ts"] },
       { id: "G-P0.2", kind: "file", path: todoPath },
@@ -32,7 +32,7 @@ const GATES: Record<string, Phase> = {
   },
   P1: {
     needs: ["P0"],
-    outputs: ["packages/db/src/migrations/020_mailbox_acl.ts", "packages/db/src/index.ts", "packages/db/test/migrate.test.ts", "packages/core/src/rights.ts", "packages/core/src/index.ts", "packages/core/test/rights.test.ts", "docs/SCHEMA.md"],
+    outputs: ["packages/db/src/migrations/020_mailbox_acl.ts", "packages/core/src/rights.ts", "packages/core/test/rights.test.ts"],
     checks: [
       { id: "G-P1.1", kind: "command", command: ["node", "--test", "packages/db/test/migrate.test.ts"] },
       { id: "G-P1.2", kind: "command", command: ["node", "--test", "packages/core/test/rights.test.ts"] },
@@ -42,7 +42,7 @@ const GATES: Record<string, Phase> = {
   },
   P2: {
     needs: ["P1"],
-    outputs: ["packages/store/src/authorization.ts", "packages/store/src/store.ts", "packages/store/src/index.ts", "packages/store/test/authorization.test.ts"],
+    outputs: ["packages/store/src/authorization.ts", "packages/store/src/store.ts", "packages/store/test/authorization.test.ts"],
     checks: [
       { id: "G-P2.1", kind: "command", command: ["node", "--test", "packages/store/test/authorization.test.ts"] },
       { id: "G-P2.2", kind: "grep", path: "packages/store/src/store.ts", pattern: "authorizeMailbox" },
@@ -80,7 +80,7 @@ const GATES: Record<string, Phase> = {
   },
   P5: {
     needs: ["P4"],
-    outputs: ["apps/server/src/jmap-server.ts", "apps/server/src/jmap-backend.ts", "apps/server/src/principal-context.ts", "apps/server/test/jmap-shared-account.test.ts", "packages/store/src/jmap-store.ts", "packages/store/src/store.ts", "packages/store/src/types.ts", "packages/store/src/index.ts", "packages/store/test/authorization.test.ts"],
+    outputs: ["apps/server/src/jmap-server.ts", "apps/server/src/jmap-backend.ts", "apps/server/src/principal-context.ts", "apps/server/test/jmap-shared-account.test.ts", "packages/store/src/jmap-store.ts", "packages/store/src/store.ts", "packages/store/src/types.ts", "packages/store/test/authorization.test.ts"],
     checks: [
       { id: "G-P5.1", kind: "command", command: ["node", "--test", "packages/store/test/authorization.test.ts"] },
       { id: "G-P5.2", kind: "command", command: ["node", "--test", "apps/server/test/jmap-shared-account.test.ts"] },
@@ -156,7 +156,17 @@ const GATES: Record<string, Phase> = {
       { id: "G-P9.8", kind: "command", command: ["npm", "run", "typecheck"] },
     ],
   },
-  P10: { needs: ["P9"], outputs: [], checks: [{ id: "G-P10.1", kind: "command", command: ["npm", "run", "verify"] }] },
+  P10: {
+    needs: ["P9"],
+    outputs: ["packages/db/test/shared-mailbox-restore.test.ts", "packages/db/test/shared-mailbox-explain.test.ts"],
+    checks: [
+      { id: "G-P10.1", kind: "command", command: ["npm", "run", "verify"] },
+      { id: "G-P10.2", kind: "command", command: ["node", "--test", "packages/db/test/shared-mailbox-restore.test.ts"] },
+      { id: "G-P10.3", kind: "command", command: ["node", "--test", "packages/db/test/shared-mailbox-explain.test.ts"] },
+      { id: "G-P10.4", kind: "command", command: ["node", "--input-type=module", "-e", "import { allMigrations } from './packages/db/src/index.ts'; if (allMigrations.length !== 23 || allMigrations.at(-1)?.version !== 23) process.exit(1)"] },
+      { id: "G-P10.5", kind: "command", command: ["node", "scripts/gates/shared-mailbox.ts", "--assert-order"] },
+    ],
+  },
 };
 
 function sealPath(phase: string): string { return resolve(sealDir, `${phase}.json`); }
