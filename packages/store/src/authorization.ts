@@ -1,5 +1,15 @@
-import { MAILBOX_OPERATION_RIGHT, PRINCIPAL_KIND, type MailboxOperation, type PrincipalContext, type StandardMailboxRight } from "@ionosphere/core";
+import { MAILBOX_OPERATION_RIGHT, PRINCIPAL_KIND, formatMailboxRights, parseMailboxRights, type MailboxOperation, type PrincipalContext, type StandardMailboxRight } from "@ionosphere/core";
 import type { DbDriver } from "@ionosphere/db";
+import { StoreError } from "./errors.ts";
+
+export type MailboxAclRow = {
+  mailboxId: string;
+  principalId: string;
+  principalKind: number;
+  displayName: string | null;
+  rights: string;
+  negative: boolean;
+};
 
 /** 권한 판정 결과. 메일함 존재 여부는 호출자에게 노출하지 않는다. */
 export type MailboxAuthorization = {
@@ -59,4 +69,54 @@ export async function authorizeMailbox(
     if (String(aclRow.rights).includes(right)) granted = true;
   }
   return { allowed: granted, mailboxId, accountId, right };
+}
+
+/** 테넌트 경계 안의 ACL을 반환한다. 없는 mailbox는 빈 목록으로 은닉한다. */
+export async function getMailboxAcl(db: DbDriver, tenantId: string, mailboxId: string): Promise<MailboxAclRow[]> {
+  const { rows } = await db.query({
+    sql: `SELECT acl.mailbox_id, acl.principal_id, p.kind, p.display_name, acl.rights, acl.negative
+          FROM mailbox_acl acl JOIN principals p ON p.id = acl.principal_id
+          JOIN mailboxes m ON m.id = acl.mailbox_id JOIN accounts a ON a.id = m.account_id
+          WHERE acl.mailbox_id = ? AND a.tenant_id = ? ORDER BY acl.principal_id`,
+    params: [mailboxId, tenantId],
+  });
+  return rows.map((row) => ({
+    mailboxId: String(row.mailbox_id),
+    principalId: String(row.principal_id),
+    principalKind: Number(row.kind),
+    displayName: row.display_name == null ? null : String(row.display_name),
+    rights: String(row.rights),
+    negative: Number(row.negative) !== 0,
+  }));
+}
+
+/** ACL 한 행과 acl_version을 하나의 원자 배치로 갱신한다. */
+export async function setMailboxAcl(db: DbDriver, tenantId: string, mailboxId: string, principalId: string, rights: string, now = Date.now()): Promise<void> {
+  const parsed = [...parseMailboxRights(rights)];
+  const canonical = formatMailboxRights(parsed, false);
+  const scope = await db.query({
+    sql: `SELECT 1 AS ok FROM mailboxes m JOIN accounts a ON a.id = m.account_id
+          JOIN principals p ON p.tenant_id = a.tenant_id WHERE m.id = ? AND a.tenant_id = ? AND p.id = ?`,
+    params: [mailboxId, tenantId, principalId],
+  });
+  if (scope.rows.length === 0) throw new StoreError("ACL scope not found");
+  await db.batch([
+    { sql: db.insertIgnore("mailbox_acl", ["mailbox_id", "principal_id", "rights", "negative", "created_at", "updated_at"]), params: [mailboxId, principalId, canonical, 0, now, now] },
+    { sql: "UPDATE mailbox_acl SET rights = ?, negative = 0, updated_at = ? WHERE mailbox_id = ? AND principal_id = ?", params: [canonical, now, mailboxId, principalId] },
+    { sql: "UPDATE mailboxes SET acl_version = acl_version + 1 WHERE id = ?", params: [mailboxId] },
+  ]);
+}
+
+/** ACL 삭제와 version 증가를 같은 배치에 넣는다. */
+export async function deleteMailboxAcl(db: DbDriver, tenantId: string, mailboxId: string, principalId: string): Promise<boolean> {
+  const scope = await db.query({
+    sql: "SELECT 1 AS ok FROM mailbox_acl acl JOIN mailboxes m ON m.id = acl.mailbox_id JOIN accounts a ON a.id = m.account_id WHERE acl.mailbox_id = ? AND acl.principal_id = ? AND a.tenant_id = ?",
+    params: [mailboxId, principalId, tenantId],
+  });
+  if (scope.rows.length === 0) return false;
+  await db.batch([
+    { sql: "DELETE FROM mailbox_acl WHERE mailbox_id = ? AND principal_id = ?", params: [mailboxId, principalId] },
+    { sql: "UPDATE mailboxes SET acl_version = acl_version + 1 WHERE id = ?", params: [mailboxId] },
+  ]);
+  return true;
 }

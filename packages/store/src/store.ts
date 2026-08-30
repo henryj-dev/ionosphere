@@ -92,7 +92,7 @@ import type {
   TenantUsage,
 } from "./types.ts";
 import { WriterQueue } from "./writer-queue.ts";
-import { authorizeMailbox as authorizeMailboxAccess, type MailboxAuthorization } from "./authorization.ts";
+import { authorizeMailbox as authorizeMailboxAccess, deleteMailboxAcl, getMailboxAcl, setMailboxAcl, type MailboxAclRow, type MailboxAuthorization } from "./authorization.ts";
 
 /** change_log.entity (SCHEMA.md §6-1) — enum 금지 정책이라 평범한 상수 객체로. */
 /** change_log.kind (SCHEMA.md §6-1). */
@@ -222,6 +222,18 @@ export class Store {
     });
     const decisions = await Promise.all(rows.map((row) => authorizeMailboxAccess(this.db, context, String(row.id), "lookup")));
     return rows.filter((_, index) => decisions[index]?.allowed === true).map(mapMailboxRow);
+  }
+
+  async getMailboxAcl(tenantId: string, mailboxId: string): Promise<MailboxAclRow[]> {
+    return getMailboxAcl(this.db, tenantId, mailboxId);
+  }
+
+  async setMailboxAcl(tenantId: string, mailboxId: string, principalId: string, rights: string): Promise<void> {
+    return setMailboxAcl(this.db, tenantId, mailboxId, principalId, rights);
+  }
+
+  async deleteMailboxAcl(tenantId: string, mailboxId: string, principalId: string): Promise<boolean> {
+    return deleteMailboxAcl(this.db, tenantId, mailboxId, principalId);
   }
 
   // ── 재시도 루프 (§3-3/§7-8) ────────────────────────────────────────────

@@ -82,4 +82,19 @@ describe("mailbox authorization", () => {
     expect(rows.some((row) => row.accountId === second.accountId)).toBe(false);
     await db.close();
   });
+
+  test("ACL CRUD는 canonical right과 acl_version을 함께 갱신한다", async () => {
+    const { db, store, tenantId, accountId, inboxId } = await setupFixture();
+    const { rows } = await db.query({ sql: "SELECT id FROM principals WHERE account_id = ?", params: [accountId] });
+    const principalId = String(rows[0]!.id);
+    await store.setMailboxAcl(tenantId, inboxId, principalId, "lrcd");
+    const acl = await store.getMailboxAcl(tenantId, inboxId);
+    expect(acl[0]?.rights).toBe("lrkxte");
+    expect(acl[0]?.negative).toBe(false);
+    expect(await store.deleteMailboxAcl(tenantId, inboxId, principalId)).toBe(true);
+    expect(await store.getMailboxAcl(tenantId, inboxId)).toEqual([]);
+    const version = await db.query({ sql: "SELECT acl_version FROM mailboxes WHERE id = ?", params: [inboxId] });
+    expect(Number(version.rows[0]?.acl_version)).toBe(2);
+    await db.close();
+  });
 });

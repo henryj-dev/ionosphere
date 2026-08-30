@@ -47,7 +47,7 @@ export {
 export { StoreConflictError, StoreError, StoreQuotaError } from "./errors.ts";
 export { DbMaildropLock, type DbMaildropLockOptions } from "./maildrop-lock.ts";
 export { Store } from "./store.ts";
-export { authorizeMailbox, type MailboxAuthorization } from "./authorization.ts";
+export { authorizeMailbox, deleteMailboxAcl, getMailboxAcl, setMailboxAcl, type MailboxAclRow, type MailboxAuthorization } from "./authorization.ts";
 export { tokenize, tokenizeQuery } from "./tokenize.ts";
 export type {
   AccountRow,
