@@ -248,8 +248,9 @@ negative 행은 저장하지 않고(`negative=0`) 후속 범위로 명시한다.
 
 | id | 검사 | 명령 | 통과 기준 |
 |---|---|---|---|
-| G-P3.1 | provisioning | `npm test -- apps/server/test/shared-mailbox.test.ts` | TC-P3.T1 전체 pass |
-| G-P3.2 | namespace | `npm test -- apps/server/test/imap-shared-namespace.test.ts` | hidden mailbox 누출 0건 |
+| G-P3.1 | provisioning | `node --test apps/server/test/imap-shared-namespace.test.ts` | TC-P3.T1.a 전체 pass |
+| G-P3.2 | namespace | `node --test apps/server/test/imap-shared-namespace.test.ts` | TC-P3.T1.b, hidden mailbox 누출 0건 |
+| G-P3.3 | lint/typecheck | gate 내부 명령 | 종료 코드 0 |
 
 ## P4 — IMAP ACL 명령 (잠김, P3 봉인 필요)
 

@@ -4,6 +4,8 @@ import type { AddressKind } from "@ionosphere/db";
 export interface CreateAccountInput {
   tenantId: string;
   email: string;
+  /** 0 user / 1 shared / 2 system. 생략하면 일반 사용자 계정이다. */
+  kind?: 0 | 1 | 2;
 }
 
 export interface CreateAccountResult {

@@ -51,7 +51,17 @@ const GATES: Record<string, Phase> = {
       { id: "G-P2.5", kind: "command", command: ["npm", "run", "typecheck"] },
     ],
   },
-  P3: { needs: ["P2"], outputs: ["apps/server/src/imap-backend.ts"], checks: [] },
+  P3: {
+    needs: ["P2"],
+    outputs: ["apps/server/src/imap-backend.ts", "packages/store/src/store.ts", "apps/server/test/imap-shared-namespace.test.ts"],
+    checks: [
+      { id: "G-P3.1", kind: "grep", path: "apps/server/src/imap-backend.ts", pattern: "principalContext" },
+      { id: "G-P3.2", kind: "grep", path: "packages/store/src/store.ts", pattern: "listAccessibleMailboxes" },
+      { id: "G-P3.3", kind: "command", command: ["node", "--test", "apps/server/test/imap-shared-namespace.test.ts"] },
+      { id: "G-P3.4", kind: "command", command: ["npm", "run", "lint"] },
+      { id: "G-P3.5", kind: "command", command: ["npm", "run", "typecheck"] },
+    ],
+  },
   P4: { needs: ["P3"], outputs: ["packages/proto-imap/src/engine.ts"], checks: [] },
   P5: { needs: ["P4"], outputs: ["apps/server/src/jmap-backend.ts"], checks: [] },
   P6: { needs: ["P5"], outputs: ["packages/core/src/directory.ts"], checks: [] },

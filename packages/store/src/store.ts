@@ -213,6 +213,17 @@ export class Store {
     return authorizeMailboxAccess(this.db, context, mailboxId, operation);
   }
 
+  /** LIST/namespace가 사용할 메일함 집합. ACL 없는 mailboxId는 결과에서 제거한다. */
+  async listAccessibleMailboxes(context: PrincipalContext): Promise<MailboxRow[]> {
+    const { rows } = await this.db.query({
+      sql: `SELECT m.* FROM mailboxes m JOIN accounts a ON a.id = m.account_id
+            WHERE a.tenant_id = ? AND a.status = 1 AND m.status = 1 ORDER BY m.account_id, m.id`,
+      params: [context.tenantId],
+    });
+    const decisions = await Promise.all(rows.map((row) => authorizeMailboxAccess(this.db, context, String(row.id), "lookup")));
+    return rows.filter((_, index) => decisions[index]?.allowed === true).map(mapMailboxRow);
+  }
+
   // ── 재시도 루프 (§3-3/§7-8) ────────────────────────────────────────────
   private async withRetry<T>(fn: () => Promise<T>): Promise<T> {
     let lastErr: unknown;
@@ -268,8 +279,10 @@ export class Store {
     if (tenantRows.length === 0) throw new StoreError(`tenant not found: ${input.tenantId}`);
 
     const accountId = ulid();
+    const principalId = ulid();
     const mailboxId = ulid();
     const now = Date.now();
+    const accountKind = input.kind ?? 0;
     // §5-1: max(epoch초, uidvalidity_last+1). 신규 계정의 uidvalidity_last 초기값은 0.
     const uidvalidity = Math.max(Math.floor(now / 1000), 1);
 
@@ -277,8 +290,8 @@ export class Store {
       await this.db.batch([
         {
           sql: `INSERT INTO accounts (id, tenant_id, email, kind, status, modseq, changelog_floor, uidvalidity_last, quota_bytes, used_bytes, message_count, state_email, state_mailbox, state_thread, state_submission, state_sieve, created_at)
-                VALUES (?, ?, ?, 0, 1, 0, 0, ?, 0, 0, 0, 0, 0, 0, 0, 0, ?)`,
-          params: [accountId, input.tenantId, email, uidvalidity, now],
+                VALUES (?, ?, ?, ?, 1, 0, 0, ?, 0, 0, 0, 0, 0, 0, 0, 0, ?)`,
+          params: [accountId, input.tenantId, email, accountKind, uidvalidity, now],
         },
         {
           // 계정 생성 시 INBOX 자동 생성 (role='inbox') — 아직 어떤 클라이언트도 관측할 수 없는
@@ -287,6 +300,10 @@ export class Store {
           sql: `INSERT INTO mailboxes (id, account_id, parent_id, name, role, status, uidvalidity, uidnext, highestmodseq, subscribed, sort_order, total_count, unread_count, total_bytes, created_at)
                 VALUES (?, ?, '', 'INBOX', 'inbox', 1, ?, 1, 0, 1, 0, 0, 0, 0, ?)`,
           params: [mailboxId, accountId, uidvalidity, now],
+        },
+        {
+          sql: "INSERT INTO principals (id, tenant_id, kind, account_id, provider, created_at) VALUES (?, ?, 0, ?, 'local', ?)",
+          params: [principalId, input.tenantId, accountId, now],
         },
       ]);
     } catch (err) {

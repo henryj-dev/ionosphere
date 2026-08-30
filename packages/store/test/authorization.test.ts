@@ -23,14 +23,15 @@ describe("mailbox authorization", () => {
 
   test("shared account는 ACL positive right이 있어야 읽을 수 있다", async () => {
     const { db, tenantId, accountId, inboxId } = await setupFixture();
+    const { rows: principalRows } = await db.query({ sql: "SELECT id FROM principals WHERE account_id = ?", params: [accountId] });
+    const principalId = String(principalRows[0]!.id);
     await db.batch([
       { sql: "UPDATE accounts SET kind = 1 WHERE id = ?", params: [accountId] },
-      { sql: "INSERT INTO principals (id, tenant_id, kind, account_id, created_at) VALUES (?, ?, ?, ?, ?)", params: ["principal-a", tenantId, PRINCIPAL_KIND.account, accountId, 1] },
-      { sql: "INSERT INTO mailbox_acl (mailbox_id, principal_id, rights, negative, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?)", params: [inboxId, "principal-a", "lr", 1, 1] },
+      { sql: "INSERT INTO mailbox_acl (mailbox_id, principal_id, rights, negative, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?)", params: [inboxId, principalId, "lr", 1, 1] },
     ]);
     const result = await authorizeMailbox(db, {
       tenantId,
-      principalId: "principal-a",
+      principalId,
       primaryAccountId: accountId,
       accessibleAccountIds: [accountId],
       groupIds: [],
@@ -56,6 +57,29 @@ describe("mailbox authorization", () => {
       authenticated: false,
     }, inboxId, "read");
     expect(result.allowed).toBe(false);
+    await db.close();
+  });
+
+  test("namespace 목록은 같은 테넌트의 ACL 허용 mailbox만 반환한다", async () => {
+    const { db, store, tenantId, accountId, inboxId } = await setupFixture();
+    const second = await store.createAccount({ tenantId, email: "second@acme.test", kind: 1 });
+    const { rows: principalRows } = await db.query({ sql: "SELECT id FROM principals WHERE account_id = ?", params: [accountId] });
+    const principalId = String(principalRows[0]!.id);
+    await db.batch([
+      { sql: "UPDATE accounts SET kind = 1 WHERE id = ?", params: [accountId] },
+      { sql: "UPDATE accounts SET kind = 1 WHERE id = ?", params: [second.accountId] },
+      { sql: "INSERT INTO mailbox_acl (mailbox_id, principal_id, rights, created_at, updated_at) VALUES (?, ?, ?, ?, ?)", params: [inboxId, principalId, "l", 1, 1] },
+    ]);
+    const rows = await store.listAccessibleMailboxes({
+      tenantId,
+      principalId,
+      primaryAccountId: accountId,
+      accessibleAccountIds: [accountId],
+      groupIds: [],
+      authenticated: true,
+    });
+    expect(rows.map((row) => row.id)).toEqual([inboxId]);
+    expect(rows.some((row) => row.accountId === second.accountId)).toBe(false);
     await db.close();
   });
 });

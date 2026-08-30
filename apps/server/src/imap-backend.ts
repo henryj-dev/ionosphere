@@ -8,7 +8,7 @@
  *
  * 메일함 이름: IMAP 전체 경로(구분자 '/') ↔ 스토어 parent_id 트리를 여기서 변환.
  */
-import { noopLogger, type Logger } from "@ionosphere/core";
+import { noopLogger, type Logger, type PrincipalContext } from "@ionosphere/core";
 import { ADDRESS_KIND, type DbDriver } from "@ionosphere/db";
 import { parseMessage, type ParsedAddress, type ParsedMessage } from "@ionosphere/mime";
 import {
@@ -191,7 +191,7 @@ export class IonosphereImapBackend implements ImapBackend {
   // ── 경로 변환 ──────────────────────────────────────────────────────────────
 
   private async pathedMailboxes(accountId: string): Promise<PathedMailbox[]> {
-    const rows = await this.store.listMailboxes(accountId);
+    const rows = await this.store.listAccessibleMailboxes(await this.principalContext(accountId));
     const byId = new Map(rows.map((r) => [r.id, r]));
     const pathOf = (row: MailboxRow): string => {
       const segs: string[] = [row.name];
@@ -205,6 +205,22 @@ export class IonosphereImapBackend implements ImapBackend {
       return segs.join(DELIM);
     };
     return rows.map((row) => ({ row, path: pathOf(row) }));
+  }
+
+  /** 인증 계정에서 tenant·account principal·group membership을 한 번에 복원한다. */
+  private async principalContext(accountId: string): Promise<PrincipalContext> {
+    const account = await this.db.query({ sql: "SELECT tenant_id FROM accounts WHERE id = ? AND status = 1", params: [accountId] });
+    const tenantId = String(account.rows[0]?.tenant_id ?? "");
+    const principal = await this.db.query({ sql: "SELECT id FROM principals WHERE tenant_id = ? AND account_id = ?", params: [tenantId, accountId] });
+    const memberships = await this.db.query({ sql: "SELECT principal_id FROM account_memberships WHERE account_id = ?", params: [accountId] });
+    return {
+      tenantId,
+      principalId: String(principal.rows[0]?.id ?? accountId),
+      primaryAccountId: accountId,
+      accessibleAccountIds: [accountId],
+      groupIds: memberships.rows.map((row) => String(row.principal_id)),
+      authenticated: true,
+    };
   }
 
   private toImapMailbox(p: PathedMailbox): ImapMailbox {
