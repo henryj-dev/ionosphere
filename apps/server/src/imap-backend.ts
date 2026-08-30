@@ -133,6 +133,7 @@ export class IonosphereImapBackend implements ImapBackend {
           const found = await this.findByPath(accountId, req.name);
           if (!found) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
           const context = await this.principalContext(accountId);
+          if (!(await this.hasMailboxRight(accountId, found.row.id, "admin"))) return { kind: "no", code: "NOPERM", message: "permission denied" };
           const acl = await this.store.getMailboxAcl(context.tenantId, found.row.id);
           return { kind: "acl", mailbox: req.name, entries: acl.map((row) => ({ identifier: row.principalId, rights: row.rights })) };
         }
@@ -140,6 +141,7 @@ export class IonosphereImapBackend implements ImapBackend {
           const found = await this.findByPath(accountId, req.name);
           if (!found) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
           const context = await this.principalContext(accountId);
+          if (!(await this.hasMailboxRight(accountId, found.row.id, "admin"))) return { kind: "no", code: "NOPERM", message: "permission denied" };
           await this.store.setMailboxAcl(context.tenantId, found.row.id, req.identifier, req.rights);
           return { kind: "ok" };
         }
@@ -147,6 +149,7 @@ export class IonosphereImapBackend implements ImapBackend {
           const found = await this.findByPath(accountId, req.name);
           if (!found) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
           const context = await this.principalContext(accountId);
+          if (!(await this.hasMailboxRight(accountId, found.row.id, "admin"))) return { kind: "no", code: "NOPERM", message: "permission denied" };
           const deleted = await this.store.deleteMailboxAcl(context.tenantId, found.row.id, req.identifier);
           return deleted ? { kind: "ok" } : { kind: "no", code: "NONEXISTENT", message: "no such ACL" };
         }
@@ -171,12 +174,14 @@ export class IonosphereImapBackend implements ImapBackend {
         case "expungeMailbox": {
           const found = await this.findByPath(accountId, req.name);
           if (!found) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
+          if (!(await this.hasMailboxRight(accountId, found.row.id, "expunge"))) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
           await this.store.expunge({ accountId, mailboxId: found.row.id });
           return { kind: "ok" };
         }
         case "expunge": {
           const found = await this.findByPath(accountId, req.name);
           if (!found) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
+          if (!(await this.hasMailboxRight(accountId, found.row.id, "expunge"))) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
           const result = await this.store.expunge({
             accountId,
             mailboxId: found.row.id,
@@ -252,6 +257,11 @@ export class IonosphereImapBackend implements ImapBackend {
       groupIds: memberships.rows.map((row) => String(row.principal_id)),
       authenticated: true,
     };
+  }
+
+  private async hasMailboxRight(accountId: string, mailboxId: string, operation: "read" | "insert" | "write" | "delete" | "expunge" | "admin"): Promise<boolean> {
+    const decision = await this.store.authorizeMailbox(await this.principalContext(accountId), mailboxId, operation);
+    return decision.allowed;
   }
 
   private toImapMailbox(p: PathedMailbox): ImapMailbox {
@@ -335,6 +345,7 @@ export class IonosphereImapBackend implements ImapBackend {
   private async selectMailbox(accountId: string, path: string): Promise<ImapBackendResponse> {
     const found = await this.findByPath(accountId, path);
     if (!found) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
+    if (!(await this.hasMailboxRight(accountId, found.row.id, "read"))) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
     const { rows } = await this.db.query({
       sql: `SELECT mm.uid AS uid,
                    EXISTS(SELECT 1 FROM message_keywords k WHERE k.message_id = mm.message_id AND k.keyword = '$seen') AS seen
@@ -367,6 +378,7 @@ export class IonosphereImapBackend implements ImapBackend {
   ): Promise<ImapBackendResponse> {
     const found = await this.findByPath(accountId, req.name);
     if (!found) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
+    if (!(await this.hasMailboxRight(accountId, found.row.id, "read"))) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
     if (req.uids.length === 0) return { kind: "messages", messages: [] };
 
     /**
@@ -500,6 +512,7 @@ export class IonosphereImapBackend implements ImapBackend {
   ): Promise<ImapBackendResponse> {
     const found = await this.findByPath(accountId, req.name);
     if (!found) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
+    if (!(await this.hasMailboxRight(accountId, found.row.id, "write"))) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
     const allRows = (
       await queryInChunks(
         this.db,
@@ -563,6 +576,7 @@ export class IonosphereImapBackend implements ImapBackend {
   private async syncSince(accountId: string, req: Extract<ImapBackendRequest, { kind: "syncSince" }>): Promise<ImapBackendResponse> {
     const found = await this.findByPath(accountId, req.name);
     if (!found) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
+    if (!(await this.hasMailboxRight(accountId, found.row.id, "expunge"))) return { kind: "no", code: "NONEXISTENT", message: "no such mailbox" };
     /**
      * ★툼스톤 보존창 **밖**이면 `expunged`로는 답할 수 없다(migration 014의 `expunged_floor`).
      * 그때 그냥 "삭제 없음"으로 답하면 클라이언트가 유령 메시지를 영영 들고 있게 된다 —
@@ -652,6 +666,7 @@ export class IonosphereImapBackend implements ImapBackend {
   ): Promise<ImapBackendResponse> {
     const found = await this.findByPath(accountId, req.name);
     if (!found) return { kind: "no", code: "TRYCREATE", message: "no such mailbox" };
+    if (!(await this.hasMailboxRight(accountId, found.row.id, "insert"))) return { kind: "no", code: "TRYCREATE", message: "no such mailbox" };
 
     const items = req.items ?? [{ raw: req.raw, flags: req.flags, ...(req.internalDateMs !== null ? { internalDateMs: req.internalDateMs } : {}) }];
     const inputs: AppendMessageInput[] = [];
