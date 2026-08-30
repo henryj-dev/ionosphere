@@ -4,6 +4,8 @@
 작성일: 2026-08-29
 범위: 공유 메일함과 mailbox ACL, LDAP/Active Directory 연동, MIME header 및 listing 최적화
 
+실행판은 [SHARED-MAILBOX-ACL-DIRECTORY-CACHE-todo.md](SHARED-MAILBOX-ACL-DIRECTORY-CACHE-todo.md)다.
+
 2026-08-29 재검토 반영:
 
 - JMAP 표준에 없는 `mayReadSeen`을 제거하고 `mayRemoveItems`·`maySubmit`을 명시했다.
