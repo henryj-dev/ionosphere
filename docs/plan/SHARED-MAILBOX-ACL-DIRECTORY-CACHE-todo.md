@@ -72,7 +72,7 @@ node scripts/gates/shared-mailbox.ts --assert-order
 | P1 principal·ACL 스키마 | 봉인 | P0 | `node scripts/gates/shared-mailbox.ts P1 --seal` | `docs/plan/.gates/shared-mailbox/P1.json` |
 | P2 Store authorization | 봉인 | P1 | `node scripts/gates/shared-mailbox.ts P2 --seal` | `docs/plan/.gates/shared-mailbox/P2.json` |
 | P3 shared account·IMAP namespace | 봉인 | P2 | `node scripts/gates/shared-mailbox.ts P3 --seal` | `docs/plan/.gates/shared-mailbox/P3.json` |
-| P4 IMAP ACL 명령 | 열림 | P3 | `node scripts/gates/shared-mailbox.ts P4 --seal` | P4 게이트 통과 후 생성 |
+| P4 IMAP ACL 명령 | 봉인 | P3 | `node scripts/gates/shared-mailbox.ts P4 --seal` | `docs/plan/.gates/shared-mailbox/P4.json` |
 | P5 JMAP shared account | 잠김 | P4 | `node scripts/gates/shared-mailbox.ts P5 --seal` | 없음 |
 | P6 LDAP/AD mapping | 잠김 | P5 | `node scripts/gates/shared-mailbox.ts P6 --seal` | 없음 |
 | P7 header projection·backfill | 잠김 | P6 | `node scripts/gates/shared-mailbox.ts P7 --seal` | 없음 |
