@@ -97,5 +97,13 @@ export async function runCommand(
   const cmd = registry.get(name);
   if (!cmd) throw new CommandError("notFound", `알 수 없는 명령: ${name}`);
   const args = validateArgs(cmd.spec, raw);
-  return await cmd.run(ctx, args);
+  try {
+    const result = await cmd.run(ctx, args);
+    ctx.observer?.record({ operation: name, outcome: "ok", reason: "success" });
+    return result;
+  } catch (error) {
+    const reason = error instanceof CommandError ? error.kind : "unavailable";
+    ctx.observer?.record({ operation: name, outcome: "fail", reason });
+    throw error;
+  }
 }

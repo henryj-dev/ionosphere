@@ -8,6 +8,7 @@ export { CommandRegistry, runCommand, usageOf, validateArgs } from "./dispatch.t
 export { accountCommands } from "./accounts.ts";
 export { domainCommands, splitForwardTargets } from "./domains-cmd.ts";
 export { opsCommands } from "./ops.ts";
+export { sharedMailboxCommands } from "./shared-mailbox.ts";
 export { ALL_COMMANDS, COMMAND_ENCODINGS, createRegistry, labelFor } from "./registry.ts";
 export {
   assertDomainNameAvailable,
@@ -33,4 +34,7 @@ export {
   type CommandSpec,
   type FieldSpec,
   type TlsAdminPort,
+  type AdminObservation,
+  type AdminObserver,
+  type SharedMailboxAdminPort,
 } from "./types.ts";

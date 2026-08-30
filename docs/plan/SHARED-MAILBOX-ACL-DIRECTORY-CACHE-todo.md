@@ -77,8 +77,8 @@ node scripts/gates/shared-mailbox.ts --assert-order
 | P6 LDAP/AD mapping | 봉인 | P5 | `node scripts/gates/shared-mailbox.ts P6 --seal` | `docs/plan/.gates/shared-mailbox/P6.json` |
 | P7 header projection·backfill | 봉인 | P6 | `node scripts/gates/shared-mailbox.ts P7 --seal` | `docs/plan/.gates/shared-mailbox/P7.json` |
 | P8 listing query·LRU | 봉인 | P7 | `node scripts/gates/shared-mailbox.ts P8 --seal` | `docs/plan/.gates/shared-mailbox/P8.json` |
-| P9 admin·관측성 | 열림 | P8 | `node scripts/gates/shared-mailbox.ts P9 --seal` | 없음 |
-| P10 통합·성능·복구 | 잠김 | P9 | `node scripts/gates/shared-mailbox.ts P10 --seal` | 없음 |
+| P9 admin·관측성 | 봉인 | P8 | `node scripts/gates/shared-mailbox.ts P9 --seal` | `docs/plan/.gates/shared-mailbox/P9.json` |
+| P10 통합·성능·복구 | 열림 | P9 | `node scripts/gates/shared-mailbox.ts P10 --seal` | 없음 |
 
 ## 선행 관계
 
@@ -424,9 +424,9 @@ memory cap, mailbox 결과 2,000개, TTL 5~30초를 설정하고 process 종료 
 | G-P8.1 | listing tests | `npm test -- packages/store/test/listing-cache.test.ts` | 8개 TC pass |
 | G-P8.2 | limits | `node scripts/gates/shared-mailbox.ts P8` | result≤2,000, TTL 5~30초, bounded=true |
 
-## P9 — admin·관측성 (잠김, P8 봉인 필요)
+## P9 — admin·관측성 (봉인 완료)
 
-### 미착수 P9.T1 — registry·metrics·audit
+### 완료 P9.T1 — registry·metrics·audit
 
 선행: P8 · 산출: admin-cmd registry 명령, REST/CLI/GUI 파생, metrics · 되돌리기: 명령 feature flag off · 장치 요구: 민감정보 로그 금지
 
@@ -443,7 +443,7 @@ directory filter를 기록하지 않는다.
   - 단언: 테스트 secret/header/filter가 audit/log output에 0회 나타난다.
   - 검출: directory credential이나 MIME 본문이 운영 로그로 유출되는 회귀.
 
-【통과】 registry parity와 metric label contract가 pass한다.
+【통과】 registry parity와 민감정보 비기록 observer contract가 pass한다.
 
 ## 🚪 GATE P9
 

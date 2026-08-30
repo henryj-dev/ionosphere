@@ -142,7 +142,20 @@ const GATES: Record<string, Phase> = {
       { id: "G-P8.8", kind: "command", command: ["npm", "run", "typecheck"] },
     ],
   },
-  P9: { needs: ["P8"], outputs: ["packages/admin-cmd/src/registry.ts"], checks: [] },
+  P9: {
+    needs: ["P8"],
+    outputs: ["packages/admin-cmd/src/registry.ts", "packages/admin-cmd/src/shared-mailbox.ts", "packages/admin-cmd/src/dispatch.ts", "packages/admin-cmd/src/types.ts", "packages/admin-cmd/test/shared-mailbox.test.ts"],
+    checks: [
+      { id: "G-P9.1", kind: "command", command: ["node", "--test", "packages/admin-cmd/test/shared-mailbox.test.ts"] },
+      { id: "G-P9.2", kind: "grep", path: "packages/admin-cmd/src/registry.ts", pattern: "sharedMailboxCommands" },
+      { id: "G-P9.3", kind: "grep", path: "packages/admin-cmd/src/shared-mailbox.ts", pattern: "directory-sync" },
+      { id: "G-P9.4", kind: "grep", path: "packages/admin-cmd/src/shared-mailbox.ts", pattern: "header-rebuild" },
+      { id: "G-P9.5", kind: "grep", path: "packages/admin-cmd/src/shared-mailbox.ts", pattern: "listing-cache-flush" },
+      { id: "G-P9.6", kind: "grep", path: "packages/admin-cmd/src/dispatch.ts", pattern: "observer" },
+      { id: "G-P9.7", kind: "command", command: ["npm", "run", "lint"] },
+      { id: "G-P9.8", kind: "command", command: ["npm", "run", "typecheck"] },
+    ],
+  },
   P10: { needs: ["P9"], outputs: [], checks: [{ id: "G-P10.1", kind: "command", command: ["npm", "run", "verify"] }] },
 };
 
