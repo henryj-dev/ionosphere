@@ -78,7 +78,7 @@ node scripts/gates/shared-mailbox.ts --assert-order
 | P7 header projection·backfill | 봉인 | P6 | `node scripts/gates/shared-mailbox.ts P7 --seal` | `docs/plan/.gates/shared-mailbox/P7.json` |
 | P8 listing query·LRU | 봉인 | P7 | `node scripts/gates/shared-mailbox.ts P8 --seal` | `docs/plan/.gates/shared-mailbox/P8.json` |
 | P9 admin·관측성 | 봉인 | P8 | `node scripts/gates/shared-mailbox.ts P9 --seal` | `docs/plan/.gates/shared-mailbox/P9.json` |
-| P10 통합·성능·복구 | 열림 | P9 | `node scripts/gates/shared-mailbox.ts P10 --seal` | 없음 |
+| P10 통합·성능·복구 | 봉인 | P9 | `node scripts/gates/shared-mailbox.ts P10 --seal` | `docs/plan/.gates/shared-mailbox/P10.json` |
 
 ## 선행 관계
 
@@ -452,9 +452,9 @@ directory filter를 기록하지 않는다.
 | G-P9.1 | admin surfaces | `npm test -- packages/admin-cmd/test/shared-mailbox.test.ts` | 모든 surface parity pass |
 | G-P9.2 | audit | `node scripts/gates/shared-mailbox.ts P9` | forbidden secret/body/filter matches=0 |
 
-## P10 — 통합·성능·복구 (진행 중, P9 봉인 완료)
+## P10 — 통합·성능·복구 (봉인 완료)
 
-### 진행 P10.T1 — interoperability·load·restore
+### 완료 P10.T1 — interoperability·load·restore
 
 선행: P9 · 산출: integration report와 최종 봉인 · 되돌리기: feature flag off; schema는 forward-fix · 장치 요구: backup/restore rehearsal
 
