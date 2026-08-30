@@ -79,6 +79,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # gated-todo 봉인의 head가 현재 커밋의 조상인지 검사하려면 전체 이력이 필요하다.
+          fetch-depth: 0
           # 체크아웃이 남기는 자격증명을 `.git/config` 에 두지 않는다. 이 잡의 어떤
           # 단계도 그 토큰으로 밖에 나가지 않는다 — 트리에 두면 러너에서 도는
           # 코드가 집을 수 있는 것만 남는다.

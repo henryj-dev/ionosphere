@@ -124,6 +124,13 @@ function auditDetailOf(req: ImapBackendRequest): { detail?: Record<string, strin
       return { detail: { mailbox: req.name, subscribed: req.subscribed ? 1 : 0 } };
     case "renameMailbox":
       return { detail: { from: req.from, to: req.to } };
+    case "getAcl":
+    case "myRights":
+      return { detail: { mailbox: req.name } };
+    case "setAcl":
+    case "deleteAcl":
+    case "listRights":
+      return { detail: { mailbox: req.name, identifier: req.identifier } };
     case "fetchMessages":
       return { detail: { mailbox: req.name, uids: req.uids.length, raw: req.needRaw ? 1 : 0 } };
     case "storeFlags":

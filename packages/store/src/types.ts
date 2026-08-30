@@ -4,6 +4,8 @@ import type { AddressKind } from "@ionosphere/db";
 export interface CreateAccountInput {
   tenantId: string;
   email: string;
+  /** 0 user / 1 shared / 2 system. 생략하면 일반 사용자 계정이다. */
+  kind?: 0 | 1 | 2;
 }
 
 export interface CreateAccountResult {
@@ -214,6 +216,12 @@ export interface AccountRow {
   messageCount: number;
 }
 
+export interface AccessibleAccount {
+  id: string;
+  email: string;
+  kind: number;
+}
+
 /** JMAP 타입별 state 고수위 문자열 (SCHEMA §6-3 accounts.state_*). */
 export interface JmapStates {
   email: string;
@@ -221,6 +229,7 @@ export interface JmapStates {
   thread: string;
   submission: string;
   identity: string;
+  permission: string;
 }
 
 /** change_log 엔티티 (SCHEMA §6-1). */

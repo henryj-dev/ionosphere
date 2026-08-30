@@ -160,6 +160,26 @@ export interface CommandContext {
   resolveMx?: ((name: string) => Promise<{ exchange: string; preference: number }[]>) | undefined;
   /** TLS 관리 — 서버 전역이라 조립층만 줄 수 있다. 없으면 관련 명령은 `unavailable`. */
   tls?: TlsAdminPort | undefined;
+  /** shared mailbox 관리 포트 — 실제 directory/blob/cache 구현을 조립층에서 주입한다. */
+  sharedMailbox?: SharedMailboxAdminPort | undefined;
+  /** 입력값을 기록하지 않는 운영 관측 포트. */
+  observer?: AdminObserver | undefined;
+}
+
+export interface SharedMailboxAdminPort {
+  sync(tenantId: string, provider: string): Promise<CommandResult>;
+  rebuildHeaders(batchSize: number | undefined): Promise<CommandResult>;
+  flushListingCache(): Promise<CommandResult>;
+}
+
+export interface AdminObserver {
+  record(event: AdminObservation): void;
+}
+
+export interface AdminObservation {
+  operation: string;
+  outcome: "ok" | "fail";
+  reason: "success" | CommandFailure;
 }
 
 /**

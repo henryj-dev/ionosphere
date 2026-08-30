@@ -13,8 +13,9 @@ import { opsCommands } from "./ops.ts";
 import { ACCOUNT_STATUS, DOMAIN_STATUS, MTA_QUEUE_STATUS, SUPPRESSION_REASON } from "@ionosphere/db";
 import { CommandRegistry } from "./dispatch.ts";
 import type { Command } from "./types.ts";
+import { sharedMailboxCommands } from "./shared-mailbox.ts";
 
-export const ALL_COMMANDS: readonly Command[] = [...opsCommands, ...accountCommands, ...domainCommands];
+export const ALL_COMMANDS: readonly Command[] = [...opsCommands, ...accountCommands, ...domainCommands, ...sharedMailboxCommands];
 
 /** 기본 레지스트리. 테스트가 부분집합으로 만들 수 있게 인자를 열어 둔다. */
 export function createRegistry(commands: readonly Command[] = ALL_COMMANDS): CommandRegistry {

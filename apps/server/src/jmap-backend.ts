@@ -36,6 +36,7 @@ import {
   type MethodContext,
   type SetSource,
 } from "@ionosphere/proto-jmap";
+import { principalContext } from "./principal-context.ts";
 import { StoreError, type AppendAddress } from "@ionosphere/store";
 import { DEFAULT_RATE_LIMIT, enqueueMessage, findUnsafeAddress, isSafeEnvelopeAddress, OutboundRejectedError, type OutboundPolicy } from "@ionosphere/mta";
 
@@ -77,6 +78,98 @@ function toJmapMailbox(row: MailboxRow): JmapObject {
     myRights: { ...OWNER_RIGHTS },
     isSubscribed: row.subscribed,
   };
+}
+
+async function requestedAccountId(args: Record<string, unknown>, authenticatedAccountId: string): Promise<string> {
+  const accountId = args.accountId;
+  if (typeof accountId !== "string" || accountId.length === 0) throw new MethodError("invalidArguments", { description: "accountId 누락" });
+  if (accountId === authenticatedAccountId) return accountId;
+  return accountId;
+}
+
+async function accessibleJmapMailboxes(db: DbDriver, store: Store, authenticatedAccountId: string, requestedAccountId: string): Promise<{ rows: MailboxRow[]; context: Awaited<ReturnType<typeof principalContext>> }> {
+  const context = await principalContext(db, authenticatedAccountId);
+  const rows = (await store.listAccessibleMailboxes(context)).filter((row) => row.accountId === requestedAccountId);
+  if (requestedAccountId !== authenticatedAccountId && rows.length === 0) throw new MethodError("accountNotFound");
+  return { rows, context };
+}
+
+async function mailboxRights(store: Store, context: Awaited<ReturnType<typeof principalContext>>, row: MailboxRow): Promise<Record<string, unknown>> {
+  const [read, insert, write, remove, create] = await Promise.all([
+    store.authorizeMailbox(context, row.id, "read"),
+    store.authorizeMailbox(context, row.id, "insert"),
+    store.authorizeMailbox(context, row.id, "write"),
+    store.authorizeMailbox(context, row.id, "delete"),
+    store.authorizeMailbox(context, row.id, "create"),
+  ]);
+  return {
+    mayReadItems: read.allowed,
+    mayAddItems: insert.allowed,
+    mayRemoveItems: remove.allowed,
+    maySetSeen: write.allowed,
+    maySetKeywords: write.allowed,
+    mayCreateChild: create.allowed,
+    mayRename: remove.allowed && create.allowed,
+    mayDelete: remove.allowed,
+    maySubmit: false,
+  };
+}
+
+type ScopedJmapEntity = "email" | "mailbox" | "thread";
+type ScopedJmapState = "email" | "mailbox" | "thread";
+
+async function scopedJmapState(db: DbDriver, store: Store, authenticatedAccountId: string, requestedAccountId: string, entity: ScopedJmapState): Promise<string> {
+  const states = await store.jmapState(requestedAccountId);
+  if (requestedAccountId === authenticatedAccountId) return states[entity];
+  const context = await principalContext(db, authenticatedAccountId);
+  if ((await store.accessibleMailboxIds(context, requestedAccountId)).length === 0) throw new MethodError("accountNotFound");
+  return `${states[entity]}.${states.permission}`;
+}
+
+async function scopedJmapChanges(args: Record<string, unknown>, authenticatedAccountId: string, db: DbDriver, store: Store, entity: ScopedJmapEntity): Promise<Record<string, unknown>> {
+  const requestedAccountId = await requestedAccountIdFromArgs(args, authenticatedAccountId);
+  if (requestedAccountId === authenticatedAccountId) {
+    return standardChanges(args, authenticatedAccountId, { changes: (accountId, sinceState, maxChanges) => store.jmapChanges(accountId, entity, sinceState, maxChanges) });
+  }
+  if (typeof args.sinceState !== "string") throw new MethodError("invalidArguments", { description: "sinceState 누락" });
+  const context = await principalContext(db, authenticatedAccountId);
+  if ((await store.accessibleMailboxIds(context, requestedAccountId)).length === 0) throw new MethodError("accountNotFound");
+  const [sinceEntity, sincePermission, ...extra] = args.sinceState.split(".");
+  if (!sinceEntity || !sincePermission || extra.length > 0 || !/^\d+$/.test(sinceEntity) || !/^\d+$/.test(sincePermission)) throw new MethodError("cannotCalculateChanges");
+  const states = await store.jmapState(requestedAccountId);
+  if (sincePermission !== states.permission) throw new MethodError("cannotCalculateChanges");
+  let maxChanges = 256;
+  if (args.maxChanges !== undefined && args.maxChanges !== null) {
+    if (typeof args.maxChanges !== "number" || !Number.isInteger(args.maxChanges) || args.maxChanges < 1) throw new MethodError("invalidArguments", { description: "maxChanges는 양의 정수" });
+    maxChanges = args.maxChanges;
+  }
+  const result = await store.jmapChanges(requestedAccountId, entity, sinceEntity, maxChanges);
+  if (result.cannotCalculate) throw new MethodError("cannotCalculateChanges");
+  return {
+    accountId: requestedAccountId,
+    oldState: args.sinceState,
+    newState: `${result.newState}.${states.permission}`,
+    hasMoreChanges: result.hasMoreChanges,
+    created: result.created,
+    updated: result.updated,
+    destroyed: result.destroyed,
+  };
+}
+
+async function requestedAccountIdFromArgs(args: Record<string, unknown>, authenticatedAccountId: string): Promise<string> {
+  return requestedAccountId(args, authenticatedAccountId);
+}
+
+async function jmapMailboxGet(args: Record<string, unknown>, authenticatedAccountId: string, db: DbDriver, store: Store): Promise<Record<string, unknown>> {
+  const accountId = await requestedAccountId(args, authenticatedAccountId);
+  const { rows, context } = await accessibleJmapMailboxes(db, store, authenticatedAccountId, accountId);
+  const rights = new Map(await Promise.all(rows.map(async (row) => [row.id, await mailboxRights(store, context, row)] as const)));
+  const ids = args.ids;
+  if (ids !== null && ids !== undefined && (!Array.isArray(ids) || ids.some((id) => typeof id !== "string"))) throw new MethodError("invalidArguments");
+  const wanted = ids === null || ids === undefined ? rows : rows.filter((row) => (ids as string[]).includes(row.id));
+  const found = new Set(wanted.map((row) => row.id));
+  const notFound = ids === null || ids === undefined ? [] : (ids as string[]).filter((id) => !found.has(id));
+  return { accountId, state: await scopedJmapState(db, store, authenticatedAccountId, accountId, "mailbox"), list: wanted.map((row) => ({ ...toJmapMailbox(row), myRights: rights.get(row.id) ?? {} })), notFound };
 }
 
 /** message_addresses.kind → JMAP Email 주소 프로퍼티명. 인코딩은 @ionosphere/db 소유. */
@@ -166,13 +259,13 @@ export function buildMailModule(db: DbDriver, store: Store, blobs: BlobStore): C
   return {
     capability: MAIL_CAPABILITY,
     methods: {
-      "Mailbox/get": (args, ctx) => standardGet(args, ctx.accountId, mailboxGetSource),
-      "Mailbox/changes": (args, ctx) => standardChanges(args, ctx.accountId, mailboxChangesSource),
+      "Mailbox/get": (args, ctx) => jmapMailboxGet(args, ctx.accountId, db, store),
+      "Mailbox/changes": (args, ctx) => scopedJmapChanges(args, ctx.accountId, db, store, "mailbox"),
       "Mailbox/query": (args, ctx) => mailboxQuery(args, ctx.accountId, store),
       "Mailbox/set": (args, ctx) => standardSet(args, ctx.accountId, ctx, mailboxSetSource),
-      "Email/get": (args, ctx) => emailGet(args, ctx.accountId, store, blobs),
-      "Email/changes": (args, ctx) => standardChanges(args, ctx.accountId, emailChangesSource),
-      "Email/query": (args, ctx) => emailQuery(args, ctx.accountId, store),
+      "Email/get": (args, ctx) => emailGet(args, ctx.accountId, db, store, blobs),
+      "Email/changes": (args, ctx) => scopedJmapChanges(args, ctx.accountId, db, store, "email"),
+      "Email/query": (args, ctx) => emailQuery(args, ctx.accountId, db, store),
       "Email/set": (args, ctx) => standardSet(args, ctx.accountId, ctx, buildEmailSetSource(db, store, blobs)),
       "Email/import": (args, ctx) => emailImport(args, ctx, store, buildEmailSetSource(db, store, blobs)),
       "Email/copy": (args, ctx) => emailCopy(args, ctx.accountId),
@@ -186,8 +279,8 @@ export function buildMailModule(db: DbDriver, store: Store, blobs: BlobStore): C
       "Blob/copy": (args, ctx) => emailCopy(args, ctx.accountId),
       "Email/queryChanges": (args, ctx) => standardQueryChanges(args, ctx.accountId),
       "Mailbox/queryChanges": (args, ctx) => standardQueryChanges(args, ctx.accountId),
-      "Thread/get": (args, ctx) => standardGet(args, ctx.accountId, threadGetSource),
-      "Thread/changes": (args, ctx) => standardChanges(args, ctx.accountId, threadChangesSource),
+      "Thread/get": (args, ctx) => jmapThreadGet(args, ctx.accountId, db, store),
+      "Thread/changes": (args, ctx) => scopedJmapChanges(args, ctx.accountId, db, store, "thread"),
     },
   };
 }
@@ -705,8 +798,11 @@ function strArrayOrNull(v: unknown, field: string): string[] | null {
 }
 
 /** Email/get (RFC 8621 §4.6) — 메타는 DB, 본문 프로퍼티 요청 시에만 블롭 파싱. ids=null은 미지원. */
-async function emailGet(args: Record<string, unknown>, accountId: string, store: Store, blobs: BlobStore): Promise<Record<string, unknown>> {
-  const acc = requireAccountId(args, accountId);
+async function emailGet(args: Record<string, unknown>, accountId: string, db: DbDriver, store: Store, blobs: BlobStore): Promise<Record<string, unknown>> {
+  const acc = await requestedAccountId(args, accountId);
+  const context = await principalContext(db, accountId);
+  const allowedMailboxIds = await store.accessibleMailboxIds(context, acc);
+  if (acc !== accountId && allowedMailboxIds.length === 0) throw new MethodError("accountNotFound");
   const ids = strArrayOrNull(args.ids, "ids");
   if (ids === null) throw new MethodError("invalidArguments", { description: "Email/get은 ids 필수(Email/query로 먼저 조회)" });
   const properties = strArrayOrNull(args.properties, "properties") ?? DEFAULT_EMAIL_PROPS;
@@ -719,8 +815,8 @@ async function emailGet(args: Record<string, unknown>, accountId: string, store:
   // 본문/헤더 파생 프로퍼티가 하나라도 요청되면 블롭 파싱 필요
   const needBody = properties.some((p) => !CHEAP_EMAIL_PROPS.has(p));
 
-  const state = (await store.jmapState(acc)).email;
-  const metas = await store.getEmailsForJmap(acc, ids);
+  const state = await scopedJmapState(db, store, accountId, acc, "email");
+  const metas = await store.getEmailsForJmap(acc, ids, allowedMailboxIds);
   const byId = new Map(metas.map((m) => [m.id, m]));
 
   const list: JmapObject[] = [];
@@ -796,9 +892,12 @@ function project(obj: JmapObject, props: Set<string>): JmapObject {
 }
 
 /** Email/query (RFC 8621 §4.4, v1) — inMailbox/날짜/크기/키워드 필터 + receivedAt 정렬. */
-async function emailQuery(args: Record<string, unknown>, accountId: string, store: Store): Promise<Record<string, unknown>> {
-  const acc = requireAccountId(args, accountId);
-  const state = (await store.jmapState(acc)).email;
+async function emailQuery(args: Record<string, unknown>, accountId: string, db: DbDriver, store: Store): Promise<Record<string, unknown>> {
+  const acc = await requestedAccountId(args, accountId);
+  const context = await principalContext(db, accountId);
+  const allowedMailboxIds = await store.accessibleMailboxIds(context, acc);
+  if (acc !== accountId && allowedMailboxIds.length === 0) throw new MethodError("accountNotFound");
+  const state = await scopedJmapState(db, store, accountId, acc, "email");
 
   const filter: JmapEmailFilter = {};
   if (args.filter !== undefined && args.filter !== null) {
@@ -833,8 +932,22 @@ async function emailQuery(args: Record<string, unknown>, accountId: string, stor
 
   const position = typeof args.position === "number" && args.position >= 0 ? args.position : 0;
   const limit = typeof args.limit === "number" && args.limit >= 0 ? Math.min(args.limit, 500) : 500;
-  const { ids, total } = await store.queryEmails(acc, filter, ascending, position, limit);
+  const { ids, total } = await store.queryEmails(acc, filter, ascending, position, limit, allowedMailboxIds);
   return { accountId: acc, queryState: state, canCalculateChanges: false, position, total, limit, ids };
+}
+
+async function jmapThreadGet(args: Record<string, unknown>, accountId: string, db: DbDriver, store: Store): Promise<Record<string, unknown>> {
+  const acc = await requestedAccountId(args, accountId);
+  const ids = args.ids;
+  if (ids !== null && ids !== undefined && (!Array.isArray(ids) || ids.some((id) => typeof id !== "string"))) throw new MethodError("invalidArguments");
+  const context = await principalContext(db, accountId);
+  const allowedMailboxIds = await store.accessibleMailboxIds(context, acc);
+  if (acc !== accountId && allowedMailboxIds.length === 0) throw new MethodError("accountNotFound");
+  const threads = await store.getThreadsForJmap(acc, ids === null || ids === undefined ? null : ids as string[], allowedMailboxIds);
+  const list = threads.map((thread) => ({ id: thread.id, emailIds: thread.emailIds }));
+  const found = new Set(list.map((thread) => thread.id));
+  const notFound = ids === null || ids === undefined ? [] : (ids as string[]).filter((id) => !found.has(id));
+  return { accountId: acc, state: await scopedJmapState(db, store, accountId, acc, "thread"), list, notFound };
 }
 
 /**

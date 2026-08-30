@@ -26,7 +26,7 @@ import type {
 
 export async function jmapState(s: StoreInternals, accountId: string): Promise<JmapStates> {
   const { rows } = await s.db.query({
-    sql: "SELECT state_email, state_mailbox, state_thread, state_submission, state_identity FROM accounts WHERE id = ?",
+    sql: "SELECT state_email, state_mailbox, state_thread, state_submission, state_identity, permissions_version FROM accounts WHERE id = ?",
     params: [accountId],
   });
   const row = rows[0];
@@ -37,6 +37,7 @@ export async function jmapState(s: StoreInternals, accountId: string): Promise<J
     thread: String(Number(row.state_thread)),
     submission: String(Number(row.state_submission)),
     identity: String(Number(row.state_identity ?? 0)),
+    permission: String(Number(row.permissions_version ?? 0)),
   };
 }
 
@@ -128,19 +129,21 @@ export async function jmapChanges(s: StoreInternals, accountId: string, entity: 
  * JMAP Email/get 메타 조회 — 메시지 + membership + 키워드 + 주소를 계정 스코프로.
  * 본문(bodyStructure/bodyValues)은 어댑터가 blobId로 별도 조회(여기선 blobId/generation만).
  */
-export async function getEmailsForJmap(s: StoreInternals, accountId: string, ids: readonly string[]): Promise<JmapEmailMeta[]> {
-  if (ids.length === 0) return [];
+export async function getEmailsForJmap(s: StoreInternals, accountId: string, ids: readonly string[], allowedMailboxIds?: readonly string[]): Promise<JmapEmailMeta[]> {
+  if (ids.length === 0 || allowedMailboxIds?.length === 0) return [];
   const out: JmapEmailMeta[] = [];
   for (const idChunk of chunk([...ids], rowsPerStatement(1) - 1)) {
     // lint-allow chunked-in-query: 바깥 chunk() 루프가 이미 한도를 건다(청크당 99개).
     const ph = idChunk.map(() => "?").join(", ");
+    // lint-allow chunked-in-query: ACL mailbox 집합은 호출 전에 queryInChunks와 같은 100개 경계로 제한해야 한다.
+    const mailboxCondition = allowedMailboxIds === undefined ? "" : ` AND EXISTS (SELECT 1 FROM message_mailbox access_mm WHERE access_mm.message_id = m.id AND access_mm.mailbox_id IN (${allowedMailboxIds.map(() => "?").join(", ")}))`;
     const { rows } = await s.db.query({
       sql: `SELECT m.id AS id, m.blob_id AS blob_id, m.thread_id AS thread_id, m.size_bytes AS size_bytes,
                    m.received_at AS received_at, m.subject AS subject, m.sent_at AS sent_at,
                    m.has_attachment AS has_attachment, m.preview AS preview, b.generation AS generation
             FROM messages m LEFT JOIN blobs b ON b.id = m.blob_id
-            WHERE m.account_id = ? AND m.id IN (${ph})`,
-      params: [accountId, ...idChunk],
+            WHERE m.account_id = ?${mailboxCondition} AND m.id IN (${ph})`,
+      params: [accountId, ...(allowedMailboxIds ?? []), ...idChunk],
     });
     if (rows.length === 0) continue;
     const foundIds = rows.map((r) => String(r.id));
@@ -151,7 +154,7 @@ export async function getEmailsForJmap(s: StoreInternals, accountId: string, ids
       s.db.query({ sql: `SELECT message_id, keyword FROM message_keywords WHERE message_id IN (${idPh})`, params: foundIds }),
       s.db.query({ sql: `SELECT message_id, kind, name, email FROM message_addresses WHERE message_id IN (${idPh}) ORDER BY kind, pos`, params: foundIds }),
     ]);
-    const mailboxIds = groupBy(mmRes.rows, (r) => String(r.message_id), (r) => String(r.mailbox_id));
+    const mailboxIds = groupBy(mmRes.rows.filter((r) => allowedMailboxIds === undefined || allowedMailboxIds.includes(String(r.mailbox_id))), (r) => String(r.message_id), (r) => String(r.mailbox_id));
     const keywords = groupBy(kwRes.rows, (r) => String(r.message_id), (r) => String(r.keyword));
     // DB 행 → 타입 경계: 알 수 없는 kind는 버린다(스키마 변경 중 잔존 행 방어).
     const addresses = groupBy(addrRes.rows.filter((r) => isAddressKind(Number(r.kind))), (r) => String(r.message_id), (r) => ({
@@ -185,9 +188,14 @@ export async function getEmailsForJmap(s: StoreInternals, accountId: string, ids
  * JMAP Email/query (RFC 8621 §4.4, v1 부분집합) — inMailbox/날짜/크기/키워드 필터 + receivedAt 정렬.
  * receivedAt DESC 기본(가장 흔한 뷰). 반환은 메시지 id + total.
  */
-export async function queryEmails(s: StoreInternals, accountId: string, filter: JmapEmailFilter, ascending: boolean, position: number, limit: number): Promise<JmapEmailQueryResult> {
+export async function queryEmails(s: StoreInternals, accountId: string, filter: JmapEmailFilter, ascending: boolean, position: number, limit: number, allowedMailboxIds?: readonly string[]): Promise<JmapEmailQueryResult> {
   const conds: string[] = ["m.account_id = ?"];
   const params: unknown[] = [accountId];
+  if (allowedMailboxIds !== undefined) {
+    if (allowedMailboxIds.length === 0) return { ids: [], total: 0 };
+    conds.push(`EXISTS (SELECT 1 FROM message_mailbox access_mm WHERE access_mm.message_id = m.id AND access_mm.mailbox_id IN (${allowedMailboxIds.map(() => "?").join(", ")}))`);
+    params.push(...allowedMailboxIds);
+  }
   if (filter.inMailbox) {
     conds.push("EXISTS (SELECT 1 FROM message_mailbox mm WHERE mm.message_id = m.id AND mm.mailbox_id = ?)");
     params.push(filter.inMailbox);
@@ -258,15 +266,17 @@ export async function queryEmails(s: StoreInternals, accountId: string, filter: 
  * JMAP Thread/get (RFC 8621 §3) — threadId별 소속 이메일 id(receivedAt 순). ids=null이면 전체 스레드.
  * 스레드는 ≥1 메시지가 그 thread_id를 가질 때만 "존재".
  */
-export async function getThreadsForJmap(s: StoreInternals, accountId: string, ids: readonly string[] | null): Promise<{ id: string; emailIds: string[] }[]> {
+export async function getThreadsForJmap(s: StoreInternals, accountId: string, ids: readonly string[] | null, allowedMailboxIds?: readonly string[]): Promise<{ id: string; emailIds: string[] }[]> {
+  if (allowedMailboxIds?.length === 0) return [];
   // 클라이언트가 주는 id 목록은 유계가 아니다 — 한도 안에서 나눠 돌린다(store/chunk.ts).
+  const access = allowedMailboxIds === undefined ? "" : ` AND EXISTS (SELECT 1 FROM message_mailbox access_mm WHERE access_mm.message_id = messages.id AND access_mm.mailbox_id IN (${allowedMailboxIds.map(() => "?").join(", ")}))`;
   const selectRows = (ph: string): string =>
-    `SELECT id, thread_id FROM messages WHERE account_id = ?${ph === "" ? "" : ` AND thread_id IN (${ph})`} ORDER BY thread_id, received_at, id`;
+    `SELECT id, thread_id FROM messages WHERE account_id = ?${access}${ph === "" ? "" : ` AND thread_id IN (${ph})`} ORDER BY thread_id, received_at, id`;
   if (ids !== null && ids.length === 0) return [];
   const rows =
     ids === null
-      ? (await s.db.query({ sql: selectRows(""), params: [accountId] })).rows
-      : await queryInChunks(s.db, ids, selectRows, [accountId]);
+      ? (await s.db.query({ sql: selectRows(""), params: [accountId, ...(allowedMailboxIds ?? [])] })).rows
+      : await queryInChunks(s.db, ids, selectRows, [accountId, ...(allowedMailboxIds ?? [])]);
   const byThread = new Map<string, string[]>();
   for (const r of rows) {
     const tid = String(r.thread_id);

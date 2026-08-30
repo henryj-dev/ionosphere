@@ -35,7 +35,10 @@ function translate(sql: string): { sql: string; idempotentIndex: boolean; idempo
   const quoted = quoteReserved(sql);
   const indexRe = /^(\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+)IF\s+NOT\s+EXISTS\s+/i;
   if (indexRe.test(quoted)) {
-    return { sql: quoted.replace(/\s+IF\s+NOT\s+EXISTS\s+/i, " "), idempotentIndex: true, idempotentColumn: false };
+    // MySQL은 TEXT를 길이 없이 인덱싱할 수 없다. 정렬 키의 앞부분만 인덱싱하고
+    // 원문 TEXT는 그대로 보존한다 — SQLite/PG의 전체 인덱스 의미는 유지한다.
+    const mysqlIndex = quoted.replace(/\bsort_value\s*,\s*message_id\b/gi, "sort_value(512), message_id");
+    return { sql: mysqlIndex.replace(/\s+IF\s+NOT\s+EXISTS\s+/i, " "), idempotentIndex: true, idempotentColumn: false };
   }
   // MySQL엔 ADD COLUMN IF NOT EXISTS가 없다(MariaDB에만 있다) — 실행하고 중복 오류를 흡수한다.
   return { sql: quoted, idempotentIndex: false, idempotentColumn: isAddColumn(quoted) };

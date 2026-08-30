@@ -1,0 +1,58 @@
+{
+  "phase": "P8",
+  "sealed": true,
+  "head": "87ad1df0f5acfcc3d924bf32ef17adbbf7ee1d56",
+  "at": "2026-08-30T11:55:05.423Z",
+  "waived": false,
+  "reason": null,
+  "checks": [
+    {
+      "id": "G-P8.1",
+      "ok": true,
+      "measured": 0,
+      "limit": 0
+    },
+    {
+      "id": "G-P8.2",
+      "ok": true,
+      "measured": 0,
+      "limit": 0
+    },
+    {
+      "id": "G-P8.3",
+      "ok": true,
+      "measured": 1,
+      "limit": 1
+    },
+    {
+      "id": "G-P8.4",
+      "ok": true,
+      "measured": 1,
+      "limit": 1
+    },
+    {
+      "id": "G-P8.5",
+      "ok": true,
+      "measured": 1,
+      "limit": 1
+    },
+    {
+      "id": "G-P8.6",
+      "ok": true,
+      "measured": 3,
+      "limit": 1
+    },
+    {
+      "id": "G-P8.7",
+      "ok": true,
+      "measured": 0,
+      "limit": 0
+    },
+    {
+      "id": "G-P8.8",
+      "ok": true,
+      "measured": 0,
+      "limit": 0
+    }
+  ]
+}

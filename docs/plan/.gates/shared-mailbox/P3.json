@@ -1,0 +1,40 @@
+{
+  "phase": "P3",
+  "sealed": true,
+  "head": "d56e09157e3444ba34a5cbc2e2d119e232b173f6",
+  "at": "2026-08-30T11:15:50.711Z",
+  "waived": false,
+  "reason": null,
+  "checks": [
+    {
+      "id": "G-P3.1",
+      "ok": true,
+      "measured": 8,
+      "limit": 1
+    },
+    {
+      "id": "G-P3.2",
+      "ok": true,
+      "measured": 3,
+      "limit": 1
+    },
+    {
+      "id": "G-P3.3",
+      "ok": true,
+      "measured": 0,
+      "limit": 0
+    },
+    {
+      "id": "G-P3.4",
+      "ok": true,
+      "measured": 0,
+      "limit": 0
+    },
+    {
+      "id": "G-P3.5",
+      "ok": true,
+      "measured": 0,
+      "limit": 0
+    }
+  ]
+}

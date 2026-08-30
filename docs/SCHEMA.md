@@ -2,7 +2,7 @@
 
 > 상태: **동결** (v1 → 이중 리뷰 → v2 → 이중 재검증 → v2.1) · 전제: [PLAN.md](../PLAN.md) + [PROTOCOLS.md](PROTOCOLS.md) §0
 >
-> **적용된 마이그레이션(2026-08-12 기준 010까지)** — 정본은 `packages/db/src/migrations/`다.
+> **적용된 마이그레이션(2026-08-30 기준 022까지)** — 정본은 `packages/db/src/migrations/`다.
 > 코어 DDL은 001이고, 그 뒤는 아래 절에 따로 적었다:
 >
 > | # | 이름 | 어디에 |
@@ -17,6 +17,19 @@
 > | 008 | suppression_expiry | §9-2b |
 > | 009 | complaints | **§9-2c** |
 > | 010 | bayes_tokens | **§9-2d** |
+> | 011 | queue_indexes | §9-4 |
+> | 012 | dsn_delay_notice | §9-4 |
+> | 013 | vacation | §9-2 |
+> | 014 | expunged_floor | §6-3 |
+> | 015 | vacation_response | §9-2 |
+> | 016 | dsn_params | §9-4 |
+> | 017 | reporting | §9-4 |
+> | 018 | push_subscriptions | §9-2 |
+> | 019 | identity_state | §4 |
+> | 020 | mailbox_acl | **§4-1** |
+> | 021 | directory_identity | **§4-2** |
+> | 022 | header_projection | **§5-4** |
+> | 023 | listing_indexes | **§5-5** |
 >
 > ⚠ 새 마이그레이션을 넣으면 **이 표와 해당 절을 같이 갱신할 것.** 009·010이 한동안 코드에만
 > 있고 이 문서에 없었다 — "동결 스키마"를 자처하는 문서가 실제 테이블을 빠뜨리면, 그것을 읽고
@@ -165,6 +178,7 @@ CREATE TABLE accounts (
   state_thread      BIGINT NOT NULL DEFAULT 0,
   state_submission  BIGINT NOT NULL DEFAULT 0,
   state_sieve       BIGINT NOT NULL DEFAULT 0,      -- Phase 4 (RFC 9661 SieveScript/changes) 예약
+  permissions_version BIGINT NOT NULL DEFAULT 0,    -- 공유 메일함 권한 캐시 무효화 세대 (020)
   created_at        BIGINT NOT NULL
 );
 CREATE UNIQUE INDEX ux_accounts_email ON accounts(email);
@@ -222,6 +236,79 @@ CREATE TABLE api_keys (
 CREATE INDEX ix_api_keys_tenant ON api_keys(tenant_id);
 ```
 
+### 4-1. 공유 메일함 주체·ACL (마이그레이션 020)
+
+```sql
+CREATE TABLE principals (
+  id            VARCHAR(26) PRIMARY KEY,
+  tenant_id     VARCHAR(26) NOT NULL,
+  kind          SMALLINT NOT NULL,                  -- account / group / anyone / authenticated
+  account_id    VARCHAR(26),                         -- 로컬 계정 주체일 때만 채움
+  provider      VARCHAR(32),                         -- local / ldap / ad
+  external_key  VARCHAR(255),                       -- provider 내부의 안정적인 식별자
+  display_name  VARCHAR(255),
+  created_at    BIGINT NOT NULL
+);
+CREATE UNIQUE INDEX ux_principals_account ON principals(tenant_id, account_id);
+CREATE UNIQUE INDEX ux_principals_external ON principals(tenant_id, kind, provider, external_key);
+
+CREATE TABLE mailbox_acl (
+  mailbox_id    VARCHAR(26) NOT NULL,
+  principal_id  VARCHAR(26) NOT NULL,
+  rights        VARCHAR(32) NOT NULL,               -- standard right만 저장; c/d는 앱에서 확장
+  negative      SMALLINT NOT NULL DEFAULT 0,        -- 예약 필드; 020에서는 양수 ACL만 허용
+  created_at    BIGINT NOT NULL,
+  updated_at    BIGINT NOT NULL,
+  PRIMARY KEY (mailbox_id, principal_id)
+);
+CREATE INDEX ix_mailbox_acl_principal ON mailbox_acl(principal_id, mailbox_id);
+
+CREATE TABLE account_memberships (
+  account_id    VARCHAR(26) NOT NULL,
+  principal_id  VARCHAR(26) NOT NULL,
+  source        VARCHAR(32) NOT NULL,               -- local / ldap / ad
+  created_at    BIGINT NOT NULL,
+  PRIMARY KEY (account_id, principal_id)
+);
+CREATE INDEX ix_account_memberships_principal ON account_memberships(principal_id, account_id);
+```
+
+`principals`는 `tenant_id`와 directory `provider`를 함께 키 범위에 넣어 동일한 외부 식별자가
+다른 테넌트·디렉터리에서 충돌하지 않게 한다. FK는 공통 DDL 정책상 두지 않으며, 주체·ACL·멤버십
+삭제는 Store의 한 원자 배치에서 역순으로 처리한다.
+
+### 4-2. LDAP/AD directory identity (마이그레이션 021)
+
+```sql
+CREATE TABLE directory_identities (
+  id            VARCHAR(26) PRIMARY KEY,
+  tenant_id     VARCHAR(26) NOT NULL,
+  provider      VARCHAR(32) NOT NULL,
+  external_key  VARCHAR(512) NOT NULL,                -- objectGUID 우선, objectSid fallback
+  account_id    VARCHAR(26),
+  login_names   TEXT NOT NULL,                        -- UPN·sAMAccountName JSON 배열
+  email         VARCHAR(255),
+  display_name  VARCHAR(255),
+  last_seen_at  BIGINT NOT NULL,
+  status        SMALLINT NOT NULL DEFAULT 1
+);
+CREATE UNIQUE INDEX ux_directory_identity ON directory_identities(tenant_id, provider, external_key);
+
+CREATE TABLE directory_group_members (
+  tenant_id          VARCHAR(26) NOT NULL,
+  provider            VARCHAR(32) NOT NULL,
+  group_external_key  VARCHAR(512) NOT NULL,
+  member_external_key VARCHAR(512) NOT NULL,
+  group_external_hash CHAR(64) NOT NULL,
+  member_external_hash CHAR(64) NOT NULL,
+  last_seen_at        BIGINT NOT NULL,
+  PRIMARY KEY (tenant_id, provider, group_external_hash, member_external_hash)
+);
+```
+
+동기화는 완전 snapshot을 한 배치로 반영한다. 조회 실패 때는 호출하지 않고 기존 행을 삭제하지
+않으며, 성공한 snapshot에서 제거된 membership만 정리한 뒤 관련 `permissions_version`을 증가시킨다.
+
 ## 5. DDL — 메일 스토어 코어
 
 ### 5-1. mailboxes
@@ -237,6 +324,7 @@ CREATE TABLE mailboxes (
   uidvalidity   BIGINT NOT NULL,                    -- max(epoch초, accounts.uidvalidity_last+1); 발급 시 uidvalidity_last 갱신
   uidnext       BIGINT NOT NULL DEFAULT 1,
   highestmodseq BIGINT NOT NULL DEFAULT 0,
+  acl_version   BIGINT NOT NULL DEFAULT 0,          -- ACL 변경 시 증가하는 권한 캐시 세대 (020)
   subscribed    SMALLINT NOT NULL DEFAULT 1,
   sort_order    BIGINT NOT NULL DEFAULT 0,
   total_count   BIGINT NOT NULL DEFAULT 0,
@@ -288,6 +376,42 @@ CREATE TABLE message_mailbox (
 CREATE UNIQUE INDEX ux_mm_message ON message_mailbox(mailbox_id, message_id);
 CREATE INDEX ix_mm_by_message ON message_mailbox(message_id);
 ```
+
+### 5-4. typed header projection (마이그레이션 022)
+
+`message_header_projection`은 allowlist 11개만 저장하는 읽기 모델이다. `date`는 epoch,
+주소/참조는 JSON, 나머지는 display/sort 문자열로 분리한다. display 16 KiB, sort 4 KiB,
+header occurrence 32개 상한은 projection에만 적용하고 MIME blob 원본은 보존한다.
+
+```sql
+CREATE TABLE message_header_projection (
+  message_id    VARCHAR(26) NOT NULL,
+  occurrence    SMALLINT NOT NULL,
+  name          VARCHAR(190) NOT NULL,
+  kind          VARCHAR(16) NOT NULL,
+  display_value TEXT NOT NULL,
+  sort_value    TEXT NOT NULL,
+  date_value    BIGINT,
+  address_value TEXT,
+  PRIMARY KEY (message_id, name, occurrence)
+);
+CREATE INDEX ix_header_projection_date ON message_header_projection(name, date_value, message_id);
+CREATE INDEX ix_header_projection_sort ON message_header_projection(name, sort_value, message_id);
+```
+
+### 5-5. listing indexes (마이그레이션 023)
+
+UID 순서와 subject/header 정렬의 선두 인덱스를 추가한다. 목록 캐시는 프로세스 메모리의 bounded
+LRU일 뿐이며, mailbox modseq와 ACL/permissions version이 바뀌면 key가 달라져 DB 결과를 다시 읽는다.
+
+```sql
+CREATE INDEX ix_mm_listing ON message_mailbox(mailbox_id, uid, message_id);
+CREATE INDEX ix_messages_subject_sort ON messages(account_id, subject_base, id);
+CREATE INDEX ix_header_projection_listing ON message_header_projection(name, sort_value, message_id);
+```
+
+MySQL에서는 `sort_value`가 TEXT이므로 어댑터가 해당 인덱스의 정렬 키를 512자 prefix로 변환한다.
+원문 projection은 TEXT로 보존하고, SQLite·PostgreSQL에서는 전체 값을 인덱싱한다.
 
 - IMAP `FETCH (MODSEQ)`/`CHANGEDSINCE` = `message_mailbox ⋈ messages WHERE messages.modseq > ?`.
 - COPY 대상에 이미 있는 메시지: `ux_mm_message` 충돌 → **앱이 스냅샷에서 선검사해 no-op** (계약).

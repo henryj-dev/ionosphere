@@ -47,9 +47,11 @@ export {
 export { StoreConflictError, StoreError, StoreQuotaError } from "./errors.ts";
 export { DbMaildropLock, type DbMaildropLockOptions } from "./maildrop-lock.ts";
 export { Store } from "./store.ts";
+export { authorizeMailbox, deleteMailboxAcl, getMailboxAcl, setMailboxAcl, type MailboxAclRow, type MailboxAuthorization } from "./authorization.ts";
 export { tokenize, tokenizeQuery } from "./tokenize.ts";
 export type {
   AccountRow,
+  AccessibleAccount,
   AppendAddress,
   AppendEnvelope,
   AppendMessageInput,
@@ -87,6 +89,9 @@ export { scramSegment, buildScramSegment, scramKeysFor, scramAuthorize, type Sto
 // 여기 나가는 것은 표면 이름 목록과 판정 함수다(관리 명령이 입력 검증에 쓴다).
 export { AUTH_SURFACES, credentialAllowsSurface, type AuthSurface } from "./auth.ts";
 export { createBayesStore } from "./bayes-store.ts";
+export { syncDirectorySnapshot, type DirectoryGroupSync, type DirectoryIdentitySync, type DirectorySyncInput } from "./directory-sync.ts";
+export { backfillHeaderProjection, projectHeaders, HEADER_PROJECTION_LIMITS, HEADER_PROJECTION_NAMES, type HeaderBackfillOptions, type HeaderProjection, type HeaderProjectionKind, type HeaderProjectionName } from "./header-projection.ts";
+export { getOrLoadListing, listingCacheKey, ListingCache, LISTING_CACHE_LIMITS, type ListingCacheKeyParts, type ListingCacheOptions } from "./listing-cache.ts";
 
 /**
  * `IN (…)` 읽기 질의의 파라미터 청크 헬퍼 — 조립층(IMAP 백엔드)도 같은 한도를 지켜야 한다.

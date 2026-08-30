@@ -7,7 +7,7 @@
  * - "재시도 가능한 클레임 경합" vs "시맨틱 충돌"(이름 중복 등)을 구분: 후자는 스냅샷
  *   재검증 단계에서 즉시 StoreError를 던지고 재시도 루프에 진입하지 않는다.
  */
-import { ulid } from "@ionosphere/core";
+import { ulid, type MailboxOperation, type PrincipalContext } from "@ionosphere/core";
 import {
   BatchConflictError,
   BLOB_STATUS,
@@ -61,6 +61,7 @@ import {
 import { tokenize, tokenizeQuery } from "./tokenize.ts";
 import type {
   AccountRow,
+  AccessibleAccount,
   AppendMessageInput,
   AppendMessageResult,
   AppendSearchText,
@@ -92,6 +93,7 @@ import type {
   TenantUsage,
 } from "./types.ts";
 import { WriterQueue } from "./writer-queue.ts";
+import { authorizeMailbox as authorizeMailboxAccess, deleteMailboxAcl, getMailboxAcl, setMailboxAcl, type MailboxAclRow, type MailboxAuthorization } from "./authorization.ts";
 
 /** change_log.entity (SCHEMA.md §6-1) — enum 금지 정책이라 평범한 상수 객체로. */
 /** change_log.kind (SCHEMA.md §6-1). */
@@ -207,6 +209,56 @@ export class Store {
     };
   }
 
+  /** 프로토콜 어댑터가 모든 mailboxId 진입 전에 호출하는 단일 권한 관문. */
+  async authorizeMailbox(context: PrincipalContext, mailboxId: string, operation: MailboxOperation): Promise<MailboxAuthorization> {
+    return authorizeMailboxAccess(this.db, context, mailboxId, operation);
+  }
+
+  /** LIST/namespace가 사용할 메일함 집합. ACL 없는 mailboxId는 결과에서 제거한다. */
+  async listAccessibleMailboxes(context: PrincipalContext): Promise<MailboxRow[]> {
+    const { rows } = await this.db.query({
+      sql: `SELECT m.* FROM mailboxes m JOIN accounts a ON a.id = m.account_id
+            WHERE a.tenant_id = ? AND a.status = 1 AND m.status = 1 ORDER BY m.account_id, m.id`,
+      params: [context.tenantId],
+    });
+    const decisions = await Promise.all(rows.map((row) => authorizeMailboxAccess(this.db, context, String(row.id), "lookup")));
+    return rows.filter((_, index) => decisions[index]?.allowed === true).map(mapMailboxRow);
+  }
+
+  /** JMAP Session이 노출할 계정. ACL로 실제 접근 가능한 mailbox가 있는 계정만 반환한다. */
+  async listAccessibleAccounts(context: PrincipalContext): Promise<AccessibleAccount[]> {
+    const mailboxes = await this.listAccessibleMailboxes(context);
+    const accountIds = [...new Set(mailboxes.map((mailbox) => mailbox.accountId))];
+    if (!accountIds.includes(context.primaryAccountId)) accountIds.push(context.primaryAccountId);
+    const rows = await queryInChunks(
+      this.db,
+      accountIds,
+      (ph) => `SELECT id, email, kind FROM accounts WHERE tenant_id = ? AND status = 1 AND id IN (${ph})`,
+      [context.tenantId],
+    );
+    const byId = new Map(rows.map((row) => [String(row.id), { id: String(row.id), email: String(row.email), kind: Number(row.kind) }]));
+    return accountIds.flatMap((id) => {
+      const account = byId.get(id);
+      return account ? [account] : [];
+    });
+  }
+
+  async accessibleMailboxIds(context: PrincipalContext, accountId: string): Promise<string[]> {
+    return (await this.listAccessibleMailboxes(context)).filter((row) => row.accountId === accountId).map((row) => row.id);
+  }
+
+  async getMailboxAcl(tenantId: string, mailboxId: string): Promise<MailboxAclRow[]> {
+    return getMailboxAcl(this.db, tenantId, mailboxId);
+  }
+
+  async setMailboxAcl(tenantId: string, mailboxId: string, principalId: string, rights: string): Promise<void> {
+    return setMailboxAcl(this.db, tenantId, mailboxId, principalId, rights);
+  }
+
+  async deleteMailboxAcl(tenantId: string, mailboxId: string, principalId: string): Promise<boolean> {
+    return deleteMailboxAcl(this.db, tenantId, mailboxId, principalId);
+  }
+
   // ── 재시도 루프 (§3-3/§7-8) ────────────────────────────────────────────
   private async withRetry<T>(fn: () => Promise<T>): Promise<T> {
     let lastErr: unknown;
@@ -262,8 +314,10 @@ export class Store {
     if (tenantRows.length === 0) throw new StoreError(`tenant not found: ${input.tenantId}`);
 
     const accountId = ulid();
+    const principalId = ulid();
     const mailboxId = ulid();
     const now = Date.now();
+    const accountKind = input.kind ?? 0;
     // §5-1: max(epoch초, uidvalidity_last+1). 신규 계정의 uidvalidity_last 초기값은 0.
     const uidvalidity = Math.max(Math.floor(now / 1000), 1);
 
@@ -271,8 +325,8 @@ export class Store {
       await this.db.batch([
         {
           sql: `INSERT INTO accounts (id, tenant_id, email, kind, status, modseq, changelog_floor, uidvalidity_last, quota_bytes, used_bytes, message_count, state_email, state_mailbox, state_thread, state_submission, state_sieve, created_at)
-                VALUES (?, ?, ?, 0, 1, 0, 0, ?, 0, 0, 0, 0, 0, 0, 0, 0, ?)`,
-          params: [accountId, input.tenantId, email, uidvalidity, now],
+                VALUES (?, ?, ?, ?, 1, 0, 0, ?, 0, 0, 0, 0, 0, 0, 0, 0, ?)`,
+          params: [accountId, input.tenantId, email, accountKind, uidvalidity, now],
         },
         {
           // 계정 생성 시 INBOX 자동 생성 (role='inbox') — 아직 어떤 클라이언트도 관측할 수 없는
@@ -281,6 +335,10 @@ export class Store {
           sql: `INSERT INTO mailboxes (id, account_id, parent_id, name, role, status, uidvalidity, uidnext, highestmodseq, subscribed, sort_order, total_count, unread_count, total_bytes, created_at)
                 VALUES (?, ?, '', 'INBOX', 'inbox', 1, ?, 1, 0, 1, 0, 0, 0, 0, ?)`,
           params: [mailboxId, accountId, uidvalidity, now],
+        },
+        {
+          sql: "INSERT INTO principals (id, tenant_id, kind, account_id, provider, created_at) VALUES (?, ?, 0, ?, 'local', ?)",
+          params: [principalId, input.tenantId, accountId, now],
         },
       ]);
     } catch (err) {
@@ -2025,8 +2083,8 @@ export class Store {
     return jmapChanges(this.internals, accountId, entity, sinceState, maxChanges);
   }
 
-  getEmailsForJmap(accountId: string, ids: readonly string[]): Promise<JmapEmailMeta[]> {
-    return getEmailsForJmap(this.internals, accountId, ids);
+  getEmailsForJmap(accountId: string, ids: readonly string[], allowedMailboxIds?: readonly string[]): Promise<JmapEmailMeta[]> {
+    return getEmailsForJmap(this.internals, accountId, ids, allowedMailboxIds);
   }
 
   /** `SearchSnippet/get`용 원문 — `message_text`의 유일한 독자다(jmap-store.ts 주석 참조). */
@@ -2034,12 +2092,12 @@ export class Store {
     return getMessageTextForSnippets(this.internals, accountId, ids);
   }
 
-  queryEmails(accountId: string, filter: JmapEmailFilter, ascending: boolean, position: number, limit: number): Promise<JmapEmailQueryResult> {
-    return queryEmails(this.internals, accountId, filter, ascending, position, limit);
+  queryEmails(accountId: string, filter: JmapEmailFilter, ascending: boolean, position: number, limit: number, allowedMailboxIds?: readonly string[]): Promise<JmapEmailQueryResult> {
+    return queryEmails(this.internals, accountId, filter, ascending, position, limit, allowedMailboxIds);
   }
 
-  getThreadsForJmap(accountId: string, ids: readonly string[] | null): Promise<{ id: string; emailIds: string[] }[]> {
-    return getThreadsForJmap(this.internals, accountId, ids);
+  getThreadsForJmap(accountId: string, ids: readonly string[] | null, allowedMailboxIds?: readonly string[]): Promise<{ id: string; emailIds: string[] }[]> {
+    return getThreadsForJmap(this.internals, accountId, ids, allowedMailboxIds);
   }
 
   getIdentities(accountId: string): Promise<{ id: string; email: string; name: string | null; replyTo: string | null; textSignature: string; htmlSignature: string }[]> {

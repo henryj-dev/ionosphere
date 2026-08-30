@@ -1,0 +1,70 @@
+{
+  "phase": "P4",
+  "sealed": true,
+  "head": "1e50d73997d8f15785c97b3ff5f43b6088e464f3",
+  "at": "2026-08-30T11:20:31.935Z",
+  "waived": false,
+  "reason": null,
+  "checks": [
+    {
+      "id": "G-P4.1",
+      "ok": true,
+      "measured": 0,
+      "limit": 0
+    },
+    {
+      "id": "G-P4.2",
+      "ok": true,
+      "measured": 0,
+      "limit": 0
+    },
+    {
+      "id": "G-P4.3",
+      "ok": true,
+      "measured": 0,
+      "limit": 0
+    },
+    {
+      "id": "G-P4.4",
+      "ok": true,
+      "measured": 5,
+      "limit": 1
+    },
+    {
+      "id": "G-P4.5",
+      "ok": true,
+      "measured": 1,
+      "limit": 1
+    },
+    {
+      "id": "G-P4.6",
+      "ok": true,
+      "measured": 1,
+      "limit": 1
+    },
+    {
+      "id": "G-P4.7",
+      "ok": true,
+      "measured": 0,
+      "limit": 0
+    },
+    {
+      "id": "G-P4.8",
+      "ok": true,
+      "measured": 21,
+      "limit": 1
+    },
+    {
+      "id": "G-P4.9",
+      "ok": true,
+      "measured": 0,
+      "limit": 0
+    },
+    {
+      "id": "G-P4.10",
+      "ok": true,
+      "measured": 0,
+      "limit": 0
+    }
+  ]
+}

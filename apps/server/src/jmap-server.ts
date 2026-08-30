@@ -41,6 +41,7 @@ import {
 } from "@ionosphere/proto-jmap";
 import { buildMailModule, buildQuotaModule, buildSubmissionModule, buildVacationModule } from "./jmap-backend.ts";
 import { buildPushMethods, type PushModuleOptions } from "./push.ts";
+import { principalContext } from "./principal-context.ts";
 
 export interface JmapServerOptions {
   db: DbDriver;
@@ -358,7 +359,7 @@ export class JmapServer {
        * 하나 줄며, 리다이렉트를 따르는 클라이언트도 그대로 동작한다.
        */
       if (req.method === "GET" && (url.pathname === "/jmap/session" || url.pathname === "/.well-known/jmap")) {
-        return this.serveSession(req, res, auth);
+        return await this.serveSession(req, res, auth);
       }
       if (req.method === "POST" && url.pathname === "/jmap/api") {
         return await this.serveApi(req, res, auth);
@@ -446,25 +447,25 @@ export class JmapServer {
     return `http://${host}`;
   }
 
-  private serveSession(req: IncomingMessage, res: ServerResponse, auth: { accountId: string; email: string }): void {
+  private async serveSession(req: IncomingMessage, res: ServerResponse, auth: { accountId: string; email: string }): Promise<void> {
     const base = this.baseUrl(req);
+    const context = await principalContext(this.opts.db, auth.accountId);
+    const accessible = await this.opts.store.listAccessibleAccounts(context);
+    const accounts = accessible.map((account) => ({
+      accountId: account.id,
+      name: account.email,
+      isPersonal: account.kind === 0,
+      // shared account의 세부 mayRights는 Mailbox/get에서 계산한다. 세션은 보수적으로 읽기 전용을 광고한다.
+      isReadOnly: account.kind !== 0,
+      accountCapabilities: {
+        [MAIL_CAPABILITY]: { maxMailboxesPerEmail: null, maxMailboxDepth: null, mayCreateTopLevelMailbox: account.kind === 0 },
+        [SUBMISSION_CAPABILITY]: { maxDelayedSend: 0, submissionExtensions: {} },
+        [QUOTA_CAPABILITY]: {},
+        [VACATION_CAPABILITY]: {},
+      },
+    }));
     const session = buildSession({
-      accounts: [
-        {
-          accountId: auth.accountId,
-          name: auth.email,
-          isPersonal: true,
-          isReadOnly: false,
-          accountCapabilities: {
-            [MAIL_CAPABILITY]: { maxMailboxesPerEmail: null, maxMailboxDepth: null, mayCreateTopLevelMailbox: true },
-            [SUBMISSION_CAPABILITY]: { maxDelayedSend: 0, submissionExtensions: {} },
-            // 계정별 능력 객체가 비어 있어도 **키가 있어야** 클라이언트가 그 계정에서 쓸 수
-            // 있다고 판단한다(RFC 8620 §2 accountCapabilities). 서버 전역 목록만으로는 부족하다.
-            [QUOTA_CAPABILITY]: {},
-            [VACATION_CAPABILITY]: {},
-          },
-        },
-      ],
+      accounts,
       primaryAccountId: auth.accountId,
       username: auth.email,
       apiUrl: `${base}/jmap/api`,
@@ -521,15 +522,26 @@ export class JmapServer {
    */
   private async serveDownload(url: URL, res: ServerResponse, auth: { accountId: string }): Promise<void> {
     const parts = url.pathname.split("/").filter((p) => p.length > 0); // jmap download accountId blobId name
+    const requestedAccountId = parts[2] ?? auth.accountId;
     const blobId = parts[3];
     if (!blobId) {
       res.writeHead(404, { "content-type": "application/json" });
       res.end(JSON.stringify({ status: 404, detail: "blob not found" }));
       return;
     }
+    const context = await principalContext(this.opts.db, auth.accountId);
+    const allowedMailboxIds = await this.opts.store.accessibleMailboxIds(context, requestedAccountId);
+    const sharedMessageCondition = requestedAccountId === auth.accountId
+      ? ""
+      : allowedMailboxIds.length === 0
+        ? " AND 1 = 0"
+        // lint-allow chunked-in-query: P5의 mailbox 집합은 listing cache 단계에서 유계화하고, 현재는 ACL 결과를 직접 사용한다.
+        : ` AND EXISTS (SELECT 1 FROM message_mailbox access_mm WHERE access_mm.message_id = m.id AND access_mm.mailbox_id IN (${allowedMailboxIds.map(() => "?").join(", ")}))`;
     const { rows: refRows } = await this.opts.db.query({
-      sql: "SELECT 1 AS x FROM blob_refs WHERE blob_id = ? AND account_id = ? LIMIT 1",
-      params: [blobId, auth.accountId],
+      sql: `SELECT 1 AS x FROM blob_refs br
+            LEFT JOIN messages m ON m.id = br.ref_id AND br.ref_kind = ?
+            WHERE br.blob_id = ? AND br.account_id = ?${sharedMessageCondition} LIMIT 1`,
+      params: [REF_KIND.message, blobId, requestedAccountId, ...(requestedAccountId === auth.accountId ? [] : allowedMailboxIds)],
     });
     if (refRows.length === 0) {
       // 존재 여부를 흘리지 않도록 미인가와 부재를 같은 404로 답한다.
