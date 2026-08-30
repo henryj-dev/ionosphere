@@ -39,4 +39,28 @@ describe("IMAP shared namespace", () => {
     expect(selected).toEqual({ kind: "no", code: "NONEXISTENT", message: "no such mailbox" });
     await db.close();
   });
+
+  test("l만 있는 주체는 목록은 보지만 읽기·넣기는 할 수 없다", async () => {
+    const db = await openSqlite(":memory:");
+    await migrate(db, allMigrations);
+    const store = new Store(db);
+    const blobs = new FsBlobStore(mkdtempSync(join(tmpdir(), "ion-shared-rights-")));
+    const { tenantId } = await store.createTenant("tenant");
+    const owner = await store.createAccount({ tenantId, email: "owner2@ionosphere.test", kind: 1 });
+    const reader = await store.createAccount({ tenantId, email: "reader2@ionosphere.test" });
+    const readerPrincipal = await db.query({ sql: "SELECT id FROM principals WHERE account_id = ?", params: [reader.accountId] });
+    const sharedMailbox = await store.createMailbox({ accountId: owner.accountId, name: "Shared" });
+    await db.batch([
+      { sql: "INSERT INTO mailbox_acl (mailbox_id, principal_id, rights, created_at, updated_at) VALUES (?, ?, 'l', 1, 1)", params: [sharedMailbox.mailboxId, String(readerPrincipal.rows[0]!.id)] },
+    ]);
+    const backend = new IonosphereImapBackend(db, store, blobs);
+    const list = await backend.request(reader.accountId, { kind: "listMailboxes" });
+    expect(list.kind).toBe("mailboxes");
+    if (list.kind === "mailboxes") expect(list.mailboxes.map((mailbox) => mailbox.name)).toContain("Shared");
+    const selected = await backend.request(reader.accountId, { kind: "selectMailbox", name: "Shared" });
+    expect(selected).toEqual({ kind: "no", code: "NONEXISTENT", message: "no such mailbox" });
+    const append = await backend.request(reader.accountId, { kind: "appendMessage", name: "Shared", flags: [], internalDateMs: null, raw: new TextEncoder().encode("Subject: denied\r\n\r\nbody") });
+    expect(append).toEqual({ kind: "no", code: "TRYCREATE", message: "no such mailbox" });
+    await db.close();
+  });
 });
