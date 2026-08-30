@@ -36,6 +36,7 @@ import {
   type MethodContext,
   type SetSource,
 } from "@ionosphere/proto-jmap";
+import { principalContext } from "./principal-context.ts";
 import { StoreError, type AppendAddress } from "@ionosphere/store";
 import { DEFAULT_RATE_LIMIT, enqueueMessage, findUnsafeAddress, isSafeEnvelopeAddress, OutboundRejectedError, type OutboundPolicy } from "@ionosphere/mta";
 
@@ -77,6 +78,52 @@ function toJmapMailbox(row: MailboxRow): JmapObject {
     myRights: { ...OWNER_RIGHTS },
     isSubscribed: row.subscribed,
   };
+}
+
+async function requestedAccountId(args: Record<string, unknown>, authenticatedAccountId: string): Promise<string> {
+  const accountId = args.accountId;
+  if (typeof accountId !== "string" || accountId.length === 0) throw new MethodError("invalidArguments", { description: "accountId 누락" });
+  if (accountId === authenticatedAccountId) return accountId;
+  return accountId;
+}
+
+async function accessibleJmapMailboxes(db: DbDriver, store: Store, authenticatedAccountId: string, requestedAccountId: string): Promise<{ rows: MailboxRow[]; context: Awaited<ReturnType<typeof principalContext>> }> {
+  const context = await principalContext(db, authenticatedAccountId);
+  const rows = (await store.listAccessibleMailboxes(context)).filter((row) => row.accountId === requestedAccountId);
+  return { rows, context };
+}
+
+async function mailboxRights(store: Store, context: Awaited<ReturnType<typeof principalContext>>, row: MailboxRow): Promise<Record<string, unknown>> {
+  const [read, insert, write, remove, create] = await Promise.all([
+    store.authorizeMailbox(context, row.id, "read"),
+    store.authorizeMailbox(context, row.id, "insert"),
+    store.authorizeMailbox(context, row.id, "write"),
+    store.authorizeMailbox(context, row.id, "delete"),
+    store.authorizeMailbox(context, row.id, "create"),
+  ]);
+  return {
+    mayReadItems: read.allowed,
+    mayAddItems: insert.allowed,
+    mayRemoveItems: remove.allowed,
+    maySetSeen: write.allowed,
+    maySetKeywords: write.allowed,
+    mayCreateChild: create.allowed,
+    mayRename: remove.allowed && create.allowed,
+    mayDelete: remove.allowed,
+    maySubmit: false,
+  };
+}
+
+async function jmapMailboxGet(args: Record<string, unknown>, authenticatedAccountId: string, db: DbDriver, store: Store): Promise<Record<string, unknown>> {
+  const accountId = await requestedAccountId(args, authenticatedAccountId);
+  const { rows, context } = await accessibleJmapMailboxes(db, store, authenticatedAccountId, accountId);
+  const rights = new Map(await Promise.all(rows.map(async (row) => [row.id, await mailboxRights(store, context, row)] as const)));
+  const ids = args.ids;
+  if (ids !== null && ids !== undefined && (!Array.isArray(ids) || ids.some((id) => typeof id !== "string"))) throw new MethodError("invalidArguments");
+  const wanted = ids === null || ids === undefined ? rows : rows.filter((row) => (ids as string[]).includes(row.id));
+  const found = new Set(wanted.map((row) => row.id));
+  const notFound = ids === null || ids === undefined ? [] : (ids as string[]).filter((id) => !found.has(id));
+  return { accountId, state: (await store.jmapState(accountId)).mailbox, list: wanted.map((row) => ({ ...toJmapMailbox(row), myRights: rights.get(row.id) ?? {} })), notFound };
 }
 
 /** message_addresses.kind → JMAP Email 주소 프로퍼티명. 인코딩은 @ionosphere/db 소유. */
@@ -166,7 +213,7 @@ export function buildMailModule(db: DbDriver, store: Store, blobs: BlobStore): C
   return {
     capability: MAIL_CAPABILITY,
     methods: {
-      "Mailbox/get": (args, ctx) => standardGet(args, ctx.accountId, mailboxGetSource),
+      "Mailbox/get": (args, ctx) => jmapMailboxGet(args, ctx.accountId, db, store),
       "Mailbox/changes": (args, ctx) => standardChanges(args, ctx.accountId, mailboxChangesSource),
       "Mailbox/query": (args, ctx) => mailboxQuery(args, ctx.accountId, store),
       "Mailbox/set": (args, ctx) => standardSet(args, ctx.accountId, ctx, mailboxSetSource),

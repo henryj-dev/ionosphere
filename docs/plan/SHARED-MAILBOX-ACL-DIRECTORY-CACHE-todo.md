@@ -306,16 +306,18 @@ mailbox 집합으로 제한한다. From Identity와 maySubmit을 별도 검사�
   - 단언: maySubmit과 From Identity 중 하나라도 없으면 EmailSubmission/set이 거부된다.
   - 검출: shared mailbox 읽기 권한이 발신 권한으로 상승하는 회귀.
 
-【통과】 세션 계정 발견이 ACL로 접근 가능한 shared account만 반환하고, primary account는 항상
-포함하는 fixture가 pass한다. 이후 Mailbox/Email/Thread/blob의 부분 접근 경계를 추가한 뒤 P5를 봉인한다.
+【통과】 세션 계정 발견이 ACL로 접근 가능한 shared account만 반환하고, Mailbox/get이 요청 주체의
+ACL과 일치하는 mailbox·myRights만 반환하는 fixture가 pass한다. Email/Thread/blob과 permission
+state 경계는 아직 남아 있으므로 P5 봉인은 보류한다.
 
 ## 🚪 GATE P5
 
 | id | 검사 | 명령 | 통과 기준 |
 |---|---|---|---|
 | G-P5.1 | accessible account fixture | `node --test packages/store/test/authorization.test.ts` | ACL 계정 목록 TC pass |
-| G-P5.2 | Session 배선 | gate 내부 grep | `listAccessibleAccounts`, `isReadOnly` 검출 |
-| G-P5.3 | 정적 품질 | `node scripts/gates/shared-mailbox.ts P5` | lint/typecheck 0 |
+| G-P5.2 | JMAP Mailbox/get fixture | `node --test apps/server/test/jmap-shared-account.test.ts` | shared mailbox 1개와 myRights pass |
+| G-P5.3 | Session 배선 | gate 내부 grep | `listAccessibleAccounts`, `isReadOnly` 검출 |
+| G-P5.4 | 정적 품질 | `node scripts/gates/shared-mailbox.ts P5` | lint/typecheck 0 |
 
 ## P6 — LDAP/AD mapping (잠김, P5 봉인 필요)
 
