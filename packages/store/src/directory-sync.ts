@@ -1,5 +1,11 @@
+import { createHash } from "node:crypto";
 import { ulid } from "@ionosphere/core";
 import type { DbDriver, Statement } from "@ionosphere/db";
+
+// MySQL utf8mb4의 3072바이트 PK 한도 때문에 원문 키는 보존하고 PK에는 고정 길이 digest를 쓴다.
+function externalKeyHash(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
 
 export interface DirectoryIdentitySync {
   externalKey: string;
@@ -81,8 +87,8 @@ export async function syncDirectorySnapshot(db: DbDriver, input: DirectorySyncIn
   for (const group of input.groups) {
     for (const member of group.memberExternalKeys) {
       statements.push({
-        sql: `${db.insertIgnore("directory_group_members", ["tenant_id", "provider", "group_external_key", "member_external_key", "last_seen_at"])}`,
-        params: [input.tenantId, input.provider, group.externalKey, member, input.now],
+        sql: `${db.insertIgnore("directory_group_members", ["tenant_id", "provider", "group_external_key", "member_external_key", "group_external_hash", "member_external_hash", "last_seen_at"])}`,
+        params: [input.tenantId, input.provider, group.externalKey, member, externalKeyHash(group.externalKey), externalKeyHash(member), input.now],
       });
       statements.push({ sql: "UPDATE directory_group_members SET last_seen_at = ? WHERE tenant_id = ? AND provider = ? AND group_external_key = ? AND member_external_key = ?", params: [input.now, input.tenantId, input.provider, group.externalKey, member] });
     }

@@ -299,8 +299,10 @@ CREATE TABLE directory_group_members (
   provider            VARCHAR(32) NOT NULL,
   group_external_key  VARCHAR(512) NOT NULL,
   member_external_key VARCHAR(512) NOT NULL,
+  group_external_hash CHAR(64) NOT NULL,
+  member_external_hash CHAR(64) NOT NULL,
   last_seen_at        BIGINT NOT NULL,
-  PRIMARY KEY (tenant_id, provider, group_external_key, member_external_key)
+  PRIMARY KEY (tenant_id, provider, group_external_hash, member_external_hash)
 );
 ```
 
