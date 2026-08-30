@@ -140,7 +140,7 @@ version state 및 credential precedence를 고정한다.
 
 | id | 검사 | 명령 | 통과 기준 |
 |---|---|---|---|
-| G-P0.1 | 장치 음성 대조 TC-P0.T1.a~d | `node --test test/gates/shared-mailbox-gate.test.ts` | 4개 pass |
+| G-P0.1 | 장치 음성 대조 TC-P0.T1.a~d | `node --test packages/core/test/gated-todo-gate.test.ts` | 4개 pass |
 | G-P0.2 | 계약 수치·rights | `node scripts/gates/shared-mailbox.ts P0` | principal 4종, standard 11개, negative 1차만 확인 |
 | G-P0.3 | lint/typecheck | `npm run lint && npm run typecheck` | 종료 코드 0 |
 

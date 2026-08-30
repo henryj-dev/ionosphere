@@ -84,6 +84,20 @@ export { ScramServerSession, type ScramStep, type ScramStoredKeys } from "./scra
 export { applyLegacyEnvAliases, LegacyEnvConflictError } from "./env-legacy.ts";
 export { PeerConnectionLimiter, DEFAULT_MAX_CONNECTIONS_PER_PEER } from "./peer-limit.ts";
 export {
+  PRINCIPAL_KIND,
+  type MailboxOperation,
+  type PrincipalContext,
+  type PrincipalKind,
+} from "./principal.ts";
+export {
+  STANDARD_MAILBOX_RIGHTS,
+  MAILBOX_OPERATION_RIGHT,
+  formatMailboxRights,
+  parseMailboxRights,
+  type MailboxRight,
+  type StandardMailboxRight,
+} from "./rights.ts";
+export {
   compileGlob,
   globCaptures,
   globMatch,

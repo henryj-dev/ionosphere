@@ -1,0 +1,150 @@
+#!/usr/bin/env node
+/**
+ * 공유 메일함 실행판의 단계 게이트.
+ * 검사 정의를 데이터로 두고, 봉인 파일은 커밋되는 docs/plan 아래에 둔다.
+ * 이 장치는 구현 단계에서 검사 항목을 늘리는 것이 기존 검사 코드의 우회가 되지 않도록
+ * 종료 코드와 측정값을 항상 함께 남긴다.
+ */
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
+
+type Check = { id: string; kind: "file" | "grep" | "command"; path?: string; pattern?: string; command?: string[]; limit?: number };
+type Phase = { needs: readonly string[]; outputs: readonly string[]; checks: readonly Check[] };
+
+const root = resolve(new URL("../..", import.meta.url).pathname);
+const sealDir = resolve(root, "docs/plan/.gates/shared-mailbox");
+const todoPath = "docs/plan/SHARED-MAILBOX-ACL-DIRECTORY-CACHE-todo.md";
+
+const GATES: Record<string, Phase> = {
+  P0: {
+    needs: [],
+    outputs: ["scripts/gates/shared-mailbox.ts", "packages/core/src/principal.ts", "packages/core/src/rights.ts", "packages/core/test/principal-rights.test.ts"],
+    checks: [
+      { id: "G-P0.2", kind: "file", path: todoPath },
+      { id: "G-P0.3", kind: "grep", path: "packages/core/src/principal.ts", pattern: "PRINCIPAL_KIND" },
+      { id: "G-P0.4", kind: "grep", path: "packages/core/src/rights.ts", pattern: "STANDARD_MAILBOX_RIGHTS" },
+      { id: "G-P0.5", kind: "command", command: ["node", "--test", "packages/core/test/principal-rights.test.ts"] },
+      { id: "G-P0.6", kind: "command", command: ["npm", "run", "lint"] },
+      { id: "G-P0.7", kind: "command", command: ["npm", "run", "typecheck"] },
+    ],
+  },
+  P1: { needs: ["P0"], outputs: ["packages/db/src/migrations/020_mailbox_acl.ts"], checks: [] },
+  P2: { needs: ["P1"], outputs: ["packages/store/src/authorization.ts"], checks: [] },
+  P3: { needs: ["P2"], outputs: ["apps/server/src/imap-backend.ts"], checks: [] },
+  P4: { needs: ["P3"], outputs: ["packages/proto-imap/src/engine.ts"], checks: [] },
+  P5: { needs: ["P4"], outputs: ["apps/server/src/jmap-backend.ts"], checks: [] },
+  P6: { needs: ["P5"], outputs: ["packages/core/src/directory.ts"], checks: [] },
+  P7: { needs: ["P6"], outputs: ["packages/store/src/header-projection.ts"], checks: [] },
+  P8: { needs: ["P7"], outputs: ["packages/store/src/listing-cache.ts"], checks: [] },
+  P9: { needs: ["P8"], outputs: ["packages/admin-cmd/src/registry.ts"], checks: [] },
+  P10: { needs: ["P9"], outputs: [], checks: [{ id: "G-P10.1", kind: "command", command: ["npm", "run", "verify"] }] },
+};
+
+function sealPath(phase: string): string { return resolve(sealDir, `${phase}.json`); }
+function phaseNames(): string[] { return Object.keys(GATES); }
+
+function readSeal(phase: string): { phase: string; sealed: boolean; head: string; waived: boolean; reason: string | null } | null {
+  const path = sealPath(phase);
+  if (!existsSync(path)) return null;
+  try { return JSON.parse(readFileSync(path, "utf8")) as { phase: string; sealed: boolean; head: string; waived: boolean; reason: string | null }; } catch { return null; }
+}
+
+function hasPrerequisites(phase: string): boolean {
+  for (const need of GATES[phase]?.needs ?? []) {
+    const seal = readSeal(need);
+    if (!seal?.sealed) return false;
+  }
+  return true;
+}
+
+function currentHead(): string { return execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim(); }
+
+function isAncestor(head: string): boolean {
+  return spawnSync("git", ["merge-base", "--is-ancestor", head, "HEAD"], { cwd: root, stdio: "ignore" }).status === 0;
+}
+
+function runCheck(check: Check): { ok: boolean; measured: number | string; limit: number | null; message: string } {
+  if (check.kind === "file") {
+    const ok = existsSync(resolve(root, check.path ?? ""));
+    return { ok, measured: ok ? 1 : 0, limit: 1, message: check.path ?? "" };
+  }
+  if (check.kind === "grep") {
+    const text = readFileSync(resolve(root, check.path ?? ""), "utf8");
+    const measured = (text.match(new RegExp(check.pattern ?? "", "g")) ?? []).length;
+    const limit = check.limit ?? 1;
+    return { ok: measured >= limit, measured, limit, message: `${check.path}: ${check.pattern}` };
+  }
+  const command = check.command ?? [];
+  const result = spawnSync(command[0] ?? "", command.slice(1), { cwd: root, stdio: "inherit" });
+  return { ok: result.status === 0, measured: result.status ?? 1, limit: 0, message: command.join(" ") };
+}
+
+function evaluate(phase: string): { ok: boolean; checks: Array<{ id: string; ok: boolean; measured: number | string; limit: number | null }> } {
+  const definition = GATES[phase];
+  if (!definition) throw new Error(`알 수 없는 단계: ${phase}`);
+  if (!hasPrerequisites(phase)) throw new Error(`선행 단계 봉인 없음: ${definition.needs.join(", ")}`);
+  const checks = definition.checks.map((check) => {
+    const result = runCheck(check);
+    console.log(`${result.ok ? "PASS" : "FAIL"} ${check.id} measured=${result.measured} limit=${result.limit ?? "-"} ${result.message}`);
+    return { id: check.id, ok: result.ok, measured: result.measured, limit: result.limit };
+  });
+  return { ok: checks.every((check) => check.ok), checks };
+}
+
+function seal(phase: string, waivedReason: string | null): number {
+  const definition = GATES[phase];
+  if (!definition) throw new Error(`알 수 없는 단계: ${phase}`);
+  if (waivedReason !== null && waivedReason.length === 0) throw new Error("waive 사유가 비어 있음");
+  if (waivedReason === null) {
+    const result = evaluate(phase);
+    if (!result.ok) return 1;
+    mkdirSync(sealDir, { recursive: true });
+    writeFileSync(sealPath(phase), JSON.stringify({ phase, sealed: true, head: currentHead(), at: new Date().toISOString(), waived: false, reason: null, checks: result.checks }, null, 2) + "\n");
+  } else {
+    if (definition.checks.length > 0) throw new Error("검사가 있는 필수 단계는 waive할 수 없음");
+    if (!hasPrerequisites(phase)) throw new Error(`선행 단계 봉인 없음: ${definition.needs.join(", ")}`);
+    mkdirSync(sealDir, { recursive: true });
+    writeFileSync(sealPath(phase), JSON.stringify({ phase, sealed: true, head: currentHead(), at: new Date().toISOString(), waived: true, reason: waivedReason, checks: [] }, null, 2) + "\n");
+  }
+  return 0;
+}
+
+function status(): number {
+  for (const phase of phaseNames()) {
+    const seal = readSeal(phase);
+    const state = !hasPrerequisites(phase) ? "잠김" : !seal ? "열림" : !isAncestor(seal.head) ? "무효" : "봉인";
+    console.log(`${phase}\t${state}\t${seal?.head ?? "-"}`);
+  }
+  return 0;
+}
+
+function assertOrder(): number {
+  let failed = false;
+  for (const [phase, definition] of Object.entries(GATES)) {
+    const seal = readSeal(phase);
+    if (!seal?.sealed) continue;
+    for (const output of definition.outputs) {
+      const changed = spawnSync("git", ["diff", "--quiet", `${seal.head}..HEAD`, "--", output], { cwd: root, stdio: "ignore" }).status !== 0;
+      if (changed) { console.error(`FAIL ${phase}: 봉인 후 산출물 변경 ${output}`); failed = true; }
+    }
+  }
+  return failed ? 1 : 0;
+}
+
+const args = process.argv.slice(2);
+try {
+  if (args[0] === "--status") process.exit(status());
+  if (args[0] === "--assert-order") process.exit(assertOrder());
+  const phase = args[0];
+  if (!phase) throw new Error("사용법: shared-mailbox.ts <P0..P10> [--seal|--explain]");
+  if (args.includes("--seal")) {
+    const waiveAt = args.indexOf("--waived");
+    process.exit(seal(phase, waiveAt >= 0 ? args[waiveAt + 1] ?? "" : null));
+  }
+  const result = evaluate(phase);
+  process.exit(result.ok ? 0 : 1);
+} catch (error) {
+  console.error(`GATE ERROR: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+}
