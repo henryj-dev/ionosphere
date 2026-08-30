@@ -27,11 +27,19 @@ test("P0 gate: 선행 봉인 없이는 다음 단계 검사를 실행하지 않�
   }
 });
 
-test("P0 gate: status는 P0 열림과 P1 잠김을 구분한다", () => {
-  const result = run("--status");
-  assert.equal(result.status, 0);
-  assert.match(result.stdout, /P0\t봉인/);
-  assert.match(result.stdout, /P1\t열림/);
+test("P0 gate: status는 P0 봉인과 P1 열림을 구분한다", () => {
+  const p1Seal = resolve(sealDir, "P1.json");
+  const backup = resolve(sealDir, "P1.json.gate-test-backup");
+  const hadSeal = existsSync(p1Seal);
+  if (hadSeal) renameSync(p1Seal, backup);
+  try {
+    const result = run("--status");
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /P0\t봉인/);
+    assert.match(result.stdout, /P1\t열림/);
+  } finally {
+    if (hadSeal) renameSync(backup, p1Seal);
+  }
 });
 
 test("P0 gate: 봉인 디렉터리는 운영 무시 경로가 아닌 계획 경로다", () => {

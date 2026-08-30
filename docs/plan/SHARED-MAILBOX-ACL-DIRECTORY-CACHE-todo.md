@@ -69,8 +69,8 @@ node scripts/gates/shared-mailbox.ts --assert-order
 | 단계 | 상태 | 선행 | 게이트 | 봉인 |
 |---|---|---|---|---|
 | P0 계약·게이트 장치 | 봉인 | 없음 | `node scripts/gates/shared-mailbox.ts P0 --seal` | `docs/plan/.gates/shared-mailbox/P0.json` |
-| P1 principal·ACL 스키마 | 열림 | P0 | `node scripts/gates/shared-mailbox.ts P1 --seal` | 없음 |
-| P2 Store authorization | 잠김 | P1 | `node scripts/gates/shared-mailbox.ts P2 --seal` | 없음 |
+| P1 principal·ACL 스키마 | 봉인 | P0 | `node scripts/gates/shared-mailbox.ts P1 --seal` | `docs/plan/.gates/shared-mailbox/P1.json` |
+| P2 Store authorization | 열림 | P1 | `node scripts/gates/shared-mailbox.ts P2 --seal` | 없음 |
 | P3 shared account·IMAP namespace | 잠김 | P2 | `node scripts/gates/shared-mailbox.ts P3 --seal` | 없음 |
 | P4 IMAP ACL 명령 | 잠김 | P3 | `node scripts/gates/shared-mailbox.ts P4 --seal` | 없음 |
 | P5 JMAP shared account | 잠김 | P4 | `node scripts/gates/shared-mailbox.ts P5 --seal` | 없음 |
@@ -91,7 +91,7 @@ P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7 → P8 → P9 → P10
 
 ## P0 — 계약·게이트 장치 (열림, 선행 없음)
 
-### 미착수 P0.T1 — 게이트 장치 구현
+### 완료 P0.T1 — 게이트 장치 구현
 
 선행: 없음 · 산출: `scripts/gates/shared-mailbox.ts`, 봉인 디렉터리, gate 단위 테스트 ·
 되돌리기: 해당 파일과 봉인 파일만 revert · 장치 요구: 이 작업의 완료 전에는 P1을 열지 않음
@@ -116,7 +116,7 @@ P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7 → P8 → P9 → P10
 
 【통과】 `--status`, R1~R3, waived, assert-order의 양·음성 fixture가 모두 0/비0을 정확히 반환한다.
 
-### 미착수 P0.T2 — ADR·공통 권한 계약 봉인
+### 완료 P0.T2 — ADR·공통 권한 계약 봉인
 
 선행: P0.T1 · 산출: `principal.ts`, `rights.ts` 계약과 ADR · 되돌리기: 추가 파일 revert ·
 장치 요구: G-P0 봉인 없이는 P1 시작 금지
@@ -147,9 +147,9 @@ version state 및 credential precedence를 고정한다.
 가장 중요한 검사는 G-P0.1이다. 장치가 스스로 순서를 막지 못하면 이후의 모든 녹색 결과는
 선행 계약 없이 실행된 것이므로 증거가 아니다.
 
-## P1 — principal·ACL 스키마 (잠김, P0 봉인 필요)
+## P1 — principal·ACL 스키마 (봉인 완료)
 
-### 미착수 P1.T1 — migration 020 schema
+### 완료 P1.T1 — migration 020 schema
 
 선행: P0 · 산출: migration 020, `docs/SCHEMA.md` 표 갱신 · 되돌리기: forward-fix migration;
 기존 테이블 DROP 금지 · 장치 요구: G-P0 봉인
@@ -169,7 +169,7 @@ version state 및 credential precedence를 고정한다.
 
 【통과】 schema introspection에 새 테이블·컬럼·index가 존재하고 migration 수가 20이 된다.
 
-### 미착수 P1.T2 — rights parser·ACL 계산 계약
+### 완료 P1.T2 — rights parser·ACL 계산 계약
 
 선행: P1.T1 · 산출: parser와 pure authorization fixture · 되돌리기: parser/fixture revert ·
 장치 요구: P1 내부 순서 준수
@@ -192,9 +192,10 @@ negative 행은 저장하지 않고(`negative=0`) 후속 범위로 명시한다.
 
 | id | 검사 | 명령 | 통과 기준 |
 |---|---|---|---|
-| G-P1.1 | schema 020 | `npm test -- packages/db/test/migrate.test.ts` | 새 테이블·컬럼 존재, 재실행 pass |
-| G-P1.2 | ACL parser | `npm test -- packages/core/test/rights.test.ts` | TC-P1.T2 전체 pass |
-| G-P1.3 | migration 수 | `node scripts/gates/shared-mailbox.ts P1` | `migrations=20`, duplicate=0 |
+| G-P1.1 | schema 020 | `node --test packages/db/test/migrate.test.ts` | 새 테이블·컬럼 존재, 재실행 pass |
+| G-P1.2 | ACL parser | `node --test packages/core/test/rights.test.ts` | TC-P1.T2 전체 pass |
+| G-P1.3 | migration 수 | gate 내부 allMigrations 검사 | `migrations=20`, duplicate=0 |
+| G-P1.4 | schema 문서 | gate 내부 `mailbox_acl` 검사 | 020 DDL과 문서 표가 함께 존재 |
 
 ## P2 — Store authorization (잠김, P1 봉인 필요)
 

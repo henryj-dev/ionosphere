@@ -20,10 +20,24 @@ describe("migrate", () => {
       "email_submissions", "mta_queue", "identities", "suppressions",
       "dkim_keys", "sieve_scripts", "dedup_tracking", "push_subscriptions",
       "message_auth", "background_jobs", "blobs", "blob_refs",
+      "principals", "mailbox_acl", "account_memberships",
       "schema_migrations",
     ]) {
       expect(tables).toContain(t);
     }
+    await db.close();
+  });
+
+  test("020 주체 식별자는 테넌트·provider 범위로 격리된다", async () => {
+    const db = await openSqlite();
+    await migrate(db, allMigrations);
+    await db.batch([
+      { sql: "INSERT INTO principals (id, tenant_id, kind, provider, external_key, created_at) VALUES (?, ?, ?, ?, ?, ?)", params: ["p-a", "tenant-a", 2, "ldap", "uid=alice", 1] },
+      { sql: "INSERT INTO principals (id, tenant_id, kind, provider, external_key, created_at) VALUES (?, ?, ?, ?, ?, ?)", params: ["p-b", "tenant-b", 2, "ldap", "uid=alice", 1] },
+      { sql: "INSERT INTO principals (id, tenant_id, kind, provider, external_key, created_at) VALUES (?, ?, ?, ?, ?, ?)", params: ["p-c", "tenant-a", 2, "ad", "uid=alice", 1] },
+    ]);
+    const { rows } = await db.query({ sql: "SELECT COUNT(*) AS count FROM principals" });
+    expect(Number(rows[0]?.count)).toBe(3);
     await db.close();
   });
 

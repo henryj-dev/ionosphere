@@ -92,6 +92,7 @@ export {
 export {
   STANDARD_MAILBOX_RIGHTS,
   MAILBOX_OPERATION_RIGHT,
+  combineMailboxRights,
   formatMailboxRights,
   parseMailboxRights,
   type MailboxRight,

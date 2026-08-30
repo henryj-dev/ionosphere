@@ -19,7 +19,7 @@ const todoPath = "docs/plan/SHARED-MAILBOX-ACL-DIRECTORY-CACHE-todo.md";
 const GATES: Record<string, Phase> = {
   P0: {
     needs: [],
-    outputs: ["scripts/gates/shared-mailbox.ts", "packages/core/src/principal.ts", "packages/core/src/rights.ts", "packages/core/test/principal-rights.test.ts"],
+    outputs: ["scripts/gates/shared-mailbox.ts", "packages/core/src/principal.ts", "packages/core/src/rights.ts", "packages/core/src/index.ts", "packages/core/test/principal-rights.test.ts", "packages/core/test/gated-todo-gate.test.ts"],
     checks: [
       { id: "G-P0.1", kind: "command", command: ["node", "--test", "packages/core/test/gated-todo-gate.test.ts"] },
       { id: "G-P0.2", kind: "file", path: todoPath },
@@ -30,7 +30,16 @@ const GATES: Record<string, Phase> = {
       { id: "G-P0.7", kind: "command", command: ["npm", "run", "typecheck"] },
     ],
   },
-  P1: { needs: ["P0"], outputs: ["packages/db/src/migrations/020_mailbox_acl.ts"], checks: [] },
+  P1: {
+    needs: ["P0"],
+    outputs: ["packages/db/src/migrations/020_mailbox_acl.ts", "packages/db/src/index.ts", "packages/db/test/migrate.test.ts", "packages/core/src/rights.ts", "packages/core/src/index.ts", "packages/core/test/rights.test.ts", "docs/SCHEMA.md"],
+    checks: [
+      { id: "G-P1.1", kind: "command", command: ["node", "--test", "packages/db/test/migrate.test.ts"] },
+      { id: "G-P1.2", kind: "command", command: ["node", "--test", "packages/core/test/rights.test.ts"] },
+      { id: "G-P1.3", kind: "command", command: ["node", "--input-type=module", "-e", "import { allMigrations } from './packages/db/src/index.ts'; if (allMigrations.length !== 20 || allMigrations.at(-1)?.version !== 20) process.exit(1);"] },
+      { id: "G-P1.4", kind: "grep", path: "docs/SCHEMA.md", pattern: "mailbox_acl" },
+    ],
+  },
   P2: { needs: ["P1"], outputs: ["packages/store/src/authorization.ts"], checks: [] },
   P3: { needs: ["P2"], outputs: ["apps/server/src/imap-backend.ts"], checks: [] },
   P4: { needs: ["P3"], outputs: ["packages/proto-imap/src/engine.ts"], checks: [] },

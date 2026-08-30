@@ -26,6 +26,15 @@ export function parseMailboxRights(value: string): ReadonlySet<StandardMailboxRi
   return rights;
 }
 
+/** 계정·그룹·특수 주체에서 계산된 권리를 합친다. 거부 ACL은 Store 계층에서 별도로 적용한다. */
+export function combineMailboxRights(...rightsSets: Iterable<StandardMailboxRight>[]): ReadonlySet<StandardMailboxRight> {
+  const rights = new Set<StandardMailboxRight>();
+  for (const rightsSet of rightsSets) {
+    for (const right of rightsSet) rights.add(right);
+  }
+  return rights;
+}
+
 /** standard right 집합을 RFC 응답 순서로 직렬화한다. */
 export function formatMailboxRights(rights: Iterable<StandardMailboxRight>, includeVirtual = true): string {
   const selected = new Set(rights);

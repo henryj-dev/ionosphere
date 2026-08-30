@@ -108,7 +108,8 @@ import { m016DsnParams } from "./migrations/016_dsn_params.ts";
 import { m017Reporting } from "./migrations/017_reporting.ts";
 import { m018PushSubscriptions } from "./migrations/018_push_subscriptions.ts";
 import { m019IdentityState } from "./migrations/019_identity_state.ts";
+import { m020MailboxAcl } from "./migrations/020_mailbox_acl.ts";
 import type { Migration } from "./migrate.ts";
 
 /** 전체 마이그레이션 목록 (버전 순). */
-export const allMigrations: readonly Migration[] = [m001Init, m002Webhooks, m003Forwarding, m004BlobGc, m005MaildropLock, m006AddressFanout, m007Smarthosts, m008SuppressionExpiry, m009Complaints, m010BayesTokens, m011QueueIndexes, m012DsnDelayNotice, m013Vacation, m014ExpungedFloor, m015VacationResponse, m016DsnParams, m017Reporting, m018PushSubscriptions, m019IdentityState];
+export const allMigrations: readonly Migration[] = [m001Init, m002Webhooks, m003Forwarding, m004BlobGc, m005MaildropLock, m006AddressFanout, m007Smarthosts, m008SuppressionExpiry, m009Complaints, m010BayesTokens, m011QueueIndexes, m012DsnDelayNotice, m013Vacation, m014ExpungedFloor, m015VacationResponse, m016DsnParams, m017Reporting, m018PushSubscriptions, m019IdentityState, m020MailboxAcl];

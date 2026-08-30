@@ -2,7 +2,7 @@
 
 > 상태: **동결** (v1 → 이중 리뷰 → v2 → 이중 재검증 → v2.1) · 전제: [PLAN.md](../PLAN.md) + [PROTOCOLS.md](PROTOCOLS.md) §0
 >
-> **적용된 마이그레이션(2026-08-12 기준 010까지)** — 정본은 `packages/db/src/migrations/`다.
+> **적용된 마이그레이션(2026-08-30 기준 020까지)** — 정본은 `packages/db/src/migrations/`다.
 > 코어 DDL은 001이고, 그 뒤는 아래 절에 따로 적었다:
 >
 > | # | 이름 | 어디에 |
@@ -17,6 +17,16 @@
 > | 008 | suppression_expiry | §9-2b |
 > | 009 | complaints | **§9-2c** |
 > | 010 | bayes_tokens | **§9-2d** |
+> | 011 | queue_indexes | §9-4 |
+> | 012 | dsn_delay_notice | §9-4 |
+> | 013 | vacation | §9-2 |
+> | 014 | expunged_floor | §6-3 |
+> | 015 | vacation_response | §9-2 |
+> | 016 | dsn_params | §9-4 |
+> | 017 | reporting | §9-4 |
+> | 018 | push_subscriptions | §9-2 |
+> | 019 | identity_state | §4 |
+> | 020 | mailbox_acl | **§4-1** |
 >
 > ⚠ 새 마이그레이션을 넣으면 **이 표와 해당 절을 같이 갱신할 것.** 009·010이 한동안 코드에만
 > 있고 이 문서에 없었다 — "동결 스키마"를 자처하는 문서가 실제 테이블을 빠뜨리면, 그것을 읽고
@@ -165,6 +175,7 @@ CREATE TABLE accounts (
   state_thread      BIGINT NOT NULL DEFAULT 0,
   state_submission  BIGINT NOT NULL DEFAULT 0,
   state_sieve       BIGINT NOT NULL DEFAULT 0,      -- Phase 4 (RFC 9661 SieveScript/changes) 예약
+  permissions_version BIGINT NOT NULL DEFAULT 0,    -- 공유 메일함 권한 캐시 무효화 세대 (020)
   created_at        BIGINT NOT NULL
 );
 CREATE UNIQUE INDEX ux_accounts_email ON accounts(email);
@@ -222,6 +233,47 @@ CREATE TABLE api_keys (
 CREATE INDEX ix_api_keys_tenant ON api_keys(tenant_id);
 ```
 
+### 4-1. 공유 메일함 주체·ACL (마이그레이션 020)
+
+```sql
+CREATE TABLE principals (
+  id            VARCHAR(26) PRIMARY KEY,
+  tenant_id     VARCHAR(26) NOT NULL,
+  kind          SMALLINT NOT NULL,                  -- account / group / anyone / authenticated
+  account_id    VARCHAR(26),                         -- 로컬 계정 주체일 때만 채움
+  provider      VARCHAR(32),                         -- local / ldap / ad
+  external_key  VARCHAR(255),                       -- provider 내부의 안정적인 식별자
+  display_name  VARCHAR(255),
+  created_at    BIGINT NOT NULL
+);
+CREATE UNIQUE INDEX ux_principals_account ON principals(tenant_id, account_id);
+CREATE UNIQUE INDEX ux_principals_external ON principals(tenant_id, kind, provider, external_key);
+
+CREATE TABLE mailbox_acl (
+  mailbox_id    VARCHAR(26) NOT NULL,
+  principal_id  VARCHAR(26) NOT NULL,
+  rights        VARCHAR(32) NOT NULL,               -- standard right만 저장; c/d는 앱에서 확장
+  negative      SMALLINT NOT NULL DEFAULT 0,        -- 예약 필드; 020에서는 양수 ACL만 허용
+  created_at    BIGINT NOT NULL,
+  updated_at    BIGINT NOT NULL,
+  PRIMARY KEY (mailbox_id, principal_id)
+);
+CREATE INDEX ix_mailbox_acl_principal ON mailbox_acl(principal_id, mailbox_id);
+
+CREATE TABLE account_memberships (
+  account_id    VARCHAR(26) NOT NULL,
+  principal_id  VARCHAR(26) NOT NULL,
+  source        VARCHAR(32) NOT NULL,               -- local / ldap / ad
+  created_at    BIGINT NOT NULL,
+  PRIMARY KEY (account_id, principal_id)
+);
+CREATE INDEX ix_account_memberships_principal ON account_memberships(principal_id, account_id);
+```
+
+`principals`는 `tenant_id`와 directory `provider`를 함께 키 범위에 넣어 동일한 외부 식별자가
+다른 테넌트·디렉터리에서 충돌하지 않게 한다. FK는 공통 DDL 정책상 두지 않으며, 주체·ACL·멤버십
+삭제는 Store의 한 원자 배치에서 역순으로 처리한다.
+
 ## 5. DDL — 메일 스토어 코어
 
 ### 5-1. mailboxes
@@ -237,6 +289,7 @@ CREATE TABLE mailboxes (
   uidvalidity   BIGINT NOT NULL,                    -- max(epoch초, accounts.uidvalidity_last+1); 발급 시 uidvalidity_last 갱신
   uidnext       BIGINT NOT NULL DEFAULT 1,
   highestmodseq BIGINT NOT NULL DEFAULT 0,
+  acl_version   BIGINT NOT NULL DEFAULT 0,          -- ACL 변경 시 증가하는 권한 캐시 세대 (020)
   subscribed    SMALLINT NOT NULL DEFAULT 1,
   sort_order    BIGINT NOT NULL DEFAULT 0,
   total_count   BIGINT NOT NULL DEFAULT 0,
