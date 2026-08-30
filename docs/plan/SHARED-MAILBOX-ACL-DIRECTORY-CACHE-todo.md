@@ -70,7 +70,7 @@ node scripts/gates/shared-mailbox.ts --assert-order
 |---|---|---|---|---|
 | P0 계약·게이트 장치 | 봉인 | 없음 | `node scripts/gates/shared-mailbox.ts P0 --seal` | `docs/plan/.gates/shared-mailbox/P0.json` |
 | P1 principal·ACL 스키마 | 봉인 | P0 | `node scripts/gates/shared-mailbox.ts P1 --seal` | `docs/plan/.gates/shared-mailbox/P1.json` |
-| P2 Store authorization | 열림 | P1 | `node scripts/gates/shared-mailbox.ts P2 --seal` | 없음 |
+| P2 Store authorization | 진행 중 | P1 | `node scripts/gates/shared-mailbox.ts P2 --seal` | 없음 |
 | P3 shared account·IMAP namespace | 잠김 | P2 | `node scripts/gates/shared-mailbox.ts P3 --seal` | 없음 |
 | P4 IMAP ACL 명령 | 잠김 | P3 | `node scripts/gates/shared-mailbox.ts P4 --seal` | 없음 |
 | P5 JMAP shared account | 잠김 | P4 | `node scripts/gates/shared-mailbox.ts P5 --seal` | 없음 |
@@ -197,7 +197,7 @@ negative 행은 저장하지 않고(`negative=0`) 후속 범위로 명시한다.
 | G-P1.3 | migration 수 | gate 내부 allMigrations 검사 | `migrations=20`, duplicate=0 |
 | G-P1.4 | schema 문서 | gate 내부 `mailbox_acl` 검사 | 020 DDL과 문서 표가 함께 존재 |
 
-## P2 — Store authorization (잠김, P1 봉인 필요)
+## P2 — Store authorization (진행 중, P1 봉인 완료)
 
 ### 미착수 P2.T1 — PrincipalContext Store 경계
 

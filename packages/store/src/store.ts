@@ -7,7 +7,7 @@
  * - "재시도 가능한 클레임 경합" vs "시맨틱 충돌"(이름 중복 등)을 구분: 후자는 스냅샷
  *   재검증 단계에서 즉시 StoreError를 던지고 재시도 루프에 진입하지 않는다.
  */
-import { ulid } from "@ionosphere/core";
+import { ulid, type MailboxOperation, type PrincipalContext } from "@ionosphere/core";
 import {
   BatchConflictError,
   BLOB_STATUS,
@@ -92,6 +92,7 @@ import type {
   TenantUsage,
 } from "./types.ts";
 import { WriterQueue } from "./writer-queue.ts";
+import { authorizeMailbox as authorizeMailboxAccess, type MailboxAuthorization } from "./authorization.ts";
 
 /** change_log.entity (SCHEMA.md §6-1) — enum 금지 정책이라 평범한 상수 객체로. */
 /** change_log.kind (SCHEMA.md §6-1). */
@@ -205,6 +206,11 @@ export class Store {
       withRetry: (fn) => this.withRetry(fn),
       mustGetAccount: (id) => this.mustGetAccount(id),
     };
+  }
+
+  /** 프로토콜 어댑터가 모든 mailboxId 진입 전에 호출하는 단일 권한 관문. */
+  async authorizeMailbox(context: PrincipalContext, mailboxId: string, operation: MailboxOperation): Promise<MailboxAuthorization> {
+    return authorizeMailboxAccess(this.db, context, mailboxId, operation);
   }
 
   // ── 재시도 루프 (§3-3/§7-8) ────────────────────────────────────────────

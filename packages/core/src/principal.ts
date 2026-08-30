@@ -13,6 +13,7 @@ export const PRINCIPAL_KIND = {
 export type PrincipalKind = (typeof PRINCIPAL_KIND)[keyof typeof PRINCIPAL_KIND];
 
 export type PrincipalContext = {
+  tenantId: string;
   principalId: string;
   primaryAccountId: string;
   accessibleAccountIds: readonly string[];

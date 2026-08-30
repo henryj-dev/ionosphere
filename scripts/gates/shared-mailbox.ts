@@ -40,7 +40,17 @@ const GATES: Record<string, Phase> = {
       { id: "G-P1.4", kind: "grep", path: "docs/SCHEMA.md", pattern: "mailbox_acl" },
     ],
   },
-  P2: { needs: ["P1"], outputs: ["packages/store/src/authorization.ts"], checks: [] },
+  P2: {
+    needs: ["P1"],
+    outputs: ["packages/store/src/authorization.ts", "packages/store/src/store.ts", "packages/store/src/index.ts", "packages/store/test/authorization.test.ts"],
+    checks: [
+      { id: "G-P2.1", kind: "command", command: ["node", "--test", "packages/store/test/authorization.test.ts"] },
+      { id: "G-P2.2", kind: "grep", path: "packages/store/src/store.ts", pattern: "authorizeMailbox" },
+      { id: "G-P2.3", kind: "grep", path: "packages/store/src/authorization.ts", pattern: "tenant_id = ?" },
+      { id: "G-P2.4", kind: "command", command: ["npm", "run", "lint"] },
+      { id: "G-P2.5", kind: "command", command: ["npm", "run", "typecheck"] },
+    ],
+  },
   P3: { needs: ["P2"], outputs: ["apps/server/src/imap-backend.ts"], checks: [] },
   P4: { needs: ["P3"], outputs: ["packages/proto-imap/src/engine.ts"], checks: [] },
   P5: { needs: ["P4"], outputs: ["apps/server/src/jmap-backend.ts"], checks: [] },
