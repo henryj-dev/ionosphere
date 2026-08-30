@@ -243,6 +243,10 @@ export class Store {
     });
   }
 
+  async accessibleMailboxIds(context: PrincipalContext, accountId: string): Promise<string[]> {
+    return (await this.listAccessibleMailboxes(context)).filter((row) => row.accountId === accountId).map((row) => row.id);
+  }
+
   async getMailboxAcl(tenantId: string, mailboxId: string): Promise<MailboxAclRow[]> {
     return getMailboxAcl(this.db, tenantId, mailboxId);
   }
@@ -2079,8 +2083,8 @@ export class Store {
     return jmapChanges(this.internals, accountId, entity, sinceState, maxChanges);
   }
 
-  getEmailsForJmap(accountId: string, ids: readonly string[]): Promise<JmapEmailMeta[]> {
-    return getEmailsForJmap(this.internals, accountId, ids);
+  getEmailsForJmap(accountId: string, ids: readonly string[], allowedMailboxIds?: readonly string[]): Promise<JmapEmailMeta[]> {
+    return getEmailsForJmap(this.internals, accountId, ids, allowedMailboxIds);
   }
 
   /** `SearchSnippet/get`용 원문 — `message_text`의 유일한 독자다(jmap-store.ts 주석 참조). */
@@ -2088,12 +2092,12 @@ export class Store {
     return getMessageTextForSnippets(this.internals, accountId, ids);
   }
 
-  queryEmails(accountId: string, filter: JmapEmailFilter, ascending: boolean, position: number, limit: number): Promise<JmapEmailQueryResult> {
-    return queryEmails(this.internals, accountId, filter, ascending, position, limit);
+  queryEmails(accountId: string, filter: JmapEmailFilter, ascending: boolean, position: number, limit: number, allowedMailboxIds?: readonly string[]): Promise<JmapEmailQueryResult> {
+    return queryEmails(this.internals, accountId, filter, ascending, position, limit, allowedMailboxIds);
   }
 
-  getThreadsForJmap(accountId: string, ids: readonly string[] | null): Promise<{ id: string; emailIds: string[] }[]> {
-    return getThreadsForJmap(this.internals, accountId, ids);
+  getThreadsForJmap(accountId: string, ids: readonly string[] | null, allowedMailboxIds?: readonly string[]): Promise<{ id: string; emailIds: string[] }[]> {
+    return getThreadsForJmap(this.internals, accountId, ids, allowedMailboxIds);
   }
 
   getIdentities(accountId: string): Promise<{ id: string; email: string; name: string | null; replyTo: string | null; textSignature: string; htmlSignature: string }[]> {

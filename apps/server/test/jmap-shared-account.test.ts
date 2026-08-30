@@ -20,13 +20,27 @@ describe("JMAP shared account", () => {
     const { rows: sharedMailbox } = await db.query({ sql: "SELECT id FROM mailboxes WHERE account_id = ?", params: [shared.accountId] });
     const sharedMailboxId = String(sharedMailbox[0]!.id);
     await store.setMailboxAcl(tenantId, sharedMailboxId, String(actorPrincipal[0]!.id), "lr");
+    const appended = await store.appendMessage({
+      accountId: shared.accountId,
+      mailboxIds: [sharedMailboxId],
+      blobId: "01JMAPSHAREDBLOB000000000000",
+      sizeBytes: 4,
+      receivedAt: 1,
+      envelope: { subject: "shared", subjectBase: "shared", msgidHash: null, sentAt: null, preview: "body", hasAttachment: false, addresses: [], threadRefHashes: [] },
+      keywords: [],
+    });
     const engine = new JmapEngine({
       modules: [buildMailModule(db, store, blobs)],
       capabilities: [MAIL_CAPABILITY],
       sessionState: () => "0",
     });
 
-    const response = await engine.handle({ using: [MAIL_CAPABILITY], methodCalls: [["Mailbox/get", { accountId: shared.accountId, ids: null }, "c0"] ] }, actor.accountId);
+    const response = await engine.handle({ using: [MAIL_CAPABILITY], methodCalls: [
+      ["Mailbox/get", { accountId: shared.accountId, ids: null }, "c0"],
+      ["Email/query", { accountId: shared.accountId, filter: { inMailbox: sharedMailboxId } }, "c1"],
+      ["Email/get", { accountId: shared.accountId, ids: [appended.messageId], properties: ["id", "subject"] }, "c2"],
+      ["Thread/get", { accountId: shared.accountId, ids: [appended.threadId] }, "c3"],
+    ] }, actor.accountId);
     const [name, result] = response.methodResponses[0]!;
     expect(name).toBe("Mailbox/get");
     const list = (result as { list: { id: string; myRights: { mayReadItems: boolean; mayAddItems: boolean } }[] }).list;
@@ -34,6 +48,12 @@ describe("JMAP shared account", () => {
     expect(list[0]?.id).toBe(sharedMailboxId);
     expect(list[0]?.myRights.mayReadItems).toBe(true);
     expect(list[0]?.myRights.mayAddItems).toBe(false);
+    const query = response.methodResponses[1]![1] as { ids: string[] };
+    expect(query.ids).toEqual([appended.messageId]);
+    const email = response.methodResponses[2]![1] as { list: { id: string }[] };
+    expect(email.list.map((item) => item.id)).toEqual([appended.messageId]);
+    const thread = response.methodResponses[3]![1] as { list: { emailIds: string[] }[] };
+    expect(thread.list[0]?.emailIds).toEqual([appended.messageId]);
     await db.close();
   });
 });

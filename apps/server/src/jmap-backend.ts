@@ -217,9 +217,9 @@ export function buildMailModule(db: DbDriver, store: Store, blobs: BlobStore): C
       "Mailbox/changes": (args, ctx) => standardChanges(args, ctx.accountId, mailboxChangesSource),
       "Mailbox/query": (args, ctx) => mailboxQuery(args, ctx.accountId, store),
       "Mailbox/set": (args, ctx) => standardSet(args, ctx.accountId, ctx, mailboxSetSource),
-      "Email/get": (args, ctx) => emailGet(args, ctx.accountId, store, blobs),
+      "Email/get": (args, ctx) => emailGet(args, ctx.accountId, db, store, blobs),
       "Email/changes": (args, ctx) => standardChanges(args, ctx.accountId, emailChangesSource),
-      "Email/query": (args, ctx) => emailQuery(args, ctx.accountId, store),
+      "Email/query": (args, ctx) => emailQuery(args, ctx.accountId, db, store),
       "Email/set": (args, ctx) => standardSet(args, ctx.accountId, ctx, buildEmailSetSource(db, store, blobs)),
       "Email/import": (args, ctx) => emailImport(args, ctx, store, buildEmailSetSource(db, store, blobs)),
       "Email/copy": (args, ctx) => emailCopy(args, ctx.accountId),
@@ -233,7 +233,7 @@ export function buildMailModule(db: DbDriver, store: Store, blobs: BlobStore): C
       "Blob/copy": (args, ctx) => emailCopy(args, ctx.accountId),
       "Email/queryChanges": (args, ctx) => standardQueryChanges(args, ctx.accountId),
       "Mailbox/queryChanges": (args, ctx) => standardQueryChanges(args, ctx.accountId),
-      "Thread/get": (args, ctx) => standardGet(args, ctx.accountId, threadGetSource),
+      "Thread/get": (args, ctx) => jmapThreadGet(args, ctx.accountId, db, store),
       "Thread/changes": (args, ctx) => standardChanges(args, ctx.accountId, threadChangesSource),
     },
   };
@@ -752,8 +752,10 @@ function strArrayOrNull(v: unknown, field: string): string[] | null {
 }
 
 /** Email/get (RFC 8621 §4.6) — 메타는 DB, 본문 프로퍼티 요청 시에만 블롭 파싱. ids=null은 미지원. */
-async function emailGet(args: Record<string, unknown>, accountId: string, store: Store, blobs: BlobStore): Promise<Record<string, unknown>> {
-  const acc = requireAccountId(args, accountId);
+async function emailGet(args: Record<string, unknown>, accountId: string, db: DbDriver, store: Store, blobs: BlobStore): Promise<Record<string, unknown>> {
+  const acc = await requestedAccountId(args, accountId);
+  const context = await principalContext(db, accountId);
+  const allowedMailboxIds = await store.accessibleMailboxIds(context, acc);
   const ids = strArrayOrNull(args.ids, "ids");
   if (ids === null) throw new MethodError("invalidArguments", { description: "Email/get은 ids 필수(Email/query로 먼저 조회)" });
   const properties = strArrayOrNull(args.properties, "properties") ?? DEFAULT_EMAIL_PROPS;
@@ -767,7 +769,7 @@ async function emailGet(args: Record<string, unknown>, accountId: string, store:
   const needBody = properties.some((p) => !CHEAP_EMAIL_PROPS.has(p));
 
   const state = (await store.jmapState(acc)).email;
-  const metas = await store.getEmailsForJmap(acc, ids);
+  const metas = await store.getEmailsForJmap(acc, ids, allowedMailboxIds);
   const byId = new Map(metas.map((m) => [m.id, m]));
 
   const list: JmapObject[] = [];
@@ -843,8 +845,10 @@ function project(obj: JmapObject, props: Set<string>): JmapObject {
 }
 
 /** Email/query (RFC 8621 §4.4, v1) — inMailbox/날짜/크기/키워드 필터 + receivedAt 정렬. */
-async function emailQuery(args: Record<string, unknown>, accountId: string, store: Store): Promise<Record<string, unknown>> {
-  const acc = requireAccountId(args, accountId);
+async function emailQuery(args: Record<string, unknown>, accountId: string, db: DbDriver, store: Store): Promise<Record<string, unknown>> {
+  const acc = await requestedAccountId(args, accountId);
+  const context = await principalContext(db, accountId);
+  const allowedMailboxIds = await store.accessibleMailboxIds(context, acc);
   const state = (await store.jmapState(acc)).email;
 
   const filter: JmapEmailFilter = {};
@@ -880,8 +884,21 @@ async function emailQuery(args: Record<string, unknown>, accountId: string, stor
 
   const position = typeof args.position === "number" && args.position >= 0 ? args.position : 0;
   const limit = typeof args.limit === "number" && args.limit >= 0 ? Math.min(args.limit, 500) : 500;
-  const { ids, total } = await store.queryEmails(acc, filter, ascending, position, limit);
+  const { ids, total } = await store.queryEmails(acc, filter, ascending, position, limit, allowedMailboxIds);
   return { accountId: acc, queryState: state, canCalculateChanges: false, position, total, limit, ids };
+}
+
+async function jmapThreadGet(args: Record<string, unknown>, accountId: string, db: DbDriver, store: Store): Promise<Record<string, unknown>> {
+  const acc = await requestedAccountId(args, accountId);
+  const ids = args.ids;
+  if (ids !== null && ids !== undefined && (!Array.isArray(ids) || ids.some((id) => typeof id !== "string"))) throw new MethodError("invalidArguments");
+  const context = await principalContext(db, accountId);
+  const allowedMailboxIds = await store.accessibleMailboxIds(context, acc);
+  const threads = await store.getThreadsForJmap(acc, ids === null || ids === undefined ? null : ids as string[], allowedMailboxIds);
+  const list = threads.map((thread) => ({ id: thread.id, emailIds: thread.emailIds }));
+  const found = new Set(list.map((thread) => thread.id));
+  const notFound = ids === null || ids === undefined ? [] : (ids as string[]).filter((id) => !found.has(id));
+  return { accountId: acc, state: (await store.jmapState(acc)).thread, list, notFound };
 }
 
 /**

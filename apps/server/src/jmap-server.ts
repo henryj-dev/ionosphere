@@ -522,15 +522,26 @@ export class JmapServer {
    */
   private async serveDownload(url: URL, res: ServerResponse, auth: { accountId: string }): Promise<void> {
     const parts = url.pathname.split("/").filter((p) => p.length > 0); // jmap download accountId blobId name
+    const requestedAccountId = parts[2] ?? auth.accountId;
     const blobId = parts[3];
     if (!blobId) {
       res.writeHead(404, { "content-type": "application/json" });
       res.end(JSON.stringify({ status: 404, detail: "blob not found" }));
       return;
     }
+    const context = await principalContext(this.opts.db, auth.accountId);
+    const allowedMailboxIds = await this.opts.store.accessibleMailboxIds(context, requestedAccountId);
+    const sharedMessageCondition = requestedAccountId === auth.accountId
+      ? ""
+      : allowedMailboxIds.length === 0
+        ? " AND 1 = 0"
+        // lint-allow chunked-in-query: P5의 mailbox 집합은 listing cache 단계에서 유계화하고, 현재는 ACL 결과를 직접 사용한다.
+        : ` AND EXISTS (SELECT 1 FROM message_mailbox access_mm WHERE access_mm.message_id = m.id AND access_mm.mailbox_id IN (${allowedMailboxIds.map(() => "?").join(", ")}))`;
     const { rows: refRows } = await this.opts.db.query({
-      sql: "SELECT 1 AS x FROM blob_refs WHERE blob_id = ? AND account_id = ? LIMIT 1",
-      params: [blobId, auth.accountId],
+      sql: `SELECT 1 AS x FROM blob_refs br
+            LEFT JOIN messages m ON m.id = br.ref_id AND br.ref_kind = ?
+            WHERE br.blob_id = ? AND br.account_id = ?${sharedMessageCondition} LIMIT 1`,
+      params: [REF_KIND.message, blobId, requestedAccountId, ...allowedMailboxIds],
     });
     if (refRows.length === 0) {
       // 존재 여부를 흘리지 않도록 미인가와 부재를 같은 404로 답한다.
