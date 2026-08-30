@@ -541,7 +541,7 @@ export class JmapServer {
       sql: `SELECT 1 AS x FROM blob_refs br
             LEFT JOIN messages m ON m.id = br.ref_id AND br.ref_kind = ?
             WHERE br.blob_id = ? AND br.account_id = ?${sharedMessageCondition} LIMIT 1`,
-      params: [REF_KIND.message, blobId, requestedAccountId, ...allowedMailboxIds],
+      params: [REF_KIND.message, blobId, requestedAccountId, ...(requestedAccountId === auth.accountId ? [] : allowedMailboxIds)],
     });
     if (refRows.length === 0) {
       // 존재 여부를 흘리지 않도록 미인가와 부재를 같은 404로 답한다.

@@ -229,6 +229,7 @@ export interface JmapStates {
   thread: string;
   submission: string;
   identity: string;
+  permission: string;
 }
 
 /** change_log 엔티티 (SCHEMA §6-1). */

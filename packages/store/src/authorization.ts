@@ -104,6 +104,7 @@ export async function setMailboxAcl(db: DbDriver, tenantId: string, mailboxId: s
     { sql: db.insertIgnore("mailbox_acl", ["mailbox_id", "principal_id", "rights", "negative", "created_at", "updated_at"]), params: [mailboxId, principalId, canonical, 0, now, now] },
     { sql: "UPDATE mailbox_acl SET rights = ?, negative = 0, updated_at = ? WHERE mailbox_id = ? AND principal_id = ?", params: [canonical, now, mailboxId, principalId] },
     { sql: "UPDATE mailboxes SET acl_version = acl_version + 1 WHERE id = ?", params: [mailboxId] },
+    { sql: "UPDATE accounts SET permissions_version = permissions_version + 1 WHERE id = (SELECT account_id FROM mailboxes WHERE id = ?)", params: [mailboxId] },
   ]);
 }
 
@@ -117,6 +118,7 @@ export async function deleteMailboxAcl(db: DbDriver, tenantId: string, mailboxId
   await db.batch([
     { sql: "DELETE FROM mailbox_acl WHERE mailbox_id = ? AND principal_id = ?", params: [mailboxId, principalId] },
     { sql: "UPDATE mailboxes SET acl_version = acl_version + 1 WHERE id = ?", params: [mailboxId] },
+    { sql: "UPDATE accounts SET permissions_version = permissions_version + 1 WHERE id = (SELECT account_id FROM mailboxes WHERE id = ?)", params: [mailboxId] },
   ]);
   return true;
 }

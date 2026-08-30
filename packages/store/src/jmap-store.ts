@@ -26,7 +26,7 @@ import type {
 
 export async function jmapState(s: StoreInternals, accountId: string): Promise<JmapStates> {
   const { rows } = await s.db.query({
-    sql: "SELECT state_email, state_mailbox, state_thread, state_submission, state_identity FROM accounts WHERE id = ?",
+    sql: "SELECT state_email, state_mailbox, state_thread, state_submission, state_identity, permissions_version FROM accounts WHERE id = ?",
     params: [accountId],
   });
   const row = rows[0];
@@ -37,6 +37,7 @@ export async function jmapState(s: StoreInternals, accountId: string): Promise<J
     thread: String(Number(row.state_thread)),
     submission: String(Number(row.state_submission)),
     identity: String(Number(row.state_identity ?? 0)),
+    permission: String(Number(row.permissions_version ?? 0)),
   };
 }
 

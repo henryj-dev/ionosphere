@@ -307,8 +307,10 @@ mailbox 집합으로 제한한다. From Identity와 maySubmit을 별도 검사�
   - 검출: shared mailbox 읽기 권한이 발신 권한으로 상승하는 회귀.
 
 【통과】 세션 계정 발견이 ACL로 접근 가능한 shared account만 반환하고, Mailbox/get·Email/get·
-Email/query·Thread/get이 요청 주체가 접근 가능한 mailbox 집합으로 제한되는 fixture가 pass한다.
-Blob/download와 permission-version state 경계는 아직 남아 있으므로 P5 봉인은 보류한다.
+Email/query·Thread/get·Blob/download가 요청 주체가 접근 가능한 mailbox 집합으로 제한된다.
+ACL 변경은 `permissions_version`을 증가시키고 shared account의 compound state가 불일치하면
+`cannotCalculateChanges`를 반환한다. shared account의 Email/Submission·Mailbox mutation은
+주 계정 검증과 read-only capability로 거부한다.
 
 ## 🚪 GATE P5
 
@@ -318,7 +320,9 @@ Blob/download와 permission-version state 경계는 아직 남아 있으므로 P
 | G-P5.2 | JMAP Mailbox/get fixture | `node --test apps/server/test/jmap-shared-account.test.ts` | shared mailbox 1개와 myRights pass |
 | G-P5.3 | Session 배선 | gate 내부 grep | `listAccessibleAccounts`, `isReadOnly` 검출 |
 | G-P5.4 | Email/Thread mailbox filter | gate 내부 grep | `allowedMailboxIds`가 JMAP store에 존재 |
-| G-P5.5 | 정적 품질 | `node scripts/gates/shared-mailbox.ts P5` | lint/typecheck 0 |
+| G-P5.5 | permission state 원장 | gate 내부 grep | `permissions_version`이 JMAP state에 포함 |
+| G-P5.6 | blob 인가 | gate 내부 grep | requested account와 ACL mailbox 집합을 함께 검사 |
+| G-P5.7 | 정적 품질 | `node scripts/gates/shared-mailbox.ts P5` | lint/typecheck 0 |
 
 ## P6 — LDAP/AD mapping (잠김, P5 봉인 필요)
 

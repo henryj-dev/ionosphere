@@ -91,10 +91,13 @@ describe("mailbox authorization", () => {
     const acl = await store.getMailboxAcl(tenantId, inboxId);
     expect(acl[0]?.rights).toBe("lrkxte");
     expect(acl[0]?.negative).toBe(false);
+    const beforePermission = await db.query({ sql: "SELECT permissions_version FROM accounts WHERE id = (SELECT account_id FROM mailboxes WHERE id = ?)", params: [inboxId] });
     expect(await store.deleteMailboxAcl(tenantId, inboxId, principalId)).toBe(true);
     expect(await store.getMailboxAcl(tenantId, inboxId)).toEqual([]);
     const version = await db.query({ sql: "SELECT acl_version FROM mailboxes WHERE id = ?", params: [inboxId] });
     expect(Number(version.rows[0]?.acl_version)).toBe(2);
+    const afterPermission = await db.query({ sql: "SELECT permissions_version FROM accounts WHERE id = (SELECT account_id FROM mailboxes WHERE id = ?)", params: [inboxId] });
+    expect(Number(afterPermission.rows[0]?.permissions_version)).toBe(Number(beforePermission.rows[0]?.permissions_version) + 1);
     await db.close();
   });
 

@@ -54,6 +54,10 @@ describe("JMAP shared account", () => {
     expect(email.list.map((item) => item.id)).toEqual([appended.messageId]);
     const thread = response.methodResponses[3]![1] as { list: { emailIds: string[] }[] };
     expect(thread.list[0]?.emailIds).toEqual([appended.messageId]);
+    const queryState = (response.methodResponses[1]![1] as { queryState: string }).queryState;
+    await store.setMailboxAcl(tenantId, sharedMailboxId, String(actorPrincipal[0]!.id), "lr");
+    const stale = await engine.handle({ using: [MAIL_CAPABILITY], methodCalls: [["Email/changes", { accountId: shared.accountId, sinceState: queryState }, "c4"]] }, actor.accountId);
+    expect(stale.methodResponses[0]).toEqual(["error", { type: "cannotCalculateChanges" }, "c4"]);
     await db.close();
   });
 });
