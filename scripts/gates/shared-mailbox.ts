@@ -128,7 +128,20 @@ const GATES: Record<string, Phase> = {
       { id: "G-P7.8", kind: "command", command: ["npm", "run", "typecheck"] },
     ],
   },
-  P8: { needs: ["P7"], outputs: ["packages/store/src/listing-cache.ts"], checks: [] },
+  P8: {
+    needs: ["P7"],
+    outputs: ["packages/store/src/listing-cache.ts", "packages/store/test/listing-cache.test.ts", "packages/db/src/migrations/023_listing_indexes.ts"],
+    checks: [
+      { id: "G-P8.1", kind: "command", command: ["node", "--test", "packages/store/test/listing-cache.test.ts"] },
+      { id: "G-P8.2", kind: "command", command: ["node", "--test", "packages/db/test/migrate.test.ts"] },
+      { id: "G-P8.3", kind: "grep", path: "packages/store/src/listing-cache.ts", pattern: "maxResults: 2_000" },
+      { id: "G-P8.4", kind: "grep", path: "packages/store/src/listing-cache.ts", pattern: "minTtlMs: 5_000" },
+      { id: "G-P8.5", kind: "grep", path: "packages/store/src/listing-cache.ts", pattern: "maxEntries: 256" },
+      { id: "G-P8.6", kind: "grep", path: "packages/store/src/listing-cache.ts", pattern: "permissionsVersion" },
+      { id: "G-P8.7", kind: "command", command: ["npm", "run", "lint"] },
+      { id: "G-P8.8", kind: "command", command: ["npm", "run", "typecheck"] },
+    ],
+  },
   P9: { needs: ["P8"], outputs: ["packages/admin-cmd/src/registry.ts"], checks: [] },
   P10: { needs: ["P9"], outputs: [], checks: [{ id: "G-P10.1", kind: "command", command: ["npm", "run", "verify"] }] },
 };

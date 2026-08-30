@@ -89,6 +89,7 @@ export { m009Complaints } from "./migrations/009_complaints.ts";
 export { m010BayesTokens } from "./migrations/010_bayes_tokens.ts";
 export { m019IdentityState } from "./migrations/019_identity_state.ts";
 export { m022HeaderProjection } from "./migrations/022_header_projection.ts";
+export { m023ListingIndexes } from "./migrations/023_listing_indexes.ts";
 
 import { m001Init } from "./migrations/001_init.ts";
 import { m002Webhooks } from "./migrations/002_webhooks.ts";
@@ -112,7 +113,8 @@ import { m019IdentityState } from "./migrations/019_identity_state.ts";
 import { m020MailboxAcl } from "./migrations/020_mailbox_acl.ts";
 import { m021DirectoryIdentity } from "./migrations/021_directory_identity.ts";
 import { m022HeaderProjection } from "./migrations/022_header_projection.ts";
+import { m023ListingIndexes } from "./migrations/023_listing_indexes.ts";
 import type { Migration } from "./migrate.ts";
 
 /** 전체 마이그레이션 목록 (버전 순). */
-export const allMigrations: readonly Migration[] = [m001Init, m002Webhooks, m003Forwarding, m004BlobGc, m005MaildropLock, m006AddressFanout, m007Smarthosts, m008SuppressionExpiry, m009Complaints, m010BayesTokens, m011QueueIndexes, m012DsnDelayNotice, m013Vacation, m014ExpungedFloor, m015VacationResponse, m016DsnParams, m017Reporting, m018PushSubscriptions, m019IdentityState, m020MailboxAcl, m021DirectoryIdentity, m022HeaderProjection];
+export const allMigrations: readonly Migration[] = [m001Init, m002Webhooks, m003Forwarding, m004BlobGc, m005MaildropLock, m006AddressFanout, m007Smarthosts, m008SuppressionExpiry, m009Complaints, m010BayesTokens, m011QueueIndexes, m012DsnDelayNotice, m013Vacation, m014ExpungedFloor, m015VacationResponse, m016DsnParams, m017Reporting, m018PushSubscriptions, m019IdentityState, m020MailboxAcl, m021DirectoryIdentity, m022HeaderProjection, m023ListingIndexes];

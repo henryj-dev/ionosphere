@@ -91,6 +91,7 @@ export { AUTH_SURFACES, credentialAllowsSurface, type AuthSurface } from "./auth
 export { createBayesStore } from "./bayes-store.ts";
 export { syncDirectorySnapshot, type DirectoryGroupSync, type DirectoryIdentitySync, type DirectorySyncInput } from "./directory-sync.ts";
 export { backfillHeaderProjection, projectHeaders, HEADER_PROJECTION_LIMITS, HEADER_PROJECTION_NAMES, type HeaderBackfillOptions, type HeaderProjection, type HeaderProjectionKind, type HeaderProjectionName } from "./header-projection.ts";
+export { getOrLoadListing, listingCacheKey, ListingCache, LISTING_CACHE_LIMITS, type ListingCacheKeyParts, type ListingCacheOptions } from "./listing-cache.ts";
 
 /**
  * `IN (…)` 읽기 질의의 파라미터 청크 헬퍼 — 조립층(IMAP 백엔드)도 같은 한도를 지켜야 한다.

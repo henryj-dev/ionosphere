@@ -29,6 +29,7 @@
 > | 020 | mailbox_acl | **§4-1** |
 > | 021 | directory_identity | **§4-2** |
 > | 022 | header_projection | **§5-4** |
+> | 023 | listing_indexes | **§5-5** |
 >
 > ⚠ 새 마이그레이션을 넣으면 **이 표와 해당 절을 같이 갱신할 것.** 009·010이 한동안 코드에만
 > 있고 이 문서에 없었다 — "동결 스키마"를 자처하는 문서가 실제 테이블을 빠뜨리면, 그것을 읽고
@@ -394,6 +395,17 @@ CREATE TABLE message_header_projection (
 );
 CREATE INDEX ix_header_projection_date ON message_header_projection(name, date_value, message_id);
 CREATE INDEX ix_header_projection_sort ON message_header_projection(name, sort_value, message_id);
+```
+
+### 5-5. listing indexes (마이그레이션 023)
+
+UID 순서와 subject/header 정렬의 선두 인덱스를 추가한다. 목록 캐시는 프로세스 메모리의 bounded
+LRU일 뿐이며, mailbox modseq와 ACL/permissions version이 바뀌면 key가 달라져 DB 결과를 다시 읽는다.
+
+```sql
+CREATE INDEX ix_mm_listing ON message_mailbox(mailbox_id, uid, message_id);
+CREATE INDEX ix_messages_subject_sort ON messages(account_id, subject_base, id);
+CREATE INDEX ix_header_projection_listing ON message_header_projection(name, sort_value, message_id);
 ```
 
 - IMAP `FETCH (MODSEQ)`/`CHANGEDSINCE` = `message_mailbox ⋈ messages WHERE messages.modseq > ?`.

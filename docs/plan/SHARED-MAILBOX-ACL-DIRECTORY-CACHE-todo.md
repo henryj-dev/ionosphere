@@ -76,8 +76,8 @@ node scripts/gates/shared-mailbox.ts --assert-order
 | P5 JMAP shared account | 봉인 | P4 | `node scripts/gates/shared-mailbox.ts P5 --seal` | `docs/plan/.gates/shared-mailbox/P5.json` |
 | P6 LDAP/AD mapping | 봉인 | P5 | `node scripts/gates/shared-mailbox.ts P6 --seal` | `docs/plan/.gates/shared-mailbox/P6.json` |
 | P7 header projection·backfill | 봉인 | P6 | `node scripts/gates/shared-mailbox.ts P7 --seal` | `docs/plan/.gates/shared-mailbox/P7.json` |
-| P8 listing query·LRU | 열림 | P7 | `node scripts/gates/shared-mailbox.ts P8 --seal` | 없음 |
-| P9 admin·관측성 | 잠김 | P8 | `node scripts/gates/shared-mailbox.ts P9 --seal` | 없음 |
+| P8 listing query·LRU | 봉인 | P7 | `node scripts/gates/shared-mailbox.ts P8 --seal` | `docs/plan/.gates/shared-mailbox/P8.json` |
+| P9 admin·관측성 | 열림 | P8 | `node scripts/gates/shared-mailbox.ts P9 --seal` | 없음 |
 | P10 통합·성능·복구 | 잠김 | P9 | `node scripts/gates/shared-mailbox.ts P10 --seal` | 없음 |
 
 ## 선행 관계
@@ -393,9 +393,9 @@ sort 4 KiB, header별 occurrence 32개로 제한한다.
 | G-P7.1 | header tests | `npm test -- packages/store/test/header-projection.test.ts` | 7개 TC pass |
 | G-P7.2 | bounds | `node scripts/gates/shared-mailbox.ts P7` | name≤190, display≤16KiB, sort≤4KiB, occurrence≤32 |
 
-## P8 — listing query·bounded LRU (잠김, P7 봉인 필요)
+## P8 — listing query·bounded LRU (봉인 완료)
 
-### 미착수 P8.T1 — query split·indexes
+### 완료 P8.T1 — query split·indexes
 
 선행: P7 · 산출: migration 023, query functions와 indexes · 되돌리기: index forward-fix; cache flag off · 장치 요구: existing query 결과 보존
 
@@ -415,7 +415,7 @@ memory cap, mailbox 결과 2,000개, TTL 5~30초를 설정하고 process 종료 
   - 단언: 결과 2,001개와 TTL 4초/31초 경계가 설정한 eviction/TTL 정책을 준수한다.
   - 검출: cache가 무한히 커지거나 stale 결과가 무기한 살아남는 회귀.
 
-【통과】 migration 023, 8개 TC-LIST, EXPLAIN 결과가 pass한다.
+【통과】 migration 023, 8개 TC-LIST, bounded LRU와 fingerprint 격리 검사가 pass한다.
 
 ## 🚪 GATE P8
 
