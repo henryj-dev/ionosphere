@@ -61,6 +61,7 @@ import {
 import { tokenize, tokenizeQuery } from "./tokenize.ts";
 import type {
   AccountRow,
+  AccessibleAccount,
   AppendMessageInput,
   AppendMessageResult,
   AppendSearchText,
@@ -222,6 +223,24 @@ export class Store {
     });
     const decisions = await Promise.all(rows.map((row) => authorizeMailboxAccess(this.db, context, String(row.id), "lookup")));
     return rows.filter((_, index) => decisions[index]?.allowed === true).map(mapMailboxRow);
+  }
+
+  /** JMAP Session이 노출할 계정. ACL로 실제 접근 가능한 mailbox가 있는 계정만 반환한다. */
+  async listAccessibleAccounts(context: PrincipalContext): Promise<AccessibleAccount[]> {
+    const mailboxes = await this.listAccessibleMailboxes(context);
+    const accountIds = [...new Set(mailboxes.map((mailbox) => mailbox.accountId))];
+    if (!accountIds.includes(context.primaryAccountId)) accountIds.push(context.primaryAccountId);
+    const rows = await queryInChunks(
+      this.db,
+      accountIds,
+      (ph) => `SELECT id, email, kind FROM accounts WHERE tenant_id = ? AND status = 1 AND id IN (${ph})`,
+      [context.tenantId],
+    );
+    const byId = new Map(rows.map((row) => [String(row.id), { id: String(row.id), email: String(row.email), kind: Number(row.kind) }]));
+    return accountIds.flatMap((id) => {
+      const account = byId.get(id);
+      return account ? [account] : [];
+    });
   }
 
   async getMailboxAcl(tenantId: string, mailboxId: string): Promise<MailboxAclRow[]> {

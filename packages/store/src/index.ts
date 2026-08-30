@@ -51,6 +51,7 @@ export { authorizeMailbox, deleteMailboxAcl, getMailboxAcl, setMailboxAcl, type 
 export { tokenize, tokenizeQuery } from "./tokenize.ts";
 export type {
   AccountRow,
+  AccessibleAccount,
   AppendAddress,
   AppendEnvelope,
   AppendMessageInput,

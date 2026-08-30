@@ -41,6 +41,7 @@ import {
 } from "@ionosphere/proto-jmap";
 import { buildMailModule, buildQuotaModule, buildSubmissionModule, buildVacationModule } from "./jmap-backend.ts";
 import { buildPushMethods, type PushModuleOptions } from "./push.ts";
+import { principalContext } from "./principal-context.ts";
 
 export interface JmapServerOptions {
   db: DbDriver;
@@ -358,7 +359,7 @@ export class JmapServer {
        * 하나 줄며, 리다이렉트를 따르는 클라이언트도 그대로 동작한다.
        */
       if (req.method === "GET" && (url.pathname === "/jmap/session" || url.pathname === "/.well-known/jmap")) {
-        return this.serveSession(req, res, auth);
+        return await this.serveSession(req, res, auth);
       }
       if (req.method === "POST" && url.pathname === "/jmap/api") {
         return await this.serveApi(req, res, auth);
@@ -446,25 +447,25 @@ export class JmapServer {
     return `http://${host}`;
   }
 
-  private serveSession(req: IncomingMessage, res: ServerResponse, auth: { accountId: string; email: string }): void {
+  private async serveSession(req: IncomingMessage, res: ServerResponse, auth: { accountId: string; email: string }): Promise<void> {
     const base = this.baseUrl(req);
+    const context = await principalContext(this.opts.db, auth.accountId);
+    const accessible = await this.opts.store.listAccessibleAccounts(context);
+    const accounts = accessible.map((account) => ({
+      accountId: account.id,
+      name: account.email,
+      isPersonal: account.kind === 0,
+      // shared account의 세부 mayRights는 Mailbox/get에서 계산한다. 세션은 보수적으로 읽기 전용을 광고한다.
+      isReadOnly: account.kind !== 0,
+      accountCapabilities: {
+        [MAIL_CAPABILITY]: { maxMailboxesPerEmail: null, maxMailboxDepth: null, mayCreateTopLevelMailbox: account.kind === 0 },
+        [SUBMISSION_CAPABILITY]: { maxDelayedSend: 0, submissionExtensions: {} },
+        [QUOTA_CAPABILITY]: {},
+        [VACATION_CAPABILITY]: {},
+      },
+    }));
     const session = buildSession({
-      accounts: [
-        {
-          accountId: auth.accountId,
-          name: auth.email,
-          isPersonal: true,
-          isReadOnly: false,
-          accountCapabilities: {
-            [MAIL_CAPABILITY]: { maxMailboxesPerEmail: null, maxMailboxDepth: null, mayCreateTopLevelMailbox: true },
-            [SUBMISSION_CAPABILITY]: { maxDelayedSend: 0, submissionExtensions: {} },
-            // 계정별 능력 객체가 비어 있어도 **키가 있어야** 클라이언트가 그 계정에서 쓸 수
-            // 있다고 판단한다(RFC 8620 §2 accountCapabilities). 서버 전역 목록만으로는 부족하다.
-            [QUOTA_CAPABILITY]: {},
-            [VACATION_CAPABILITY]: {},
-          },
-        },
-      ],
+      accounts,
       primaryAccountId: auth.accountId,
       username: auth.email,
       apiUrl: `${base}/jmap/api`,

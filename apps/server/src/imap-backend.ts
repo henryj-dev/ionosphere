@@ -27,6 +27,7 @@ import {
 } from "@ionosphere/store";
 import type { ImapBackend, ImapBackendRequest, ImapBackendResponse, ImapFetchData, ImapMailbox, SeqRange } from "@ionosphere/proto-imap";
 import { toAppendAddresses } from "./addresses.ts";
+import { principalContext as loadPrincipalContext } from "./principal-context.ts";
 
 const DELIM = "/";
 
@@ -246,18 +247,7 @@ export class IonosphereImapBackend implements ImapBackend {
 
   /** 인증 계정에서 tenant·account principal·group membership을 한 번에 복원한다. */
   private async principalContext(accountId: string): Promise<PrincipalContext> {
-    const account = await this.db.query({ sql: "SELECT tenant_id FROM accounts WHERE id = ? AND status = 1", params: [accountId] });
-    const tenantId = String(account.rows[0]?.tenant_id ?? "");
-    const principal = await this.db.query({ sql: "SELECT id FROM principals WHERE tenant_id = ? AND account_id = ?", params: [tenantId, accountId] });
-    const memberships = await this.db.query({ sql: "SELECT principal_id FROM account_memberships WHERE account_id = ?", params: [accountId] });
-    return {
-      tenantId,
-      principalId: String(principal.rows[0]?.id ?? accountId),
-      primaryAccountId: accountId,
-      accessibleAccountIds: [accountId],
-      groupIds: memberships.rows.map((row) => String(row.principal_id)),
-      authenticated: true,
-    };
+    return loadPrincipalContext(this.db, accountId);
   }
 
   private async hasMailboxRight(accountId: string, mailboxId: string, operation: "read" | "insert" | "write" | "delete" | "expunge" | "create" | "admin"): Promise<boolean> {

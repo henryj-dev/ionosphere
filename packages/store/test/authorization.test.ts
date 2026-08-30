@@ -97,4 +97,24 @@ describe("mailbox authorization", () => {
     expect(Number(version.rows[0]?.acl_version)).toBe(2);
     await db.close();
   });
+
+  test("JMAP 계정 목록은 ACL로 보이는 shared account만 포함한다", async () => {
+    const { db, store, tenantId, accountId, inboxId } = await setupFixture();
+    const shared = await store.createAccount({ tenantId, email: "shared@acme.test", kind: 1 });
+    const { rows: principalRows } = await db.query({ sql: "SELECT id FROM principals WHERE account_id = ?", params: [accountId] });
+    const { rows: sharedMailboxRows } = await db.query({ sql: "SELECT id FROM mailboxes WHERE account_id = ?", params: [shared.accountId] });
+    await store.setMailboxAcl(tenantId, String(sharedMailboxRows[0]!.id), String(principalRows[0]!.id), "l");
+    const accounts = await store.listAccessibleAccounts({
+      tenantId,
+      principalId: String(principalRows[0]!.id),
+      primaryAccountId: accountId,
+      accessibleAccountIds: [accountId],
+      groupIds: [],
+      authenticated: true,
+    });
+    expect(accounts.map((account) => account.id)).toEqual([accountId, shared.accountId]);
+    expect(accounts.find((account) => account.id === shared.accountId)?.kind).toBe(1);
+    expect(inboxId).toBeTruthy();
+    await db.close();
+  });
 });

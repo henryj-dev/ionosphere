@@ -216,6 +216,12 @@ export interface AccountRow {
   messageCount: number;
 }
 
+export interface AccessibleAccount {
+  id: string;
+  email: string;
+  kind: number;
+}
+
 /** JMAP 타입별 state 고수위 문자열 (SCHEMA §6-3 accounts.state_*). */
 export interface JmapStates {
   email: string;

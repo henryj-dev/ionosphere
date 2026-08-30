@@ -73,7 +73,7 @@ node scripts/gates/shared-mailbox.ts --assert-order
 | P2 Store authorization | 봉인 | P1 | `node scripts/gates/shared-mailbox.ts P2 --seal` | `docs/plan/.gates/shared-mailbox/P2.json` |
 | P3 shared account·IMAP namespace | 봉인 | P2 | `node scripts/gates/shared-mailbox.ts P3 --seal` | `docs/plan/.gates/shared-mailbox/P3.json` |
 | P4 IMAP ACL 명령 | 봉인 | P3 | `node scripts/gates/shared-mailbox.ts P4 --seal` | `docs/plan/.gates/shared-mailbox/P4.json` |
-| P5 JMAP shared account | 잠김 | P4 | `node scripts/gates/shared-mailbox.ts P5 --seal` | 없음 |
+| P5 JMAP shared account | 열림 | P4 | `node scripts/gates/shared-mailbox.ts P5 --seal` | 없음 |
 | P6 LDAP/AD mapping | 잠김 | P5 | `node scripts/gates/shared-mailbox.ts P6 --seal` | 없음 |
 | P7 header projection·backfill | 잠김 | P6 | `node scripts/gates/shared-mailbox.ts P7 --seal` | 없음 |
 | P8 listing query·LRU | 잠김 | P7 | `node scripts/gates/shared-mailbox.ts P8 --seal` | 없음 |
@@ -284,7 +284,7 @@ APPEND/COPY flag별 권한, virtual `c/d`, READ-ONLY 교집합을 구현한다.
 | G-P4.4 | 권한 관문 존재 | gate 내부 grep | backend `hasMailboxRight` 검출 1건 이상 |
 | G-P4.5 | RFC mapping·품질 | `node scripts/gates/shared-mailbox.ts P4` | standard 11, virtual 2, lint/typecheck 0 |
 
-## P5 — JMAP shared account (잠김, P4 봉인 필요)
+## P5 — JMAP shared account (진행 중, P4 봉인 완료)
 
 ### 미착수 P5.T1 — Session·partial access·myRights
 
@@ -306,14 +306,16 @@ mailbox 집합으로 제한한다. From Identity와 maySubmit을 별도 검사�
   - 단언: maySubmit과 From Identity 중 하나라도 없으면 EmailSubmission/set이 거부된다.
   - 검출: shared mailbox 읽기 권한이 발신 권한으로 상승하는 회귀.
 
-【통과】 8개 TC-JMAP-SHARED와 primary account 회귀가 pass한다.
+【통과】 세션 계정 발견이 ACL로 접근 가능한 shared account만 반환하고, primary account는 항상
+포함하는 fixture가 pass한다. 이후 Mailbox/Email/Thread/blob의 부분 접근 경계를 추가한 뒤 P5를 봉인한다.
 
 ## 🚪 GATE P5
 
 | id | 검사 | 명령 | 통과 기준 |
 |---|---|---|---|
-| G-P5.1 | JMAP shared | `npm test -- apps/server/test/jmap-shared-account.test.ts` | 8개 TC pass |
-| G-P5.2 | state transition | `node scripts/gates/shared-mailbox.ts P5` | permission mismatch는 cannotCalculateChanges만 허용 |
+| G-P5.1 | accessible account fixture | `node --test packages/store/test/authorization.test.ts` | ACL 계정 목록 TC pass |
+| G-P5.2 | Session 배선 | gate 내부 grep | `listAccessibleAccounts`, `isReadOnly` 검출 |
+| G-P5.3 | 정적 품질 | `node scripts/gates/shared-mailbox.ts P5` | lint/typecheck 0 |
 
 ## P6 — LDAP/AD mapping (잠김, P5 봉인 필요)
 
