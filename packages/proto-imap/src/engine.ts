@@ -76,6 +76,11 @@ export type ImapBackendRequest =
   | { kind: "createMailbox"; name: string }
   | { kind: "deleteMailbox"; name: string }
   | { kind: "renameMailbox"; from: string; to: string }
+  | { kind: "getAcl"; name: string }
+  | { kind: "setAcl"; name: string; identifier: string; rights: string }
+  | { kind: "deleteAcl"; name: string; identifier: string }
+  | { kind: "listRights"; name: string; identifier: string }
+  | { kind: "myRights"; name: string }
   /** SUBSCRIBE/UNSUBSCRIBE 영속화 (RFC 9051 §6.3.7/6.3.8). */
   | { kind: "setSubscribed"; name: string; subscribed: boolean }
   | { kind: "selectMailbox"; name: string }
@@ -202,6 +207,8 @@ export type ImapBackendResponse =
   /** REPLACE 결과 — 새 uid와, 실제로 지워진 옛 uid(못 지웠으면 null). */
   | { kind: "replaced"; uidvalidity: number; uid: number; expungedUid: number | null }
   | { kind: "copied"; uidvalidity: number; srcUids: readonly number[]; dstUids: readonly number[] }
+  | { kind: "acl"; mailbox: string; entries: readonly { identifier: string; rights: string }[] }
+  | { kind: "rights"; mailbox: string; identifier: string; rights: string }
   /**
    * 쿼터 현황. `limitBytes === 0`이면 무제한 — 그때는 `* QUOTA`에 STORAGE 항목을 싣지 않는다
    * (RFC 9208은 "한도 없음"을 표현하는 값을 정의하지 않는다. 0을 실으면 "0바이트 허용"으로
@@ -716,6 +723,16 @@ export class ImapEngine {
         return this.requireAuth(cmd, () => this.cmdDelete(cmd));
       case "RENAME":
         return this.requireAuth(cmd, () => this.cmdRename(cmd));
+      case "GETACL":
+        return this.requireAuth(cmd, () => this.cmdGetAcl(cmd));
+      case "SETACL":
+        return this.requireAuth(cmd, () => this.cmdSetAcl(cmd));
+      case "DELETEACL":
+        return this.requireAuth(cmd, () => this.cmdDeleteAcl(cmd));
+      case "LISTRIGHTS":
+        return this.requireAuth(cmd, () => this.cmdListRights(cmd));
+      case "MYRIGHTS":
+        return this.requireAuth(cmd, () => this.cmdMyRights(cmd));
       case "STATUS":
         return this.requireAuth(cmd, () => this.cmdStatus(cmd));
       case "SELECT":
@@ -798,6 +815,62 @@ export class ImapEngine {
   private static noReply(tag: string, verb: string, res: { code?: string; message: string }): ImapAction {
     const code = res.code ? `[${res.code}] ` : "";
     return { kind: "reply", text: `${tag} NO ${code}${verb} ${res.message}` };
+  }
+
+  private identifierArg(cmd: ParsedCommand, idx: number): string | null {
+    const value = cmd.args[idx];
+    return value ? valueText(value) : null;
+  }
+
+  private cmdGetAcl(cmd: ParsedCommand): ImapAction[] {
+    const name = this.mailboxArg(cmd, 0);
+    if (name === null || cmd.args.length !== 1) return [{ kind: "reply", text: `${cmd.tag} BAD GETACL expects mailbox name` }];
+    return this.callBackend({ kind: "getAcl", name }, (res) => {
+      if (res.kind === "no") return [ImapEngine.noReply(cmd.tag, "GETACL", res)];
+      if (res.kind !== "acl") return [{ kind: "reply", text: `${cmd.tag} NO GETACL failed` }];
+      const pairs = res.entries.flatMap((entry) => [entry.identifier, entry.rights]).join(" ");
+      return [{ kind: "reply", text: `* ACL ${quoteMailboxName(res.mailbox)} ${pairs}` }, { kind: "reply", text: `${cmd.tag} OK GETACL completed` }];
+    });
+  }
+
+  private cmdSetAcl(cmd: ParsedCommand): ImapAction[] {
+    const name = this.mailboxArg(cmd, 0);
+    const identifier = this.identifierArg(cmd, 1);
+    const rights = this.identifierArg(cmd, 2);
+    if (name === null || identifier === null || rights === null || cmd.args.length !== 3) return [{ kind: "reply", text: `${cmd.tag} BAD SETACL expects mailbox identifier rights` }];
+    return this.callBackend({ kind: "setAcl", name, identifier, rights }, (res) =>
+      res.kind === "ok" ? [{ kind: "reply", text: `${cmd.tag} OK SETACL completed` }] : [ImapEngine.noReply(cmd.tag, "SETACL", res.kind === "no" ? res : { message: "failed" })],
+    );
+  }
+
+  private cmdDeleteAcl(cmd: ParsedCommand): ImapAction[] {
+    const name = this.mailboxArg(cmd, 0);
+    const identifier = this.identifierArg(cmd, 1);
+    if (name === null || identifier === null || cmd.args.length !== 2) return [{ kind: "reply", text: `${cmd.tag} BAD DELETEACL expects mailbox identifier` }];
+    return this.callBackend({ kind: "deleteAcl", name, identifier }, (res) =>
+      res.kind === "ok" ? [{ kind: "reply", text: `${cmd.tag} OK DELETEACL completed` }] : [ImapEngine.noReply(cmd.tag, "DELETEACL", res.kind === "no" ? res : { message: "failed" })],
+    );
+  }
+
+  private cmdListRights(cmd: ParsedCommand): ImapAction[] {
+    const name = this.mailboxArg(cmd, 0);
+    const identifier = this.identifierArg(cmd, 1);
+    if (name === null || identifier === null || cmd.args.length !== 2) return [{ kind: "reply", text: `${cmd.tag} BAD LISTRIGHTS expects mailbox identifier` }];
+    return this.callBackend({ kind: "listRights", name, identifier }, (res) => {
+      if (res.kind === "no") return [ImapEngine.noReply(cmd.tag, "LISTRIGHTS", res)];
+      if (res.kind !== "rights") return [{ kind: "reply", text: `${cmd.tag} NO LISTRIGHTS failed` }];
+      return [{ kind: "reply", text: `* LISTRIGHTS ${quoteMailboxName(res.mailbox)} ${res.identifier} "" ${res.rights}` }, { kind: "reply", text: `${cmd.tag} OK LISTRIGHTS completed` }];
+    });
+  }
+
+  private cmdMyRights(cmd: ParsedCommand): ImapAction[] {
+    const name = this.mailboxArg(cmd, 0);
+    if (name === null || cmd.args.length !== 1) return [{ kind: "reply", text: `${cmd.tag} BAD MYRIGHTS expects mailbox name` }];
+    return this.callBackend({ kind: "myRights", name }, (res) => {
+      if (res.kind === "no") return [ImapEngine.noReply(cmd.tag, "MYRIGHTS", res)];
+      if (res.kind !== "rights") return [{ kind: "reply", text: `${cmd.tag} NO MYRIGHTS failed` }];
+      return [{ kind: "reply", text: `* MYRIGHTS ${quoteMailboxName(res.mailbox)} ${res.rights}` }, { kind: "reply", text: `${cmd.tag} OK MYRIGHTS completed` }];
+    });
   }
 
   // ── 메일함 명령 ────────────────────────────────────────────────────────────
