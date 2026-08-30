@@ -1,8 +1,8 @@
 {
   "phase": "P2",
   "sealed": true,
-  "head": "c850c0fe596199beb568fd8f8f17acb415232845",
-  "at": "2026-08-30T10:38:22.956Z",
+  "head": "e99a24bc84ca2ebf734b35f5b70f445144641ac5",
+  "at": "2026-08-30T10:44:04.557Z",
   "waived": false,
   "reason": null,
   "checks": [
@@ -15,7 +15,7 @@
     {
       "id": "G-P2.2",
       "ok": true,
-      "measured": 4,
+      "measured": 5,
       "limit": 1
     },
     {
