@@ -28,7 +28,9 @@ export class LdapDirectorySource implements DirectorySnapshotSource {
     return await this.reader.readSnapshot();
   }
 
-  async authenticate(loginName: string, password: string): Promise<DirectoryIdentity | null> {
+  async authenticate(tenantId: string, loginName: string, password: string): Promise<DirectoryIdentity | null> {
+    // provider 이름은 tenant마다 재사용될 수 있으므로 인증도 snapshot과 같은 tenant 경계를 적용한다.
+    if (tenantId !== this.tenantId) return null;
     // DirectoryProvider는 연결 하나를 소유한다. 요청마다 만들어야 동시 인증이 서로의 bind를 덮지 않는다.
     const provider = directoryProvider(this.config, this.ldap);
     try { return await provider.authenticate(loginName, password); }

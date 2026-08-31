@@ -12,7 +12,7 @@ import {
 
 export interface DirectorySnapshotSource {
   read(tenantId: string): Promise<DirectorySnapshot>;
-  authenticate?(loginName: string, password: string): Promise<DirectoryIdentity | null>;
+  authenticate?(tenantId: string, loginName: string, password: string): Promise<DirectoryIdentity | null>;
   close?(): Promise<void>;
 }
 
@@ -34,7 +34,7 @@ export class SharedMailboxRuntime implements SharedMailboxAdminPort {
     if (password.length === 0) return null;
     const normalized = loginName.toLowerCase();
     const candidates = await this.opts.db.query({
-      sql: "SELECT provider, external_key, account_id, login_names, email FROM directory_identities WHERE status = 1 AND account_id IS NOT NULL",
+      sql: "SELECT tenant_id, provider, external_key, account_id, login_names, email FROM directory_identities WHERE status = 1 AND account_id IS NOT NULL",
     });
     const authenticated: Array<{ accountId: string; credKind: string }> = [];
     for (const row of candidates.rows) {
@@ -45,7 +45,7 @@ export class SharedMailboxRuntime implements SharedMailboxAdminPort {
       const provider = String(row.provider);
       const source = this.opts.directorySources?.[provider];
       if (!source?.authenticate) continue;
-      const identity = await source.authenticate(loginName, password);
+      const identity = await source.authenticate(String(row.tenant_id), loginName, password);
       if (identity?.externalKey !== String(row.external_key)) continue;
       const account = await this.opts.db.query({ sql: "SELECT id FROM accounts WHERE id = ? AND status = 1", params: [row.account_id] });
       if (account.rows.length === 1) authenticated.push({ accountId: String(row.account_id), credKind: `directory:${provider}` });

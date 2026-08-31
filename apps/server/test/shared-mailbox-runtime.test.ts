@@ -36,7 +36,7 @@ describe("shared mailbox runtime", () => {
       listingCache,
       directorySources: {
         ad: {
-          authenticate: async (loginName, password) => loginName === "runtime" && password === "directory-secret"
+          authenticate: async (_tenantId, loginName, password) => loginName === "runtime" && password === "directory-secret"
             ? { externalKey: "guid:runtime", loginNames: ["runtime"], email: "runtime@ionosphere.test", displayName: "Runtime" }
             : null,
           read: async () => ({
@@ -57,6 +57,47 @@ describe("shared mailbox runtime", () => {
     expect((await db.query({ sql: "SELECT display_value FROM message_header_projection WHERE name = ?", params: ["subject"] })).rows[0]?.display_value).toBe("projected");
     expect((await runtime.flushListingCache()).data?.entries).toBe(1);
     expect(listingCache.size).toBe(0);
+    await runtime.close();
+    await db.close();
+  });
+
+  test("같은 provider와 external key를 쓰는 다른 tenant 계정으로 교차 인증하지 않는다", async () => {
+    const db = await openSqlite(":memory:");
+    await migrate(db, allMigrations);
+    const blobs = new FsBlobStore(mkdtempSync(join(tmpdir(), "ion-directory-tenant-auth-")));
+    const store = new Store(db);
+    const tenantA = await store.createTenant("directory-a");
+    const tenantB = await store.createTenant("directory-b");
+    const accountB = await store.createAccount({ tenantId: tenantB.tenantId, email: "shared-b@ionosphere.test" });
+    const snapshot = {
+      identities: [{ externalKey: "guid:shared", loginNames: ["shared"], email: "shared@ionosphere.test", displayName: "Shared", groupExternalKeys: [] }],
+      groups: [],
+    };
+    const listingCache = new ListingCache<JmapEmailQueryResult>({ ttlMs: 5000 });
+    const runtime = new SharedMailboxRuntime({
+      db,
+      blobs,
+      listingCache,
+      directorySources: {
+        ad: {
+          read: async () => snapshot,
+          authenticate: async (tenantId, loginName, password) => tenantId === tenantA.tenantId
+            && loginName === "shared"
+            && password === "tenant-a-secret"
+            ? snapshot.identities[0]!
+            : null,
+        },
+      },
+    });
+
+    await runtime.sync(tenantA.tenantId, "ad");
+    await runtime.sync(tenantB.tenantId, "ad");
+    await db.batch([{
+      sql: "UPDATE directory_identities SET account_id = ? WHERE tenant_id = ? AND provider = ? AND external_key = ?",
+      params: [accountB.accountId, tenantB.tenantId, "ad", "guid:shared"],
+    }]);
+
+    expect(await runtime.authenticate("shared", "tenant-a-secret")).toBe(null);
     await runtime.close();
     await db.close();
   });
