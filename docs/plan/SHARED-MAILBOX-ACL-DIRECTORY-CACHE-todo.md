@@ -36,6 +36,7 @@ node scripts/gates/shared-mailbox.ts <단계> --explain
 node scripts/gates/shared-mailbox.ts <단계> --seal --waived "사유"
 node scripts/gates/shared-mailbox.ts --status
 node scripts/gates/shared-mailbox.ts --assert-order
+node scripts/gates/shared-mailbox.ts --assert-complete
 ```
 
 봉인은 `docs/plan/.gates/shared-mailbox/<단계>.json`에 기록한다. 봉인 JSON에는 `sealVersion`,
@@ -51,6 +52,8 @@ squash merge 뒤의 유효성 판정에는 쓰지 않는다.
 - R3 재검: `--seal`은 이전 결과를 사용하지 않고 모든 검사를 다시 실행
 - `--waived`는 선택 단계에만 허용하며 빈 사유는 거부
 - `--assert-order`는 봉인한 단계 정의나 산출 경로가 변경됐는데 재봉인하지 않았으면 실패
+- `--assert-complete`는 CI 전용이며 P0~P11 봉인의 존재·digest·전체 선행 chain 중 하나라도
+  빠지면 실패한다. 단계별 `--seal`은 자기 봉인 전에도 실행돼야 하므로 이 검사는 포함하지 않는다.
 
 ### 수치 원장
 
@@ -116,8 +119,15 @@ P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7 → P8 → P9 → P10 → P1
 - TC-P0.T1.d 검사 이빨
   - 단언: 각 check의 위반 fixture에서 그 check가 실패하고 종료 코드가 0이 아니다.
   - 검출: 실행은 되지만 아무것도 검출하지 않는 장식용 GATE.
+- TC-P0.T1.e 최종 봉인 완전성
+  - 단언: P11 봉인이 없으면 `--assert-complete` 종료 코드가 0이 아니다.
+  - 검출: 마지막 단계가 열려 있는데 CI가 완료로 승인하는 회귀.
+- TC-P0.T1.f 선행 chain 완전성
+  - 단언: 후행 봉인을 둔 채 중간 봉인을 지우면 `--assert-complete` 종료 코드가 0이 아니다.
+  - 검출: 중간 단계 증거가 빠졌는데 후행 봉인만으로 CI가 성공하는 회귀.
 
-【통과】 `--status`, R1~R3, waived, assert-order의 양·음성 fixture가 모두 0/비0을 정확히 반환한다.
+【통과】 `--status`, R1~R3, waived, assert-order, assert-complete의 양·음성 fixture가 모두
+0/비0을 정확히 반환한다.
 
 ### 완료 P0.T2 — ADR·공통 권한 계약 봉인
 

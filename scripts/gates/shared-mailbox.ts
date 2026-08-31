@@ -25,7 +25,7 @@ type Seal = {
 };
 
 const root = resolve(new URL("../..", import.meta.url).pathname);
-const sealDir = resolve(root, "docs/plan/.gates/shared-mailbox");
+const sealDir = resolve(root, process.env.IONOSPHERE_GATE_SEAL_DIR ?? "docs/plan/.gates/shared-mailbox");
 const todoPath = "docs/plan/SHARED-MAILBOX-ACL-DIRECTORY-CACHE-todo.md";
 
 const GATES: Record<string, Phase> = {
@@ -343,10 +343,47 @@ function assertOrder(): number {
   return failed ? 1 : 0;
 }
 
+function assertComplete(): number {
+  let failed = false;
+  const validated = new Set<string>();
+  const visiting = new Set<string>();
+
+  const validate = (phase: string): boolean => {
+    if (validated.has(phase)) return true;
+    if (visiting.has(phase)) {
+      console.error(`FAIL ${phase}: 선행 단계 순환`);
+      failed = true;
+      return false;
+    }
+    visiting.add(phase);
+    const definition = GATES[phase];
+    if (!definition) {
+      console.error(`FAIL ${phase}: 단계 정의 없음`);
+      failed = true;
+      visiting.delete(phase);
+      return false;
+    }
+    const prerequisitesCurrent = definition.needs.every((need) => validate(need));
+    const seal = readSeal(phase);
+    const current = seal !== null && sealIsCurrent(phase, seal);
+    if (!seal) console.error(`FAIL ${phase}: 봉인 없음`);
+    else if (!current) console.error(`FAIL ${phase}: 봉인 정의 또는 산출물 digest 불일치`);
+    if (!prerequisitesCurrent) console.error(`FAIL ${phase}: 선행 봉인 chain 불완전`);
+    if (!seal || !current || !prerequisitesCurrent) failed = true;
+    else validated.add(phase);
+    visiting.delete(phase);
+    return seal !== null && current && prerequisitesCurrent;
+  };
+
+  for (const phase of phaseNames()) validate(phase);
+  return failed ? 1 : 0;
+}
+
 const args = process.argv.slice(2);
 try {
   if (args[0] === "--status") process.exit(status());
   if (args[0] === "--assert-order") process.exit(assertOrder());
+  if (args[0] === "--assert-complete") process.exit(assertComplete());
   const phase = args[0];
   if (!phase) throw new Error("사용법: shared-mailbox.ts <P0..P11> [--seal|--explain]");
   if (args.includes("--seal")) {
