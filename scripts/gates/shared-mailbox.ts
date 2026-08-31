@@ -6,11 +6,23 @@
  * 종료 코드와 측정값을 항상 함께 남긴다.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 type Check = { id: string; kind: "file" | "grep" | "command"; path?: string; pattern?: string; command?: string[]; limit?: number };
 type Phase = { needs: readonly string[]; outputs: readonly string[]; checks: readonly Check[] };
+type Seal = {
+  sealVersion?: number;
+  phase: string;
+  sealed: boolean;
+  head: string;
+  waived: boolean;
+  reason: string | null;
+  definitionDigest?: string;
+  contentDigest?: string;
+  outputs?: Readonly<Record<string, string>>;
+};
 
 const root = resolve(new URL("../..", import.meta.url).pathname);
 const sealDir = resolve(root, "docs/plan/.gates/shared-mailbox");
@@ -167,30 +179,91 @@ const GATES: Record<string, Phase> = {
       { id: "G-P10.5", kind: "command", command: ["node", "scripts/gates/shared-mailbox.ts", "--assert-order"] },
     ],
   },
+  P11: {
+    needs: ["P10"],
+    outputs: [
+      "apps/server/src/app.ts",
+      "apps/server/src/main.ts",
+      "apps/server/src/directory-ldap.ts",
+      "apps/server/src/shared-mailbox-runtime.ts",
+      "apps/server/src/jmap-backend.ts",
+      "apps/server/src/jmap-server.ts",
+      "packages/api/src/server.ts",
+      "packages/api/test/api.test.ts",
+      "packages/store/src/store.ts",
+      "packages/store/src/types.ts",
+      "scripts/gates/shared-mailbox.ts",
+      "packages/core/test/gated-todo-gate.test.ts",
+      "docs/plan/SHARED-MAILBOX-ACL-DIRECTORY-CACHE-todo.md",
+      "apps/server/test/shared-mailbox-runtime.test.ts",
+      "apps/server/test/jmap-shared-account.test.ts",
+    ],
+    checks: [
+      { id: "G-P11.1", kind: "command", command: ["npm", "run", "verify"] },
+      { id: "G-P11.2", kind: "command", command: ["node", "--test", "apps/server/test/shared-mailbox-runtime.test.ts", "apps/server/test/directory-ldap.test.ts", "apps/server/test/jmap-shared-account.test.ts"] },
+      { id: "G-P11.3", kind: "grep", path: "apps/server/src/app.ts", pattern: "sharedMailboxRuntime" },
+      { id: "G-P11.4", kind: "grep", path: "apps/server/src/jmap-backend.ts", pattern: "getOrLoadListing" },
+      { id: "G-P11.5", kind: "grep", path: "packages/store/src/store.ts", pattern: "headerProjections" },
+    ],
+  },
 };
 
 function sealPath(phase: string): string { return resolve(sealDir, `${phase}.json`); }
 function phaseNames(): string[] { return Object.keys(GATES); }
 
-function readSeal(phase: string): { phase: string; sealed: boolean; head: string; waived: boolean; reason: string | null } | null {
+function readSeal(phase: string): Seal | null {
   const path = sealPath(phase);
   if (!existsSync(path)) return null;
-  try { return JSON.parse(readFileSync(path, "utf8")) as { phase: string; sealed: boolean; head: string; waived: boolean; reason: string | null }; } catch { return null; }
+  try { return JSON.parse(readFileSync(path, "utf8")) as Seal; } catch { return null; }
+}
+
+function outputDigests(phase: string): Record<string, string> {
+  const definition = GATES[phase];
+  if (!definition) throw new Error(`알 수 없는 단계: ${phase}`);
+  return Object.fromEntries(definition.outputs.map((output) => {
+    const path = resolve(root, output);
+    if (!existsSync(path)) throw new Error(`봉인 산출물 없음: ${output}`);
+    return [output, createHash("sha256").update(readFileSync(path)).digest("hex")];
+  }));
+}
+
+function digest(value: string | Uint8Array): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function definitionDigest(phase: string): string {
+  const definition = GATES[phase];
+  if (!definition) throw new Error(`알 수 없는 단계: ${phase}`);
+  return digest(JSON.stringify(definition));
+}
+
+function contentDigest(outputs: Readonly<Record<string, string>>): string {
+  return digest(JSON.stringify(Object.entries(outputs).sort(([left], [right]) => left.localeCompare(right))));
+}
+
+/**
+ * squash merge는 작업 브랜치의 commit ancestry를 버린다. 그래서 commit id가 조상인지로 봉인을
+ * 판정하면 내용이 그대로여도 main에서 전부 무효가 된다. 봉인의 대상은 commit topology가 아니라
+ * 검사를 통과한 산출물 바이트이므로, 기록한 SHA-256과 현재 파일을 직접 비교한다.
+ */
+function sealIsCurrent(phase: string, seal: Seal): boolean {
+  if (seal.sealVersion !== 2 || !seal.sealed || seal.phase !== phase || !seal.outputs) return false;
+  if (seal.definitionDigest !== definitionDigest(phase) || seal.contentDigest !== contentDigest(seal.outputs)) return false;
+  const current = outputDigests(phase);
+  const expectedPaths = Object.keys(current);
+  return expectedPaths.length === Object.keys(seal.outputs).length
+    && expectedPaths.every((path) => seal.outputs?.[path] === current[path]);
 }
 
 function hasPrerequisites(phase: string): boolean {
   for (const need of GATES[phase]?.needs ?? []) {
     const seal = readSeal(need);
-    if (!seal?.sealed) return false;
+    if (!seal || !sealIsCurrent(need, seal)) return false;
   }
   return true;
 }
 
 function currentHead(): string { return execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim(); }
-
-function isAncestor(head: string): boolean {
-  return spawnSync("git", ["merge-base", "--is-ancestor", head, "HEAD"], { cwd: root, stdio: "ignore" }).status === 0;
-}
 
 function runCheck(check: Check): { ok: boolean; measured: number | string; limit: number | null; message: string } {
   if (check.kind === "file") {
@@ -228,12 +301,14 @@ function seal(phase: string, waivedReason: string | null): number {
     const result = evaluate(phase);
     if (!result.ok) return 1;
     mkdirSync(sealDir, { recursive: true });
-    writeFileSync(sealPath(phase), JSON.stringify({ phase, sealed: true, head: currentHead(), at: new Date().toISOString(), waived: false, reason: null, checks: result.checks }, null, 2) + "\n");
+    const outputs = outputDigests(phase);
+    writeFileSync(sealPath(phase), JSON.stringify({ sealVersion: 2, phase, sealed: true, head: currentHead(), at: new Date().toISOString(), waived: false, reason: null, definitionDigest: definitionDigest(phase), contentDigest: contentDigest(outputs), outputs, checks: result.checks }, null, 2) + "\n");
   } else {
     if (definition.checks.length > 0) throw new Error("검사가 있는 필수 단계는 waive할 수 없음");
     if (!hasPrerequisites(phase)) throw new Error(`선행 단계 봉인 없음: ${definition.needs.join(", ")}`);
     mkdirSync(sealDir, { recursive: true });
-    writeFileSync(sealPath(phase), JSON.stringify({ phase, sealed: true, head: currentHead(), at: new Date().toISOString(), waived: true, reason: waivedReason, checks: [] }, null, 2) + "\n");
+    const outputs = outputDigests(phase);
+    writeFileSync(sealPath(phase), JSON.stringify({ sealVersion: 2, phase, sealed: true, head: currentHead(), at: new Date().toISOString(), waived: true, reason: waivedReason, definitionDigest: definitionDigest(phase), contentDigest: contentDigest(outputs), outputs, checks: [] }, null, 2) + "\n");
   }
   return 0;
 }
@@ -241,7 +316,7 @@ function seal(phase: string, waivedReason: string | null): number {
 function status(): number {
   for (const phase of phaseNames()) {
     const seal = readSeal(phase);
-    const state = !hasPrerequisites(phase) ? "잠김" : !seal ? "열림" : !isAncestor(seal.head) ? "무효" : "봉인";
+    const state = !hasPrerequisites(phase) ? "잠김" : !seal ? "열림" : !sealIsCurrent(phase, seal) ? "무효" : "봉인";
     console.log(`${phase}\t${state}\t${seal?.head ?? "-"}`);
   }
   return 0;
@@ -252,9 +327,11 @@ function assertOrder(): number {
   for (const [phase, definition] of Object.entries(GATES)) {
     const seal = readSeal(phase);
     if (!seal?.sealed) continue;
+    if (!sealIsCurrent(phase, seal)) { console.error(`FAIL ${phase}: 봉인 정의 또는 산출물 digest 불일치`); failed = true; continue; }
+    const sealedOutputs = seal.outputs!;
+    const current = outputDigests(phase);
     for (const output of definition.outputs) {
-      const changed = spawnSync("git", ["diff", "--quiet", `${seal.head}..HEAD`, "--", output], { cwd: root, stdio: "ignore" }).status !== 0;
-      if (changed) { console.error(`FAIL ${phase}: 봉인 후 산출물 변경 ${output}`); failed = true; }
+      if (sealedOutputs[output] !== current[output]) { console.error(`FAIL ${phase}: 봉인 후 산출물 변경 ${output}`); failed = true; }
     }
   }
   return failed ? 1 : 0;
@@ -265,7 +342,7 @@ try {
   if (args[0] === "--status") process.exit(status());
   if (args[0] === "--assert-order") process.exit(assertOrder());
   const phase = args[0];
-  if (!phase) throw new Error("사용법: shared-mailbox.ts <P0..P10> [--seal|--explain]");
+  if (!phase) throw new Error("사용법: shared-mailbox.ts <P0..P11> [--seal|--explain]");
   if (args.includes("--seal")) {
     const waiveAt = args.indexOf("--waived");
     process.exit(seal(phase, waiveAt >= 0 ? args[waiveAt + 1] ?? "" : null));

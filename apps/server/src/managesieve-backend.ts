@@ -9,10 +9,12 @@ import type { ManageSieveBackend } from "@ionosphere/proto-managesieve";
 export class IonosphereManageSieveBackend implements ManageSieveBackend {
   private readonly db: DbDriver;
   private readonly store: Store;
+  private readonly authenticatePassword: (user: string, pass: string) => Promise<{ accountId: string; credKind?: string | undefined } | null>;
 
-  constructor(db: DbDriver, store: Store) {
+  constructor(db: DbDriver, store: Store, authenticatePassword?: (user: string, pass: string) => Promise<{ accountId: string; credKind?: string | undefined } | null>) {
     this.db = db;
     this.store = store;
+    this.authenticatePassword = authenticatePassword ?? (async (user, pass) => authenticate(this.db, user, pass, "sieve"));
   }
 
   /**
@@ -20,7 +22,7 @@ export class IonosphereManageSieveBackend implements ManageSieveBackend {
    * 여기서 기록하지 않는 이유: 이 클래스에는 IP가 없다(어댑터만 소켓을 본다).
    */
   async authenticate(user: string, pass: string): Promise<{ accountId: string; credKind?: string | undefined } | null> {
-    const r = await authenticate(this.db, user, pass, "sieve");
+    const r = await this.authenticatePassword(user, pass);
     return r === null ? null : { accountId: r.accountId, credKind: r.credKind };
   }
 

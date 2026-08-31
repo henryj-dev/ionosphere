@@ -7,6 +7,7 @@ import {
   DbMaildropLock,
   FsBlobStore,
   LayeredBlobStore,
+  ListingCache,
   putBlob,
   recordTlsRptRow,
   scramAuthorize,
@@ -14,6 +15,8 @@ import {
   Store,
   type BlobGcMode,
   type BlobStore,
+  type AuthSurface,
+  type JmapEmailQueryResult,
 } from "@ionosphere/store";
 import { DEFAULT_RELAY_PER_HOUR, enqueueMessage, type OutboundPolicy } from "@ionosphere/mta";
 import { SmtpServer } from "@ionosphere/proto-smtp";
@@ -50,6 +53,7 @@ import { request as httpsRequest } from "node:https";
 import type { ClientRequest, IncomingMessage, RequestOptions } from "node:http";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { createGuardedLookup } from "@ionosphere/webhook";
+import { SharedMailboxRuntime, type DirectorySnapshotSource } from "./shared-mailbox-runtime.ts";
 
 /** RFC 8314 권장 암시적 TLS 포트 — autoconfig가 클라이언트에 광고하는 기본값. */
 const IMAPS_PORT = 993;
@@ -247,6 +251,8 @@ export interface IonosphereAppOptions {
    * `ionosphere_blob_fallback_reads_total`이 0으로 수렴하면 이 옵션을 빼면 된다.
    */
   blobsFallback?: BlobStore;
+  /** provider 이름별 directory snapshot source. 부분 설정은 main 조립층에서 기동 전에 거부한다. */
+  directorySources?: Readonly<Record<string, DirectorySnapshotSource>>;
   /** IMAP(143). 미지정 시 리슨 안 함. imapsPort는 TLS(imapsTls 또는 tls) 필요. */
   imapPort?: number;
   imapsPort?: number;
@@ -536,6 +542,9 @@ export class IonosphereApp {
   db!: DbDriver;
   store!: Store;
   blobs!: BlobStore;
+  /** JMAP Email/query와 관리 flush가 반드시 같은 인스턴스를 보도록 앱 수명주기가 소유한다. */
+  readonly listingCache = new ListingCache<JmapEmailQueryResult>();
+  private sharedMailboxRuntime?: SharedMailboxRuntime;
   smtp?: SmtpServer;
   pop3?: Pop3Server;
   submission?: SmtpServer;
@@ -643,7 +652,7 @@ export class IonosphereApp {
         // `throttled`를 실어 올린다 — 어댑터가 감사 로그에서 "거부됨"과 "비밀번호 틀림"을 가른다.
         return { ok: false, throttled: true };
       }
-      const result = await authenticate(this.db, user, pass, "submission");
+      const result = await this.authenticatePassword(user, pass, "submission");
       if (result) {
         log.info("auth ok", { user });
         this.authThrottle.clear({ account: user });
@@ -653,6 +662,13 @@ export class IonosphereApp {
       this.authThrottle.recordFailure({ account: user });
       return { ok: false };
     };
+  }
+
+  /** local 자격증명을 우선하고, 실패했을 때만 immutable identity로 연결된 directory를 조회한다. */
+  private async authenticatePassword(user: string, pass: string, surface: AuthSurface): Promise<{ accountId: string; credKind?: string | undefined } | null> {
+    const local = await authenticate(this.db, user, pass, surface);
+    if (local) return { accountId: local.accountId, ...(local.credKind ? { credKind: local.credKind } : {}) };
+    return await this.sharedMailboxRuntime?.authenticate(user, pass) ?? null;
   }
 
   /**
@@ -826,6 +842,12 @@ export class IonosphereApp {
           onFallbackHit: () => this.metrics?.blobFallbackReads.inc(),
         })
       : primaryBlobs;
+    this.sharedMailboxRuntime = new SharedMailboxRuntime({
+      db: this.db,
+      blobs: this.blobs,
+      listingCache: this.listingCache,
+      ...(this.opts.directorySources ? { directorySources: this.opts.directorySources } : {}),
+    });
   }
 
   /** 관측성(Phase 5) — 메트릭 포트 지정 시에만 계측. 큐 깊이는 렌더 직전 수집기로 갱신. */
@@ -1066,7 +1088,7 @@ export class IonosphereApp {
         peerLimit: this.peerLimit,
         audit: this.audit,
         hostname: this.opts.hostname,
-        backend: new IonospherePop3Backend(this.db, this.store, this.blobs, ctx.log, this.maildropLock),
+        backend: new IonospherePop3Backend(this.db, this.store, this.blobs, ctx.log, this.maildropLock, (user, pass) => this.authenticatePassword(user, pass, "pop3")),
         allowInsecureAuth: !ctx.tlsConfigured,
         /**
          * ★110에 인증서를 넘기는 것은 암시적 TLS가 아니라 **STLS 업그레이드용**이다(RFC 2595).
@@ -1087,7 +1109,7 @@ export class IonosphereApp {
         peerLimit: this.peerLimit,
         audit: this.audit,
         hostname: this.opts.hostname,
-        backend: new IonospherePop3Backend(this.db, this.store, this.blobs, ctx.log, this.maildropLock),
+        backend: new IonospherePop3Backend(this.db, this.store, this.blobs, ctx.log, this.maildropLock, (user, pass) => this.authenticatePassword(user, pass, "pop3")),
         tls: pop3sTls,
       });
       this.pop3sPort = await this.pop3s.listen(pop3sListener.port, pop3sListener.host);
@@ -1111,7 +1133,7 @@ export class IonosphereApp {
   private async startAccess(ctx: StartContext): Promise<void> {
     const imapListener = this.listener("imap", this.opts.imapPort);
     if (imapListener) {
-      const imapBackend = new IonosphereImapBackend(this.db, this.store, this.blobs, ctx.log);
+      const imapBackend = new IonosphereImapBackend(this.db, this.store, this.blobs, ctx.log, (user, pass) => this.authenticatePassword(user, pass, "imap"));
       this.imap = new ImapServer({
         authThrottle: this.authThrottle,
         peerLimit: this.peerLimit,
@@ -1154,6 +1176,8 @@ export class IonosphereApp {
         db: this.db,
         store: this.store,
         blobs: this.blobs,
+        listingCache: this.listingCache,
+        authenticatePassword: (user, pass) => this.authenticatePassword(user, pass, "jmap"),
         hostname: this.opts.hostname,
         logger: ctx.log,
         // 587/465와 **동일한 발송 정책**을 넘긴다 — 손으로 재작성하면 JMAP만 한도를 우회한다.
@@ -1195,7 +1219,7 @@ export class IonosphereApp {
         authThrottle: this.authThrottle,
         audit: this.audit,
         hostname: this.opts.hostname,
-        backend: new IonosphereManageSieveBackend(this.db, this.store),
+        backend: new IonosphereManageSieveBackend(this.db, this.store, (user, pass) => this.authenticatePassword(user, pass, "sieve")),
         ...(ctx.upgradeTls("manageSieve") ? { tls: ctx.upgradeTls("manageSieve")! } : {}),
         // 143/110/587과 **같은 판정**을 써야 한다. 예전엔 여기만 `!this.opts.tls`라,
         // 운영 표준 경로(IONOSPHERE_TLS_MODE=acme|file|url → certSource만 채우고 opts.tls는 빔)에서
@@ -1671,6 +1695,7 @@ export class IonosphereApp {
         // JMAP·submission과 **같은 스로틀 인스턴스** — 리스너마다 한도를 따로 갖지 않게.
         authThrottle: this.authThrottle,
         audit: this.audit,
+        ...(this.sharedMailboxRuntime ? { sharedMailbox: this.sharedMailboxRuntime } : {}),
         ...(this.opts.adminRootToken ? { rootToken: this.opts.adminRootToken } : {}),
         ...(this.opts.masterKey ? { masterKey: this.opts.masterKey } : {}),
         ...(tlsAdmin ? { tls: tlsAdmin } : {}),
@@ -1923,6 +1948,7 @@ export class IonosphereApp {
      */
     if (this.auditShipper) await this.auditShipper.stop();
     if (this.auditSink) await this.auditSink.stop();
+    if (this.sharedMailboxRuntime) await this.sharedMailboxRuntime.close();
     await this.db.close();
     (this.opts.logger ?? noopLogger).info("stopped", { component: "app" });
   }

@@ -623,6 +623,26 @@ describe("AdminApiServer", () => {
     expect(rootOnly.status).toBe(403);
   });
 
+  test("shared mailbox 관리 명령은 조립층이 주입한 실제 포트를 호출한다", async () => {
+    let flushes = 0;
+    const f = await setup({
+      sharedMailbox: {
+        sync: async () => ({ message: "sync" }),
+        rebuildHeaders: async () => ({ message: "headers" }),
+        flushListingCache: async () => { flushes++; return { data: { entries: 3 }, message: "flushed" }; },
+      },
+    });
+    const { apiKey } = await bootstrapTenant(f);
+    const response = await fetch(`${f.baseUrl}/v1/commands/listing-cache-flush`, {
+      method: "POST",
+      headers: { ...authHeader(apiKey), "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(response.status).toBe(200);
+    expect((await response.json() as { data: { entries: number } }).data.entries).toBe(3);
+    expect(flushes).toBe(1);
+  });
+
   /**
    * ★콘솔 JS는 TS 템플릿 리터럴 안에 문자열로 들어 있어 **tsc가 문법을 보지 않는다** —
    * 따옴표 하나가 깨져도 빌드는 통과하고 브라우저에서만 백지가 된다. 실제로 이 파일의

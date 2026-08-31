@@ -1922,6 +1922,7 @@ export class IonospherePop3Backend implements Pop3Backend {
    * DbMaildropLock(@ionosphere/store)을 주입해야 RFC 1939 §3 배타성이 성립한다.
    */
   private readonly lock: MaildropLock;
+  private readonly authenticatePassword: (user: string, pass: string) => Promise<{ accountId: string; credKind?: string | undefined } | null>;
   /** accountId → INBOX mailboxId (세션 간 캐시 아님 — commit 시 재사용 위해 세션 수명만). */
   private readonly inboxByAccount = new Map<string, string>();
   /** accountId → 이 프로세스가 잡은 락 세션. 없으면 락을 안 잡은 것 = 풀 것도 없다. */
@@ -1933,16 +1934,18 @@ export class IonospherePop3Backend implements Pop3Backend {
     blobs: BlobStore,
     logger: Logger = noopLogger,
     lock: MaildropLock = new InProcessMaildropLock(),
+    authenticatePassword?: (user: string, pass: string) => Promise<{ accountId: string; credKind?: string | undefined } | null>,
   ) {
     this.db = db;
     this.store = store;
     this.blobs = blobs;
     this.log = logger.child({ component: "pop3" });
     this.lock = lock;
+    this.authenticatePassword = authenticatePassword ?? (async (user, pass) => authenticate(this.db, user, pass, "pop3"));
   }
 
   async authenticate(user: string, pass: string) {
-    const result = await authenticate(this.db, user, pass, "pop3");
+    const result = await this.authenticatePassword(user, pass);
     if (!result) {
       this.log.warn("auth failed", { user });
       return null;
