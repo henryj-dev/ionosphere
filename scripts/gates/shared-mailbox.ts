@@ -109,7 +109,7 @@ const GATES: Record<string, Phase> = {
   },
   P6: {
     needs: ["P5"],
-    outputs: ["packages/core/src/directory.ts", "packages/core/src/index.ts", "packages/core/test/directory.test.ts", "packages/db/src/migrations/021_directory_identity.ts", "packages/store/src/directory-sync.ts", "packages/store/test/directory-sync.test.ts", "apps/server/src/directory-ldap.ts", "apps/server/test/directory-ldap.test.ts"],
+    outputs: ["packages/core/src/directory.ts", "packages/core/src/index.ts", "packages/core/test/directory.test.ts", "packages/db/src/index.ts", "packages/db/src/migrations/021_directory_identity.ts", "packages/db/src/migrations/024_directory_identity_account_unique.ts", "packages/db/test/migrate.test.ts", "docs/SCHEMA.md", "packages/store/src/directory-sync.ts", "packages/store/test/directory-sync.test.ts", "apps/server/src/directory-ldap.ts", "apps/server/test/directory-ldap.test.ts"],
     checks: [
       { id: "G-P6.1", kind: "command", command: ["node", "--test", "packages/core/test/directory.test.ts"] },
       { id: "G-P6.2", kind: "command", command: ["node", "--test", "packages/db/test/migrate.test.ts"] },
@@ -128,7 +128,7 @@ const GATES: Record<string, Phase> = {
   },
   P7: {
     needs: ["P6"],
-    outputs: ["packages/store/src/header-projection.ts", "packages/store/test/header-projection.test.ts", "packages/db/src/migrations/022_header_projection.ts"],
+    outputs: ["packages/store/src/header-projection.ts", "packages/store/test/header-projection.test.ts", "packages/store/test/header-projection-lifecycle.test.ts", "packages/db/src/migrations/022_header_projection.ts"],
     checks: [
       { id: "G-P7.1", kind: "command", command: ["node", "--test", "packages/store/test/header-projection.test.ts"] },
       { id: "G-P7.2", kind: "command", command: ["node", "--test", "packages/db/test/migrate.test.ts"] },
@@ -175,7 +175,7 @@ const GATES: Record<string, Phase> = {
       { id: "G-P10.1", kind: "command", command: ["npm", "run", "verify"] },
       { id: "G-P10.2", kind: "command", command: ["node", "--test", "packages/db/test/shared-mailbox-restore.test.ts"] },
       { id: "G-P10.3", kind: "command", command: ["node", "--test", "packages/db/test/shared-mailbox-explain.test.ts"] },
-      { id: "G-P10.4", kind: "command", command: ["node", "--input-type=module", "-e", "import { allMigrations } from './packages/db/src/index.ts'; if (allMigrations.length !== 23 || allMigrations.at(-1)?.version !== 23) process.exit(1)"] },
+      { id: "G-P10.4", kind: "command", command: ["node", "--input-type=module", "-e", "import { allMigrations } from './packages/db/src/index.ts'; if (allMigrations.length !== 24 || allMigrations.at(-1)?.version !== 24) process.exit(1)"] },
       { id: "G-P10.5", kind: "command", command: ["node", "scripts/gates/shared-mailbox.ts", "--assert-order"] },
     ],
   },
@@ -198,6 +198,8 @@ const GATES: Record<string, Phase> = {
       "packages/store/src/types.ts",
       "scripts/gates/shared-mailbox.ts",
       "packages/core/test/gated-todo-gate.test.ts",
+      ".github/workflows/ci.yml",
+      "package.json",
       "docs/plan/SHARED-MAILBOX-ACL-DIRECTORY-CACHE-todo.md",
       "docs/OPERATIONS.md",
       "apps/server/test/shared-mailbox-runtime.test.ts",

@@ -481,7 +481,7 @@ EXPLAIN/latency, cache isolation, migration restore rehearsal을 수행한다. S
   - 단언: 같은 principal·mailbox에 대한 IMAP/JMAP/admin 판정이 동일하다.
   - 검출: protocol별 rights 계산 차이로 한 표면만 권한 상승하는 회귀.
 - TC-P10.T1.b restore
-  - 단언: 020~023 적용 전 backup을 복구하고 migration을 재개해 데이터·version·ACL이 보존된다.
+  - 단언: 020~024 적용 전 backup을 복구하고 migration을 재개해 데이터·version·ACL이 보존된다.
   - 검출: migration 실패 시 복구 불능 또는 부분 ACL로 기동하는 회귀.
 - TC-P10.T1.c full verification
 - 단언: `npm run verify`가 현재 테스트 2,446개 중 2,443 pass·3 skip, smoke 성공을 기록한다.
@@ -496,7 +496,7 @@ EXPLAIN/latency, cache isolation, migration restore rehearsal을 수행한다. S
 | G-P10.1 | 전체 verify | `npm run verify` | 2,443 pass, 3 skip, fail=0, todo=0 |
 | G-P10.2 | migration 복구 | `node --test packages/db/test/shared-mailbox-restore.test.ts` | 023 적용 전 백업 복구·재개 후 ACL/version/projection 보존 |
 | G-P10.3 | listing EXPLAIN | `node --test packages/db/test/shared-mailbox-explain.test.ts` | UID listing이 `ix_mm_listing` 사용 |
-| G-P10.4 | migration 수 | `node --input-type=module -e ...` | migrations=23, 마지막 version=23 |
+| G-P10.4 | migration 수 | `node --input-type=module -e ...` | migrations=24, 마지막 version=24 |
 | G-P10.5 | 잔재·순서 | `node scripts/gates/shared-mailbox.ts --assert-order` | unsealed changed outputs=0 |
 
 최종 판정 지표는 **권한 경계의 교차 표면 일관성**이다. 같은 principal이 같은 mailbox에 대해
