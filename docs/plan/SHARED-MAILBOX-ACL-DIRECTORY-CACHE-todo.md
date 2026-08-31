@@ -81,7 +81,7 @@ squash merge 뒤의 유효성 판정에는 쓰지 않는다.
 | P8 listing query·LRU | 봉인 | P7 | `node scripts/gates/shared-mailbox.ts P8 --seal` | `docs/plan/.gates/shared-mailbox/P8.json` |
 | P9 admin·관측성 | 봉인 | P8 | `node scripts/gates/shared-mailbox.ts P9 --seal` | `docs/plan/.gates/shared-mailbox/P9.json` |
 | P10 통합·성능·복구 | 봉인 | P9 | `node scripts/gates/shared-mailbox.ts P10 --seal` | `docs/plan/.gates/shared-mailbox/P10.json` |
-| P11 운영 런타임 배선 | 진행 | P10 | `node scripts/gates/shared-mailbox.ts P11 --seal` | `docs/plan/.gates/shared-mailbox/P11.json` |
+| P11 운영 런타임 배선 | 봉인 | P10 | `node scripts/gates/shared-mailbox.ts P11 --seal` | `docs/plan/.gates/shared-mailbox/P11.json` |
 
 ## 선행 관계
 
@@ -493,9 +493,9 @@ EXPLAIN/latency, cache isolation, migration restore rehearsal을 수행한다. S
 IMAP·JMAP·관리 명령에서 서로 다른 결론을 얻지 않아야 하며, 이것이 맞지 않으면 성능이나
 기능 수가 모두 성공해도 최종 GATE는 실패한다.
 
-## P11 — 운영 런타임 배선 (진행)
+## P11 — 운영 런타임 배선 (봉인 완료)
 
-### 진행 P11.T1 — directory·projection·listing의 실제 소비 경로
+### 완료 P11.T1 — directory·projection·listing의 실제 소비 경로
 
 선행: P10 · 산출: 앱 조립, 환경 설정, ingest projection, JMAP cache, 관리 runtime port ·
 되돌리기: directory 설정 제거와 listing cache 미주입; projection schema는 forward-fix ·
