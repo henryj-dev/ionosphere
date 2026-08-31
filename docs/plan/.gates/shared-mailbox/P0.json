@@ -2,17 +2,17 @@
   "sealVersion": 2,
   "phase": "P0",
   "sealed": true,
-  "head": "b1720628aa5f3c41460ba73d612717b36fd39b5e",
-  "at": "2026-08-30T11:26:39.551Z",
+  "head": "45002ba2922ba363986d561a52b2a1d9dfb9b643",
+  "at": "2026-08-31T01:38:52.035Z",
   "waived": false,
   "reason": null,
   "definitionDigest": "01d201016796a263b1ba2f1dd58df9733263a884f8fd1e754b91bb85ecae38dc",
-  "contentDigest": "e05ed6049c9985ecbcd28a59903e19cdad7b2b24a45e44ee1fabbd612dfb562b",
+  "contentDigest": "722ddac9ed2521c616d6ba356453ce15a33ee90f4f5b86c63309db206f36f414",
   "outputs": {
     "packages/core/src/principal.ts": "bf9ac8d308bd0ed36ec6c9b77fd7c5fb49feb6f2b4e744a5a39cb834ed4277b1",
     "packages/core/src/rights.ts": "089a4aa1274a95e7805a241209c6edf3472edbe559022aec91382d590f87d435",
     "packages/core/test/principal-rights.test.ts": "1f40d1257e46f395305eed2982e36790a120ad52f8f989fc1d4806917b9ffd09",
-    "packages/core/test/gated-todo-gate.test.ts": "25603710a03ef2a811f80897f8cc48a1b5a1d2bd0b946e32dfeff750d90edec3"
+    "packages/core/test/gated-todo-gate.test.ts": "529d524cd0d702dfeca8db5be7f039843a5c3a264b574ab2776d5c8e57b36b80"
   },
   "checks": [
     {

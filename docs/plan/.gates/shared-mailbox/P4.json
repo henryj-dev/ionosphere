@@ -1,10 +1,23 @@
 {
+  "sealVersion": 2,
   "phase": "P4",
   "sealed": true,
-  "head": "1e50d73997d8f15785c97b3ff5f43b6088e464f3",
-  "at": "2026-08-30T11:20:31.935Z",
+  "head": "45002ba2922ba363986d561a52b2a1d9dfb9b643",
+  "at": "2026-08-31T01:39:23.907Z",
   "waived": false,
   "reason": null,
+  "definitionDigest": "bd657a131f6f3c66711c5ef0fffbae1e053fa02495c1a9d0714eb50430105d17",
+  "contentDigest": "5639321d3d97c0aa42bd346523b3f3c1f6f2cb4de7319255ca179f950e9d216a",
+  "outputs": {
+    "packages/store/src/authorization.ts": "d08dd3a986d82b7cbbb3798e681743448699a8c28c753f7db2daa5282e62a6df",
+    "packages/store/src/store.ts": "c441c2c3225a52e079497d7ad8d9233d49e595e5db73aad24bcf451426bab5fa",
+    "packages/store/test/authorization.test.ts": "4f1addb34330106879804a2a82c1b8786d7dd372a8582ec2d13ef919b132fc19",
+    "packages/proto-imap/src/engine.ts": "cb99345cf70c4558f221af65d4ee97662414e7b7679163d96955d6a3a16942d6",
+    "packages/proto-imap/src/server.ts": "7b86d3fcb736824866ca08a74a1d27762ca328a28bb6d763e74fd8e00c8f83df",
+    "packages/proto-imap/test/acl-commands.test.ts": "df6026b6652f726f7854b25ccf332a8471d8fd7be9b1c3ef6e9b5962826f8c0f",
+    "apps/server/src/imap-backend.ts": "b88cd9be257bee13c51d2b916ac9942e6c49275ea6175d7458d8371942b6fa2a",
+    "apps/server/test/imap-shared-namespace.test.ts": "8ac593295510c22bd24b792f88c6a4fc842b5800d3abb5d1b8ccfbde22b0b3f0"
+  },
   "checks": [
     {
       "id": "G-P4.1",

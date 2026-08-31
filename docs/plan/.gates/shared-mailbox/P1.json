@@ -1,10 +1,18 @@
 {
+  "sealVersion": 2,
   "phase": "P1",
   "sealed": true,
-  "head": "b1720628aa5f3c41460ba73d612717b36fd39b5e",
-  "at": "2026-08-30T11:26:39.936Z",
+  "head": "45002ba2922ba363986d561a52b2a1d9dfb9b643",
+  "at": "2026-08-31T01:38:53.606Z",
   "waived": false,
   "reason": null,
+  "definitionDigest": "30559d518f75f0f3540349a4bc122fed21a5503888ace9203eedcfe6e931ec07",
+  "contentDigest": "c3b14d8c172fc1dd6ab6abef3232b5ef387e34281a93924d095d9a12ea03d5b8",
+  "outputs": {
+    "packages/db/src/migrations/020_mailbox_acl.ts": "43e45d30dda8b58da3f5f5346b42cffb57c2fe012fc0ed2cc7d8d820ac86a47f",
+    "packages/core/src/rights.ts": "089a4aa1274a95e7805a241209c6edf3472edbe559022aec91382d590f87d435",
+    "packages/core/test/rights.test.ts": "c94b21edd30f9c1b578e9e080fc58a276ec98a4ca9dab229ece8411302846e42"
+  },
   "checks": [
     {
       "id": "G-P1.1",

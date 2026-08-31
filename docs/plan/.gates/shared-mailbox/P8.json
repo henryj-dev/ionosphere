@@ -1,10 +1,18 @@
 {
+  "sealVersion": 2,
   "phase": "P8",
   "sealed": true,
-  "head": "87ad1df0f5acfcc3d924bf32ef17adbbf7ee1d56",
-  "at": "2026-08-30T11:55:05.423Z",
+  "head": "45002ba2922ba363986d561a52b2a1d9dfb9b643",
+  "at": "2026-08-31T01:40:13.025Z",
   "waived": false,
   "reason": null,
+  "definitionDigest": "f7101023963673a177a939b4ce78962c494fff3d35b06b88f88287c7b314e32d",
+  "contentDigest": "082d6dbfccc49d2e96ec005b7db280ce27cf8f2df36eb96524a7a0ccda4959af",
+  "outputs": {
+    "packages/store/src/listing-cache.ts": "0621636feaf376c212c60ad5fd3aebbe9e897f30121f325fbc930bc15b3ba5d3",
+    "packages/store/test/listing-cache.test.ts": "365b847009755e31a53b57ff5f91209dfa7d61043c77b6b26d013e75c27afb2f",
+    "packages/db/src/migrations/023_listing_indexes.ts": "cddbfb335d40dd3355fa4d3b6af568f524fc8c97137e1116e271dddc530cbfde"
+  },
   "checks": [
     {
       "id": "G-P8.1",

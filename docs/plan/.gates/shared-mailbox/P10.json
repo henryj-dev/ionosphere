@@ -1,10 +1,17 @@
 {
+  "sealVersion": 2,
   "phase": "P10",
   "sealed": true,
-  "head": "ac882d774475cd154383cb9417bdbfb2cd8b2fc2",
-  "at": "2026-08-30T12:06:57.848Z",
+  "head": "45002ba2922ba363986d561a52b2a1d9dfb9b643",
+  "at": "2026-08-31T01:41:44.114Z",
   "waived": false,
   "reason": null,
+  "definitionDigest": "66bb11774b788a8bd25ff49e81080874f8a78277b96b812495446434a0b2c389",
+  "contentDigest": "fabb94197277ed89ed652b9255b05e984dd47f9495714c8e44cb8480d0df5f8d",
+  "outputs": {
+    "packages/db/test/shared-mailbox-restore.test.ts": "0f3387b6a48fe569fdd61c755db35c3bbfe8c20b8de0af27345f4aee022b69c9",
+    "packages/db/test/shared-mailbox-explain.test.ts": "51042f22039ce4f124ba199f7748b4639157c6c82db90bb35800bb354e4b1be7"
+  },
   "checks": [
     {
       "id": "G-P10.1",

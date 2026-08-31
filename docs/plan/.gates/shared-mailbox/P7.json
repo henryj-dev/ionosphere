@@ -1,10 +1,19 @@
 {
+  "sealVersion": 2,
   "phase": "P7",
   "sealed": true,
-  "head": "4838160f2cf5bdbf35a5b6e37864c0920e4b87ca",
-  "at": "2026-08-30T11:52:56.507Z",
+  "head": "45002ba2922ba363986d561a52b2a1d9dfb9b643",
+  "at": "2026-08-31T01:40:07.169Z",
   "waived": false,
   "reason": null,
+  "definitionDigest": "4a5c18aa91ece2f7c2178dbc6a047096ca03d94ab6e3b1ca0b33255782bf45d6",
+  "contentDigest": "1628fae1294430ce970824a198e70df51555ba3368bb48e406bbc6ce07d338a8",
+  "outputs": {
+    "packages/store/src/header-projection.ts": "f6f4d82eea20c39680ac090ef82351d591456a0d7979525e3f677cabfd668826",
+    "packages/store/test/header-projection.test.ts": "812a15b4af836400a18d61786bc3c8fbbcf7b6cb8f61e10e9374a54b80152c10",
+    "packages/store/test/header-projection-lifecycle.test.ts": "cda249efc4300216c770f18f4152f15f7794f5b4bdee91b2b4e3e1d66383891c",
+    "packages/db/src/migrations/022_header_projection.ts": "625bf8507fecc3aa3ee497aea635c2cc3e7c7ef7ec433119bc4f7bd8acae2da1"
+  },
   "checks": [
     {
       "id": "G-P7.1",

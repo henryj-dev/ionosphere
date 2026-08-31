@@ -1,10 +1,18 @@
 {
+  "sealVersion": 2,
   "phase": "P3",
   "sealed": true,
-  "head": "d56e09157e3444ba34a5cbc2e2d119e232b173f6",
-  "at": "2026-08-30T11:15:50.711Z",
+  "head": "45002ba2922ba363986d561a52b2a1d9dfb9b643",
+  "at": "2026-08-31T01:39:04.709Z",
   "waived": false,
   "reason": null,
+  "definitionDigest": "50b33d4cc623f7747a2d8d0a91ba6e50b46b92b2dc20a74da1b443e6a352fd0a",
+  "contentDigest": "fef332dedda2fdb591eb6b2cd7a79e41bad767eabe929371d313ab25d36d43ae",
+  "outputs": {
+    "apps/server/src/imap-backend.ts": "b88cd9be257bee13c51d2b916ac9942e6c49275ea6175d7458d8371942b6fa2a",
+    "packages/store/src/store.ts": "c441c2c3225a52e079497d7ad8d9233d49e595e5db73aad24bcf451426bab5fa",
+    "apps/server/test/imap-shared-namespace.test.ts": "8ac593295510c22bd24b792f88c6a4fc842b5800d3abb5d1b8ccfbde22b0b3f0"
+  },
   "checks": [
     {
       "id": "G-P3.1",

@@ -1,10 +1,20 @@
 {
+  "sealVersion": 2,
   "phase": "P9",
   "sealed": true,
-  "head": "9596fb0b22805d8def39e957d3b6ca826d90c2db",
-  "at": "2026-08-30T11:57:31.238Z",
+  "head": "45002ba2922ba363986d561a52b2a1d9dfb9b643",
+  "at": "2026-08-31T01:40:47.865Z",
   "waived": false,
   "reason": null,
+  "definitionDigest": "edf51732dff5dd5699a3a013f2982dd1e6f692e1834f363025692972fca30c4c",
+  "contentDigest": "3a7cbb58505637263fba0f5dd731dd65cd3278ff747d3d682a8553a803e712e7",
+  "outputs": {
+    "packages/admin-cmd/src/registry.ts": "40b3fdff6193d03022c829bede8d3767b1de7860045d7cc1a878d20ce74dd977",
+    "packages/admin-cmd/src/shared-mailbox.ts": "4a1a58141d520dafcb62c4654392d86f6bd9a55a255b6eb5cbac648203864980",
+    "packages/admin-cmd/src/dispatch.ts": "9f1809091b3bf49b9af5fad63900394155dcd4cd558cb5e70d1c492f44dccc16",
+    "packages/admin-cmd/src/types.ts": "094c22ddfd885c6a8bae1305eaeb213c7fd8d3745dc17f0756c477cde5b44516",
+    "packages/admin-cmd/test/shared-mailbox.test.ts": "d734ef5926d43d7e97eb6286ce6a4d62a80a4465213caef1232a2da2ffce4b27"
+  },
   "checks": [
     {
       "id": "G-P9.1",

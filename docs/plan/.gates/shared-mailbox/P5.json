@@ -1,10 +1,23 @@
 {
+  "sealVersion": 2,
   "phase": "P5",
   "sealed": true,
-  "head": "1e50d73997d8f15785c97b3ff5f43b6088e464f3",
-  "at": "2026-08-30T11:20:35.189Z",
+  "head": "45002ba2922ba363986d561a52b2a1d9dfb9b643",
+  "at": "2026-08-31T01:39:36.734Z",
   "waived": false,
   "reason": null,
+  "definitionDigest": "a14a99f762712d0b32184c8ea49d1d3596ca7fd3cc604591bcc6a86ddfcafda8",
+  "contentDigest": "95f3e5f415d3772911cc7c65c54cb1ea1d05a25f2b397573bd7ed07ffff1eb00",
+  "outputs": {
+    "apps/server/src/jmap-server.ts": "373b8cb7b0b270db387e7b3c85fcf18c3c0f0c339b8550ac911af04de6a0eb45",
+    "apps/server/src/jmap-backend.ts": "861ff029f35478da7fb3e553b609229aa50da97c82f74a5134a76a555ca8db23",
+    "apps/server/src/principal-context.ts": "1b74af9dfe76a1f699b7a570a432f8a2ce10616f26bc1357c653b010d521ccb5",
+    "apps/server/test/jmap-shared-account.test.ts": "cdb9c3a04d67aff7fe77ca179a98944725e470ae62c82e2e2ee2932430e66740",
+    "packages/store/src/jmap-store.ts": "2aec9ec48345ff87a6c96b23fec8e915d59ca192d60eb7d423c6f6bb55a07875",
+    "packages/store/src/store.ts": "c441c2c3225a52e079497d7ad8d9233d49e595e5db73aad24bcf451426bab5fa",
+    "packages/store/src/types.ts": "b6ca572a2b24bff89161d19cd4a3e30666792c1a2e876dfe74b82bb7cb3478b8",
+    "packages/store/test/authorization.test.ts": "4f1addb34330106879804a2a82c1b8786d7dd372a8582ec2d13ef919b132fc19"
+  },
   "checks": [
     {
       "id": "G-P5.1",
