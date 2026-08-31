@@ -124,6 +124,13 @@ describe("LMTP 수신자별 응답", () => {
     const byEmail = new Map(rows.map((r) => [String(r.email), Number(r.message_count)]));
     expect(byEmail.get("full@test.local")).toBe(0); // 쿼터 초과 → 저장 안 됨
     expect(byEmail.get("ok@test.local")).toBeGreaterThan(0);
+    const { rows: projection } = await app.db.query({
+      sql: `SELECT hp.display_value FROM message_header_projection hp
+            JOIN messages m ON m.id = hp.message_id JOIN accounts a ON a.id = m.account_id
+            WHERE a.email = ? AND hp.name = 'subject' ORDER BY m.created_at DESC LIMIT 1`,
+      params: ["ok@test.local"],
+    });
+    expect(projection[0]!.display_value).toBe("mixed");
   });
 
   test("전원 정상이면 전원 250", async () => {

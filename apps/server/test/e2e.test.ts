@@ -211,10 +211,18 @@ describe("e2e: SMTP 수신 → POP3 조회", () => {
     smtp.close();
 
     const { rows } = await app.db.query({
-      sql: "SELECT subject, preview, thread_id FROM messages ORDER BY created_at DESC LIMIT 1",
+      sql: "SELECT id, subject, preview, thread_id FROM messages ORDER BY created_at DESC LIMIT 1",
     });
     expect(String(rows[0]?.subject)).toBe("안녕 테스트");
     expect(String(rows[0]?.preview)).toContain("첫 줄입니다");
     expect(String(rows[0]?.thread_id)).toHaveLength(26);
+    const { rows: projections } = await app.db.query({
+      sql: `SELECT hp.name, hp.display_value FROM message_header_projection hp
+            JOIN messages m ON m.id = hp.message_id
+            WHERE m.id = ? AND hp.name IN ('subject', 'received') ORDER BY hp.name`,
+      params: [String(rows[0]!.id)],
+    });
+    expect(projections.some((row) => row.name === "subject" && row.display_value === "안녕 테스트")).toBe(true);
+    expect(projections.some((row) => row.name === "received")).toBe(true);
   });
 });

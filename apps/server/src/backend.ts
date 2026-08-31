@@ -45,10 +45,12 @@ import { isSrsAddress, srsForward, srsReverse } from "@ionosphere/srs";
 import {
   authenticate,
   putBlob,
+  projectHeaders,
   Store,
   StoreQuotaError,
   type AppendAddress,
   type BlobStore,
+  type HeaderProjection,
   scramKeysFor,
   scramAuthorize,
   claimVacationReply,
@@ -282,6 +284,8 @@ interface PreparedInbound {
    * 잡는 카운터가 정확히 그 경로에서 증가하지 않았다. RFC 5321 §4.4는 Received 추가를 MUST로 요구한다.
    */
   stored: Uint8Array;
+  /** 저장될 최종 MIME 바이트에서 계산해 fanout 계정들이 공유하는 bounded header 읽기 모델. */
+  headerProjections: readonly HeaderProjection[];
   blobId: string;
   /** putBlob()이 기록한 세대 — appendMessage로 그대로 넘겨 blobs 행을 같은 세대로 맞춘다. */
   blobGeneration: number;
@@ -1256,6 +1260,7 @@ export class IonosphereSmtpBackend implements SmtpBackend {
       kind: "ok",
       parsed,
       stored,
+      headerProjections: projectHeaders(stored),
       blobId,
       blobGeneration: generation,
       size,
@@ -1501,6 +1506,7 @@ export class IonosphereSmtpBackend implements SmtpBackend {
           ...(parsed.from[0] ? { from: `${parsed.from[0].name ?? ""} ${parsed.from[0].email}` } : {}),
           ...(parsed.to.length > 0 ? { to: parsed.to.map((a) => a.email).join(" ") } : {}),
         },
+        headerProjections: prep.headerProjections,
       });
       // message_auth 저장 (검증 성공 시) — 원본 재파싱 없이 조회 가능 (SCHEMA §9-3)
       if (authCodes) {

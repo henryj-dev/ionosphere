@@ -150,6 +150,11 @@ describe("MULTIAPPEND (RFC 3502)", () => {
     expect(out).toContain("OK [APPENDUID");
     const { rows } = await ctx.db.query({ sql: "SELECT COUNT(*) AS n FROM messages", params: [] });
     expect(Number(rows[0]!.n)).toBe(3);
+    const { rows: projected } = await ctx.db.query({
+      sql: "SELECT COUNT(*) AS n FROM message_header_projection WHERE name = 'subject'",
+      params: [],
+    });
+    expect(Number(projected[0]!.n)).toBe(3);
     await ctx.db.close();
   });
 
