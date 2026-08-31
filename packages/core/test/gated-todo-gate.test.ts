@@ -33,6 +33,26 @@ function runWithSealFixture(excludedPhase: string, ...args: string[]) {
   }
 }
 
+function runWithOnlySealFixture(includedPhase: string, ...args: string[]) {
+  const fixture = mkdtempSync(resolve(tmpdir(), "ionosphere-gate-bootstrap-"));
+  cpSync(sealDir, fixture, { recursive: true });
+  for (let index = 0; index <= 11; index += 1) {
+    const phase = `P${index}`;
+    const path = resolve(fixture, `${phase}.json`);
+    if (phase === includedPhase && existsSync(path)) refreshSealOutputsAt(path);
+    else rmSync(path, { force: true });
+  }
+  try {
+    return spawnSync(process.execPath, [gate, ...args], {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...process.env, IONOSPHERE_GATE_SEAL_DIR: fixture },
+    });
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+}
+
 function refreshSealOutputsAt(path: string): string {
   const original = readFileSync(path, "utf8");
   const seal = JSON.parse(original) as { outputs: Record<string, string>; contentDigest: string };
@@ -124,7 +144,8 @@ test("P0 gate: complete 검사는 최종 단계 봉인이 없으면 실패한다
 });
 
 test("P0 gate: 단계 실행용 order 검사는 자기봉인이 없어도 bootstrap을 허용한다", () => {
-  const result = runWithSealFixture("P11", "--assert-order");
+  // 후속 단계 정의가 바뀌어 기존 seal이 무효여도 P0부터 다시 봉인할 수 있어야 한다.
+  const result = runWithOnlySealFixture("P0", "--assert-order");
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
 });
 
