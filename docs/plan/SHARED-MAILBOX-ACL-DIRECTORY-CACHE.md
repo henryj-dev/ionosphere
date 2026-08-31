@@ -945,6 +945,7 @@ M-020 principals + mailbox_acl + account_memberships + account/mailbox versions
 M-021 external_identities + external_groups + principal_group_members
 M-022 message_headers + typed header projections
 M-023 listing indexes
+M-024 directory identity의 tenant·provider·account 연결 유일성
 ```
 
 실제 migration 파일과 `packages/db/src/index.ts`의 `allMigrations`에는 위 번호를 그대로

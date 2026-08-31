@@ -63,7 +63,7 @@ squash merge 뒤의 유효성 판정에는 쓰지 않는다.
 |---|---|
 | principal 4종, `negative=0` 1차 | G-P0, G-P1 |
 | IMAP standard right 11개와 virtual `c/d` | G-P0, G-P4 |
-| migration 020~023 | G-P1, G-P6, G-P7, G-P8, G-P10 |
+| migration 020~024 | G-P1, G-P6, G-P7, G-P8, G-P10 |
 | header name 190 bytes, display 16 KiB, sort 4 KiB, occurrence 32 | G-P7 |
 | listing 결과 2,000개, TTL 5~30초, bounded LRU | G-P8 |
 | LDAP 1차 3 transport 동작과 4 후순위 항목 | G-P6 |
