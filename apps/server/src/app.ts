@@ -253,6 +253,8 @@ export interface IonosphereAppOptions {
   blobsFallback?: BlobStore;
   /** provider 이름별 directory snapshot source. 부분 설정은 main 조립층에서 기동 전에 거부한다. */
   directorySources?: Readonly<Record<string, DirectorySnapshotSource>>;
+  /** directory password 로그인은 snapshot·mapping 검증 뒤 명시적으로만 켠다. 기본 off. */
+  directoryLogin?: boolean;
   /** IMAP(143). 미지정 시 리슨 안 함. imapsPort는 TLS(imapsTls 또는 tls) 필요. */
   imapPort?: number;
   imapsPort?: number;
@@ -668,6 +670,7 @@ export class IonosphereApp {
   private async authenticatePassword(user: string, pass: string, surface: AuthSurface): Promise<{ accountId: string; credKind?: string | undefined } | null> {
     const local = await authenticate(this.db, user, pass, surface);
     if (local) return { accountId: local.accountId, ...(local.credKind ? { credKind: local.credKind } : {}) };
+    if (this.opts.directoryLogin !== true) return null;
     return await this.sharedMailboxRuntime?.authenticate(user, pass) ?? null;
   }
 

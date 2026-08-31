@@ -505,6 +505,8 @@ IMAP·JMAP·관리 명령에서 서로 다른 결론을 얻지 않아야 하며,
 연결한다. 신규 MIME projection은 세 유입 경로에서 계산해 message core batch에 함께 기록하고,
 JMAP `Email/query` cache key는 인증 principal·resource/actor permission 세대·데이터 세대·허용
 mailbox 집합·전체 query를 포함한다. 관리 API의 sync/rebuild/flush는 앱이 소유한 실제 자원을 쓴다.
+directory 설정은 provider별 tenant 범위를 고정하고, identity list/link/unlink 명령으로 email 추측
+없이 immutable key를 로컬 account에 연결한다. password 로그인은 별도 flag로 마지막에 연다.
 
 【테스트】
 

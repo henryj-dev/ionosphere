@@ -114,6 +114,35 @@ http-01은 `IONOSPHERE_TLS_ACME_HTTP_PORT`가 80에 닿아야 하고, dns-01은 
 ⚠ **인증서 확보 실패가 평문 AUTH 개방으로 이어지면 안 된다.** 코드가 `tlsConfigured`와
 `implicitTls`를 분리해 두는 이유다. 실패는 더 안전한 쪽으로 떨어진다.
 
+### LDAP/AD directory
+
+여러 provider는 `IONOSPHERE_DIRECTORIES` JSON 배열 하나로 설정한다. 배열 원소는 반드시
+`provider`, `tenantId`, `transport`, `url`, `bindDn`, `bindPassword`, `baseDn`을 가진다.
+`transport`는 `ldaps` 또는 `starttls`만 허용한다. CA를 직접 고정할 때는 `tlsCaFile`을 쓴다.
+
+```text
+IONOSPHERE_DIRECTORIES=[{"provider":"corp-ad","tenantId":"tenant-id","transport":"ldaps","url":"ldaps://directory.ionosphere.test","bindDn":"cn=service,dc=ionosphere,dc=test","bindPassword":"replace-me","baseDn":"dc=ionosphere,dc=test"}]
+```
+
+선택 필드는 `userBaseDn`, `groupBaseDn`, `userFilter`, `groupFilter`, `timeoutMs`, `serverName`,
+`tlsCaFile`, `pageSize`, `maxEntries`, `nestedGroupMaxDepth`다. 부분 설정·중복 provider·평문 LDAP은
+기동 전에 실패한다. 일반 LDAP의 속성명이 AD와 다르면 `attributes`에서 `objectGuid`, `objectSid`,
+`upn`, `samAccountName`, `mail`, `displayName`, `groupMember`를 바꾼다. 설정 오류 로그에는 bind
+password를 싣지 않는다.
+
+운영 적용은 다음 순서다.
+
+1. `IONOSPHERE_DIRECTORY_LOGIN`을 비운 채 provider 설정만 배포한다.
+2. 관리 API/GUI의 `directory-sync`로 snapshot을 읽고 identity·group 수를 확인한다.
+3. `directory-identity-list`에서 immutable key를 확인하고 `directory-identity-link`로 로컬
+   account에 연결한 뒤 다시 동기화해 membership을 만든다.
+4. LDAP fixture와 실제 테스트 계정의 실패/성공을 확인한다.
+5. 마지막에 `IONOSPHERE_DIRECTORY_LOGIN=1`을 넣어 directory password 로그인을 연다.
+
+로컬 비밀번호·앱 비밀번호는 먼저 검사한다. directory 장애·TLS 검증 실패·중복 login name은
+directory 인증 실패로 닫히며, 기존 local credential까지 막지는 않는다. Kerberos/GSSAPI와
+referral 자동 추적은 지원 범위가 아니다.
+
 ## 5. DNS
 
 도메인을 등록하면 CLI가 넣어야 할 레코드를 출력한다(`add-domain`). 최소 구성은 이렇다.

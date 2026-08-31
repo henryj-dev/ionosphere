@@ -1,18 +1,17 @@
 import { CommandError, type CommandResult, type SharedMailboxAdminPort } from "@ionosphere/admin-cmd";
-import type { DirectoryIdentity } from "@ionosphere/core";
+import type { DirectoryIdentity, DirectorySnapshot } from "@ionosphere/core";
 import type { DbDriver } from "@ionosphere/db";
 import {
   backfillHeaderProjection,
+  directorySyncInputFromSnapshot,
   syncDirectorySnapshot,
   type BlobStore,
-  type DirectoryGroupSync,
-  type DirectoryIdentitySync,
   type JmapEmailQueryResult,
   type ListingCache,
 } from "@ionosphere/store";
 
 export interface DirectorySnapshotSource {
-  read(tenantId: string): Promise<{ identities: readonly DirectoryIdentitySync[]; groups: readonly DirectoryGroupSync[] }>;
+  read(tenantId: string): Promise<DirectorySnapshot>;
   authenticate?(loginName: string, password: string): Promise<DirectoryIdentity | null>;
   close?(): Promise<void>;
 }
@@ -37,6 +36,7 @@ export class SharedMailboxRuntime implements SharedMailboxAdminPort {
     const candidates = await this.opts.db.query({
       sql: "SELECT provider, external_key, account_id, login_names, email FROM directory_identities WHERE status = 1 AND account_id IS NOT NULL",
     });
+    const authenticated: Array<{ accountId: string; credKind: string }> = [];
     for (const row of candidates.rows) {
       const names = (() => { try { return JSON.parse(String(row.login_names)) as unknown; } catch { return []; } })();
       const matches = (Array.isArray(names) && names.some((name) => typeof name === "string" && name.toLowerCase() === normalized))
@@ -48,16 +48,18 @@ export class SharedMailboxRuntime implements SharedMailboxAdminPort {
       const identity = await source.authenticate(loginName, password);
       if (identity?.externalKey !== String(row.external_key)) continue;
       const account = await this.opts.db.query({ sql: "SELECT id FROM accounts WHERE id = ? AND status = 1", params: [row.account_id] });
-      if (account.rows.length === 1) return { accountId: String(row.account_id), credKind: `directory:${provider}` };
+      if (account.rows.length === 1) authenticated.push({ accountId: String(row.account_id), credKind: `directory:${provider}` });
     }
-    return null;
+    // 같은 login/password가 여러 provider에서 성공하면 어느 tenant인지 추측하지 않는다.
+    return authenticated.length === 1 ? authenticated[0]! : null;
   }
 
   async sync(tenantId: string, provider: string): Promise<CommandResult> {
     const source = this.opts.directorySources?.[provider];
     if (!source) throw new CommandError("unavailable", `directory provider가 구성되지 않았습니다: ${provider}`);
     const snapshot = await source.read(tenantId);
-    await syncDirectorySnapshot(this.opts.db, { tenantId, provider, now: Date.now(), identities: snapshot.identities, groups: snapshot.groups });
+    const input = await directorySyncInputFromSnapshot(this.opts.db, { tenantId, provider, now: Date.now(), snapshot });
+    await syncDirectorySnapshot(this.opts.db, input);
     return { data: { provider, identities: snapshot.identities.length, groups: snapshot.groups.length }, message: "directory snapshot 동기화 완료" };
   }
 

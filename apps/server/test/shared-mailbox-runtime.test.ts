@@ -40,7 +40,7 @@ describe("shared mailbox runtime", () => {
             ? { externalKey: "guid:runtime", loginNames: ["runtime"], email: "runtime@ionosphere.test", displayName: "Runtime" }
             : null,
           read: async () => ({
-            identities: [{ externalKey: "guid:runtime", loginNames: ["runtime"], email: "runtime@ionosphere.test", displayName: "Runtime", accountId: account.accountId, groupExternalKeys: [] }],
+            identities: [{ externalKey: "guid:runtime", loginNames: ["runtime"], email: "runtime@ionosphere.test", displayName: "Runtime", groupExternalKeys: [] }],
             groups: [],
           }),
         },
@@ -48,6 +48,8 @@ describe("shared mailbox runtime", () => {
     });
 
     expect((await runtime.sync(tenantId, "ad")).data?.identities).toBe(1);
+    await db.batch([{ sql: "UPDATE directory_identities SET account_id = ? WHERE tenant_id = ? AND provider = ? AND external_key = ?", params: [account.accountId, tenantId, "ad", "guid:runtime"] }]);
+    await runtime.sync(tenantId, "ad");
     expect(await runtime.authenticate("runtime", "directory-secret")).toEqual({ accountId: account.accountId, credKind: "directory:ad" });
     expect(await runtime.authenticate("runtime", "wrong")).toBe(null);
     expect((await db.query({ sql: "SELECT COUNT(*) AS n FROM directory_identities WHERE tenant_id = ? AND provider = ?", params: [tenantId, "ad"] })).rows[0]?.n).toBe(1);
