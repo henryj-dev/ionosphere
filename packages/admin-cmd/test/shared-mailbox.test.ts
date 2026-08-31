@@ -2,8 +2,8 @@ import { describe, expect, test } from "@ionosphere/testkit";
 import { createRegistry } from "../src/registry.ts";
 import { runCommand } from "../src/dispatch.ts";
 import type { CommandContext } from "../src/types.ts";
-import { allMigrations, migrate, openSqlite } from "@ionosphere/db";
-import { Store } from "@ionosphere/store";
+import { allMigrations, migrate, openSqlite, type DbDriver } from "@ionosphere/db";
+import { directoryMembershipSource, Store } from "@ionosphere/store";
 
 describe("shared mailbox admin surfaces", () => {
   test("registry descriptor 하나가 여덟 shared/cache 명령의 surface 정본이다", () => {
@@ -24,6 +24,51 @@ describe("shared mailbox admin surfaces", () => {
     expect((await db.query({ sql: "SELECT account_id FROM directory_identities WHERE id = ?", params: ["identity-link"] })).rows[0]?.account_id).toBe(account.accountId);
     await runCommand(createRegistry(), ctx, "directory-identity-unlink", { provider: "ad", externalKey: "guid:linked" });
     expect((await db.query({ sql: "SELECT account_id FROM directory_identities WHERE id = ?", params: ["identity-link"] })).rows[0]?.account_id).toBe(null);
+    await db.close();
+  });
+
+  test("동시 link의 stale 사전 조회는 DB UNIQUE가 막고 conflict로 변환한다", async () => {
+    const db = await openSqlite(":memory:");
+    await migrate(db, allMigrations);
+    const store = new Store(db);
+    const { tenantId } = await store.createTenant("directory-link-race");
+    const account = await store.createAccount({ tenantId, email: "race@ionosphere.test" });
+    await db.batch([
+      { sql: "INSERT INTO directory_identities (id, tenant_id, provider, external_key, login_names, display_name, last_seen_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params: ["identity-race-a", tenantId, "ad", "guid:race-a", "[]", "Race A", 1, 1] },
+      { sql: "INSERT INTO directory_identities (id, tenant_id, provider, external_key, login_names, display_name, last_seen_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params: ["identity-race-b", tenantId, "ad", "guid:race-b", "[]", "Race B", 1, 1] },
+    ]);
+
+    // 두 요청이 모두 같은 과거 snapshot을 읽은 상황을 만들어 사전 조회가 승인 장치가 아님을 검증한다.
+    const stalePrecheckDb: DbDriver = {
+      dialect: db.dialect,
+      async query(stmt) {
+        if (stmt.sql.startsWith("SELECT external_key FROM directory_identities")) return { rows: [] };
+        return await db.query(stmt);
+      },
+      async batch(stmts) { return await db.batch(stmts); },
+      insertIgnore(table, columns) { return db.insertIgnore(table, columns); },
+      async close() { await db.close(); },
+    };
+    const ctx = { db: stalePrecheckDb, store, tenantId, isRoot: true } as CommandContext;
+    const attempts = await Promise.allSettled([
+      runCommand(createRegistry(), ctx, "directory-identity-link", { provider: "ad", externalKey: "guid:race-a", accountId: account.accountId }),
+      runCommand(createRegistry(), ctx, "directory-identity-link", { provider: "ad", externalKey: "guid:race-b", accountId: account.accountId }),
+    ]);
+    expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+    const rejected = attempts.find((attempt) => attempt.status === "rejected");
+    expect(rejected?.status === "rejected" ? rejected.reason : null).toMatchObject({ name: "CommandError", kind: "conflict" });
+
+    const links = await db.query({ sql: "SELECT external_key, account_id FROM directory_identities WHERE tenant_id = ? AND provider = ? ORDER BY external_key", params: [tenantId, "ad"] });
+    expect(links.rows.filter((row) => row.account_id === account.accountId)).toHaveLength(1);
+    const linkedKey = String(links.rows.find((row) => row.account_id === account.accountId)?.external_key);
+    const unlinkedKey = linkedKey === "guid:race-a" ? "guid:race-b" : "guid:race-a";
+    await db.batch([{ sql: "INSERT INTO account_memberships (account_id, principal_id, source, created_at) VALUES (?, ?, ?, ?)", params: [account.accountId, "group-principal", directoryMembershipSource("ad"), 1] }]);
+
+    const normalCtx = { db, store, tenantId, isRoot: true } as CommandContext;
+    await runCommand(createRegistry(), normalCtx, "directory-identity-unlink", { provider: "ad", externalKey: linkedKey });
+    expect((await db.query({ sql: "SELECT COUNT(*) AS count FROM account_memberships WHERE account_id = ?", params: [account.accountId] })).rows[0]?.count).toBe(0);
+    await runCommand(createRegistry(), normalCtx, "directory-identity-link", { provider: "ad", externalKey: unlinkedKey, accountId: account.accountId });
+    expect((await db.query({ sql: "SELECT account_id FROM directory_identities WHERE tenant_id = ? AND provider = ? AND external_key = ?", params: [tenantId, "ad", unlinkedKey] })).rows[0]?.account_id).toBe(account.accountId);
     await db.close();
   });
 

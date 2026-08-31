@@ -5,7 +5,7 @@ import { describe, expect, test } from "@ionosphere/testkit";
 import { allMigrations, migrate, openSqlite } from "@ionosphere/db";
 
 describe("shared mailbox migration restore", () => {
-  test("backup 복구 뒤 020~023 재개 시 ACL·version·projection이 보존된다", async () => {
+  test("backup 복구 뒤 020~024 재개 시 ACL·version·projection이 보존된다", async () => {
     const root = await mkdtemp(join(tmpdir(), "ionosphere-restore-"));
     const sourcePath = join(root, "source.db");
     const backupPath = join(root, "backup.db");
@@ -25,7 +25,7 @@ describe("shared mailbox migration restore", () => {
       await copyFile(sourcePath, backupPath);
       await copyFile(backupPath, restoredPath);
       const restored = await openSqlite(restoredPath);
-      expect(await migrate(restored, allMigrations)).toBe(1);
+      expect(await migrate(restored, allMigrations)).toBe(2);
       const acl = await restored.query({ sql: "SELECT rights FROM mailbox_acl WHERE mailbox_id = ?", params: ["mailbox-restore"] });
       const account = await restored.query({ sql: "SELECT permissions_version FROM accounts WHERE id = ?", params: ["account-restore"] });
       const header = await restored.query({ sql: "SELECT display_value FROM message_header_projection WHERE message_id = ?", params: ["message-restore"] });

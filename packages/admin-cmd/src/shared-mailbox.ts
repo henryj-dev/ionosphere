@@ -1,5 +1,6 @@
 import { CommandError, type Command, type CommandContext } from "./types.ts";
 import { ulid } from "@ionosphere/core";
+import { BatchConflictError } from "@ionosphere/db";
 import { directoryMembershipSource } from "@ionosphere/store";
 
 function tenantId(ctx: CommandContext): string {
@@ -49,12 +50,20 @@ export const sharedMailboxCommands: readonly Command[] = [
       const linked = identity.rows[0]?.account_id;
       if (linked != null && String(linked) !== args.accountId) throw new CommandError("conflict", "directory identity가 다른 account에 연결되어 있습니다");
       const now = Date.now();
-      await ctx.db.batch([
-        { sql: "UPDATE directory_identities SET account_id = ? WHERE tenant_id = ? AND provider = ? AND external_key = ?", params: [args.accountId, scope, args.provider, args.externalKey] },
-        { sql: ctx.db.insertIgnore("principals", ["id", "tenant_id", "kind", "account_id", "provider", "external_key", "display_name", "created_at"]), params: [ulid(), scope, 0, args.accountId, args.provider, args.externalKey, identity.rows[0]?.display_name ?? null, now] },
-        { sql: "UPDATE principals SET account_id = ?, display_name = ? WHERE tenant_id = ? AND kind = 0 AND provider = ? AND external_key = ?", params: [args.accountId, identity.rows[0]?.display_name ?? null, scope, args.provider, args.externalKey] },
-        { sql: "UPDATE accounts SET permissions_version = permissions_version + 1 WHERE id = ? AND tenant_id = ?", params: [args.accountId, scope] },
-      ]);
+      try {
+        await ctx.db.batch([
+          { sql: "UPDATE directory_identities SET account_id = ? WHERE tenant_id = ? AND provider = ? AND external_key = ?", params: [args.accountId, scope, args.provider, args.externalKey] },
+          { sql: ctx.db.insertIgnore("principals", ["id", "tenant_id", "kind", "account_id", "provider", "external_key", "display_name", "created_at"]), params: [ulid(), scope, 0, args.accountId, args.provider, args.externalKey, identity.rows[0]?.display_name ?? null, now] },
+          { sql: "UPDATE principals SET account_id = ?, display_name = ? WHERE tenant_id = ? AND kind = 0 AND provider = ? AND external_key = ?", params: [args.accountId, identity.rows[0]?.display_name ?? null, scope, args.provider, args.externalKey] },
+          { sql: "UPDATE accounts SET permissions_version = permissions_version + 1 WHERE id = ? AND tenant_id = ?", params: [args.accountId, scope] },
+        ]);
+      } catch (error) {
+        // 사전 조회는 안내용일 뿐 동시 요청의 잠금이 아니다. 최종 승인은 DB UNIQUE 제약이 한다.
+        if (error instanceof BatchConflictError) {
+          throw new CommandError("conflict", "이 account는 같은 provider의 다른 identity에 연결되어 있습니다");
+        }
+        throw error;
+      }
       return { data: { provider: args.provider, externalKey: args.externalKey, accountId: args.accountId }, message: "directory identity 연결 완료 — group membership 반영을 위해 다시 동기화하세요" };
     },
   },
