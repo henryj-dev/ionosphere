@@ -89,7 +89,7 @@ export { scramSegment, buildScramSegment, scramKeysFor, scramAuthorize, type Sto
 // 여기 나가는 것은 표면 이름 목록과 판정 함수다(관리 명령이 입력 검증에 쓴다).
 export { AUTH_SURFACES, credentialAllowsSurface, type AuthSurface } from "./auth.ts";
 export { createBayesStore } from "./bayes-store.ts";
-export { syncDirectorySnapshot, type DirectoryGroupSync, type DirectoryIdentitySync, type DirectorySyncInput } from "./directory-sync.ts";
+export { directoryMembershipSource, directorySyncInputFromSnapshot, syncDirectorySnapshot, type DirectoryGroupSync, type DirectoryIdentitySync, type DirectorySyncInput } from "./directory-sync.ts";
 export { backfillHeaderProjection, projectHeaders, HEADER_PROJECTION_LIMITS, HEADER_PROJECTION_NAMES, type HeaderBackfillOptions, type HeaderProjection, type HeaderProjectionKind, type HeaderProjectionName } from "./header-projection.ts";
 export { getOrLoadListing, listingCacheKey, ListingCache, LISTING_CACHE_LIMITS, type ListingCacheKeyParts, type ListingCacheOptions } from "./listing-cache.ts";
 

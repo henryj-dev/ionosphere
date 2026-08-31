@@ -30,6 +30,29 @@ export interface DirectoryIdentity {
   displayName: string | null;
 }
 
+/** 디렉터리 전체 조회 결과의 사용자. accountId는 로컬 DB가 소유하므로 외부 reader가 만들지 않는다. */
+export interface DirectorySnapshotIdentity extends DirectoryIdentity {
+  groupExternalKeys: readonly string[];
+}
+
+/** 그룹 member는 사용자·하위 그룹 모두 immutable external key로 표현한다. */
+export interface DirectorySnapshotGroup {
+  externalKey: string;
+  displayName: string | null;
+  memberExternalKeys: readonly string[];
+}
+
+export interface DirectorySnapshot {
+  identities: readonly DirectorySnapshotIdentity[];
+  groups: readonly DirectorySnapshotGroup[];
+}
+
+/** 네트워크·paging은 어댑터가 맡고 core 소비자는 완성된 snapshot만 받는다. */
+export interface DirectorySnapshotReader {
+  readSnapshot(): Promise<DirectorySnapshot>;
+  close(): Promise<void>;
+}
+
 export class DirectoryError extends Error {
   constructor(message: string) {
     super(message);
