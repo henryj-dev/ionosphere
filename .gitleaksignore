@@ -1,0 +1,3 @@
+# P11 봉인은 산출물 SHA-256만 담는다. `api.test.ts` 경로 옆 hash 한 건을 generic-api-key가
+# 오인했으므로 해당 커밋·파일·규칙·줄 fingerprint만 제외한다. 범용 경로 예외는 두지 않는다.
+f58a7ffc108a4cf705e20eb87917b307ef62889f:docs/plan/.gates/shared-mailbox/P11.json:generic-api-key:21

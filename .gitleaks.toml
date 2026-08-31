@@ -9,7 +9,3 @@ useDefault = true
 [[allowlists]]
 description = "STARTTLS 어댑터 테스트가 쓰는 자체 서명 키. `openssl req -x509 -newkey rsa:2048 -nodes` 로 만든 일회용이고, 이 저장소 밖의 무엇에도 붙지 않는다(test/starttls.test.ts 머리말에 만드는 법이 적혀 있다)."
 paths = ['''^packages/proto-smtp/test/fixtures/key2?\.pem$''']
-
-[[allowlists]]
-description = "gated-todo 봉인은 산출물의 SHA-256만 담는다. 파일 경로에 api/token 같은 단어가 있으면 generic-api-key 규칙이 무작위 hash를 비밀로 오인한다."
-paths = ['''^docs/plan/\.gates/shared-mailbox/P[0-9]+\.json$''']
