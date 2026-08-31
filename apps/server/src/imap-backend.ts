@@ -14,6 +14,7 @@ import { parseMessage, type ParsedAddress, type ParsedMessage } from "@ionospher
 import {
   authenticate,
   putBlob,
+  projectHeaders,
   queryInChunks,
   StoreError,
   StoreQuotaError,
@@ -701,6 +702,7 @@ export class IonosphereImapBackend implements ImapBackend {
           ...(parsed.from[0] ? { from: `${parsed.from[0].name ?? ""} ${parsed.from[0].email}` } : {}),
           ...(parsed.to.length > 0 ? { to: parsed.to.map((a) => a.email).join(" ") } : {}),
         },
+        headerProjections: projectHeaders(item.raw),
       });
     }
 

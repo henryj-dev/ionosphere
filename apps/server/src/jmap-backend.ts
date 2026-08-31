@@ -8,6 +8,7 @@ import { buildSnippet, snippetTermsFromFilter } from "./snippet.ts";
 import {
   getVacationResponse,
   lookupBlob,
+  projectHeaders,
   setVacationResponse,
   Store,
   type BlobStore,
@@ -420,6 +421,7 @@ function buildEmailSetSource(db: DbDriver, store: Store, blobs: BlobStore): SetS
           envelope: toAppendEnvelope(parsed),
           keywords,
           searchText: toSearchText(parsed),
+          headerProjections: projectHeaders(raw),
         });
       } catch (err) {
         throw wrapStore(err);

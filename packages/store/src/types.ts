@@ -1,4 +1,5 @@
 import type { AddressKind } from "@ionosphere/db";
+import type { HeaderProjection } from "./header-projection.ts";
 /** Store 연산 입출력 타입 — SCHEMA.md §7 레시피의 앱 레벨 계약. */
 
 export interface CreateAccountInput {
@@ -93,6 +94,8 @@ export interface AppendMessageInput {
   keywords: readonly string[];
   /** 검색 색인 입력 — 생략 시 색인 생략(§8). */
   searchText?: AppendSearchText;
+  /** adapter가 저장할 MIME 원본에서 미리 계산한 header 읽기 모델. messages와 같은 원자 배치에 저장한다. */
+  headerProjections?: readonly HeaderProjection[];
 }
 
 export interface AppendMessageResult {
