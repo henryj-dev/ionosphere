@@ -173,10 +173,9 @@ describe("갱신 반영 범위 — 소스마다 자기 리스너만", () => {
     expect(await peerCN(app.imapsPort)).toBe("imap.test");
     expect(await peerCN(app.smtpsPort)).toBe("smtp.test");
 
-    imapsSrc.fire({ key: RENEWED.keyPem, cert: RENEWED.certPem });
-    for (let i = 0; i < 100 && (await peerCN(app.imapsPort)) !== "renewed.test"; i++) {
-      await new Promise((r) => setTimeout(r, 10));
-    }
+    // 범위 판정 자체를 검증하는 테스트이므로 공개 재적재 경로의 완료를 기다린 뒤 연결한다.
+    // watch callback은 void 비동기라 재적재 중간에 TLS 연결하면 평문 리스너 재생성 구간과 경합한다.
+    await app.reloadTlsFor({ key: RENEWED.keyPem, cert: RENEWED.certPem }, imapsSrc);
     expect(await peerCN(app.imapsPort)).toBe("renewed.test"); // 갱신 반영
     expect(await peerCN(app.smtpsPort)).toBe("smtp.test"); // ★건드리지 않았다
   });
@@ -190,10 +189,7 @@ describe("갱신 반영 범위 — 소스마다 자기 리스너만", () => {
       certSource: defaultSrc,
       certSources: { imaps: fixedSource({ key: IMAPS.keyPem, cert: IMAPS.certPem }) },
     });
-    defaultSrc.fire({ key: RENEWED.keyPem, cert: RENEWED.certPem });
-    for (let i = 0; i < 100 && (await peerCN(app.smtpsPort)) !== "renewed.test"; i++) {
-      await new Promise((r) => setTimeout(r, 10));
-    }
+    await app.reloadTlsFor({ key: RENEWED.keyPem, cert: RENEWED.certPem });
     expect(await peerCN(app.smtpsPort)).toBe("renewed.test"); // 기본 소스 리스너는 갱신
     expect(await peerCN(app.imapsPort)).toBe("imap.test"); // 전용 소스 리스너는 그대로
   });

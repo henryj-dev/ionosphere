@@ -205,6 +205,7 @@ const GATES: Record<string, Phase> = {
       "apps/server/test/shared-mailbox-runtime.test.ts",
       "apps/server/test/directory-config.test.ts",
       "apps/server/test/jmap-shared-account.test.ts",
+      "apps/server/test/tls-per-listener.test.ts",
       "packages/store/test/s3-blob.test.ts",
     ],
     checks: [
