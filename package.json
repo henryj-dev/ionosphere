@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "node scripts/lint.ts",
     "verify": "npm run lint && npm run typecheck && npm test && npm run smoke",
+    "gate:shared-mailbox:complete": "node scripts/gates/shared-mailbox.ts --assert-complete",
     "smoke": "node scripts/smoke.ts"
   },
   "dependencies": {

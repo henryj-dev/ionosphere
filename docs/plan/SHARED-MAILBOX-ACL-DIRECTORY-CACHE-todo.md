@@ -13,7 +13,7 @@
 
 작업 상태는 `미착수 · 진행 · 완료`, 단계 상태는 `잠김 · 열림 · 봉인 · 무효`만 사용한다.
 잠긴 단계의 작업은 시작하지 않는다. `열림`은 모든 선행 단계가 봉인됐다는 뜻이고, `봉인`은
-게이트의 모든 검사가 통과되어 커밋 SHA가 저장됐다는 뜻이다.
+게이트의 모든 검사가 통과되어 단계 정의와 산출물 digest가 저장됐다는 뜻이다.
 
 ### 작업 형식
 
@@ -36,19 +36,24 @@ node scripts/gates/shared-mailbox.ts <단계> --explain
 node scripts/gates/shared-mailbox.ts <단계> --seal --waived "사유"
 node scripts/gates/shared-mailbox.ts --status
 node scripts/gates/shared-mailbox.ts --assert-order
+node scripts/gates/shared-mailbox.ts --assert-complete
 ```
 
-봉인은 `docs/plan/.gates/shared-mailbox/<단계>.json`에 기록한다. 봉인 JSON에는 `phase`,
-`sealed`, `head`, `at`, `waived`, `reason`, `checks[{id,ok,measured,limit}]`를 반드시 둔다.
+봉인은 `docs/plan/.gates/shared-mailbox/<단계>.json`에 기록한다. 봉인 JSON에는 `sealVersion`,
+`phase`, `sealed`, `head`, `at`, `waived`, `reason`, `definitionDigest`, `contentDigest`,
+`outputs{path:sha256}`, `checks[{id,ok,measured,limit}]`를 반드시 둔다. `head`는 감사용 정보이며
+squash merge 뒤의 유효성 판정에는 쓰지 않는다.
 운영 디렉터리나 `.gitignore` 대상에는 봉인을 쓰지 않는다.
 
 장치는 다음을 기계적으로 강제한다.
 
-- R1 순서: 선행 단계 봉인이 없으면 검사 자체를 실행하지 않고 종료 코드 1 이상
-- R2 최신성: 봉인의 `head`가 현재 기본 브랜치의 조상이 아니면 `무효`
+- R1 순서: 유효한 선행 단계 봉인이 없으면 검사 자체를 실행하지 않고 종료 코드 1 이상
+- R2 최신성: 단계 정의 또는 산출물 바이트의 SHA-256이 봉인과 다르면 `무효`
 - R3 재검: `--seal`은 이전 결과를 사용하지 않고 모든 검사를 다시 실행
 - `--waived`는 선택 단계에만 허용하며 빈 사유는 거부
-- `--assert-order`는 선행 봉인 이후 산출 경로가 변경됐는데 재봉인하지 않았으면 실패
+- `--assert-order`는 봉인한 단계 정의나 산출 경로가 변경됐는데 재봉인하지 않았으면 실패
+- `--assert-complete`는 CI 전용이며 P0~P11 봉인의 존재·digest·전체 선행 chain 중 하나라도
+  빠지면 실패한다. 단계별 `--seal`은 자기 봉인 전에도 실행돼야 하므로 이 검사는 포함하지 않는다.
 
 ### 수치 원장
 
@@ -79,11 +84,12 @@ node scripts/gates/shared-mailbox.ts --assert-order
 | P8 listing query·LRU | 봉인 | P7 | `node scripts/gates/shared-mailbox.ts P8 --seal` | `docs/plan/.gates/shared-mailbox/P8.json` |
 | P9 admin·관측성 | 봉인 | P8 | `node scripts/gates/shared-mailbox.ts P9 --seal` | `docs/plan/.gates/shared-mailbox/P9.json` |
 | P10 통합·성능·복구 | 봉인 | P9 | `node scripts/gates/shared-mailbox.ts P10 --seal` | `docs/plan/.gates/shared-mailbox/P10.json` |
+| P11 운영 런타임 배선 | 봉인 | P10 | `node scripts/gates/shared-mailbox.ts P11 --seal` | `docs/plan/.gates/shared-mailbox/P11.json` |
 
 ## 선행 관계
 
 ```text
-P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7 → P8 → P9 → P10
+P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7 → P8 → P9 → P10 → P11
 ```
 
 동시에 진행하는 단계는 0개로 제한한다. 권한·스키마·캐시가 서로의 계약을 바꾸므로 이 실행판은
@@ -113,8 +119,15 @@ P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7 → P8 → P9 → P10
 - TC-P0.T1.d 검사 이빨
   - 단언: 각 check의 위반 fixture에서 그 check가 실패하고 종료 코드가 0이 아니다.
   - 검출: 실행은 되지만 아무것도 검출하지 않는 장식용 GATE.
+- TC-P0.T1.e 최종 봉인 완전성
+  - 단언: P11 봉인이 없으면 `--assert-complete` 종료 코드가 0이 아니다.
+  - 검출: 마지막 단계가 열려 있는데 CI가 완료로 승인하는 회귀.
+- TC-P0.T1.f 선행 chain 완전성
+  - 단언: 후행 봉인을 둔 채 중간 봉인을 지우면 `--assert-complete` 종료 코드가 0이 아니다.
+  - 검출: 중간 단계 증거가 빠졌는데 후행 봉인만으로 CI가 성공하는 회귀.
 
-【통과】 `--status`, R1~R3, waived, assert-order의 양·음성 fixture가 모두 0/비0을 정확히 반환한다.
+【통과】 `--status`, R1~R3, waived, assert-order, assert-complete의 양·음성 fixture가 모두
+0/비0을 정확히 반환한다.
 
 ### 완료 P0.T2 — ADR·공통 권한 계약 봉인
 
@@ -468,7 +481,7 @@ EXPLAIN/latency, cache isolation, migration restore rehearsal을 수행한다. S
   - 단언: 같은 principal·mailbox에 대한 IMAP/JMAP/admin 판정이 동일하다.
   - 검출: protocol별 rights 계산 차이로 한 표면만 권한 상승하는 회귀.
 - TC-P10.T1.b restore
-  - 단언: 020~023 적용 전 backup을 복구하고 migration을 재개해 데이터·version·ACL이 보존된다.
+  - 단언: 020~024 적용 전 backup을 복구하고 migration을 재개해 데이터·version·ACL이 보존된다.
   - 검출: migration 실패 시 복구 불능 또는 부분 ACL로 기동하는 회귀.
 - TC-P10.T1.c full verification
 - 단언: `npm run verify`가 현재 테스트 2,446개 중 2,443 pass·3 skip, smoke 성공을 기록한다.
@@ -483,12 +496,52 @@ EXPLAIN/latency, cache isolation, migration restore rehearsal을 수행한다. S
 | G-P10.1 | 전체 verify | `npm run verify` | 2,443 pass, 3 skip, fail=0, todo=0 |
 | G-P10.2 | migration 복구 | `node --test packages/db/test/shared-mailbox-restore.test.ts` | 023 적용 전 백업 복구·재개 후 ACL/version/projection 보존 |
 | G-P10.3 | listing EXPLAIN | `node --test packages/db/test/shared-mailbox-explain.test.ts` | UID listing이 `ix_mm_listing` 사용 |
-| G-P10.4 | migration 수 | `node --input-type=module -e ...` | migrations=23, 마지막 version=23 |
+| G-P10.4 | migration 수 | `node --input-type=module -e ...` | migrations=24, 마지막 version=24 |
 | G-P10.5 | 잔재·순서 | `node scripts/gates/shared-mailbox.ts --assert-order` | unsealed changed outputs=0 |
 
 최종 판정 지표는 **권한 경계의 교차 표면 일관성**이다. 같은 principal이 같은 mailbox에 대해
 IMAP·JMAP·관리 명령에서 서로 다른 결론을 얻지 않아야 하며, 이것이 맞지 않으면 성능이나
 기능 수가 모두 성공해도 최종 GATE는 실패한다.
+
+## P11 — 운영 런타임 배선 (봉인 완료)
+
+### 완료 P11.T1 — directory·projection·listing의 실제 소비 경로
+
+선행: P10 · 산출: 앱 조립, 환경 설정, ingest projection, JMAP cache, 관리 runtime port ·
+되돌리기: directory 설정 제거와 listing cache 미주입; projection schema는 forward-fix ·
+장치 요구: 설정 부분 입력 fail closed, 동일 프로세스 cache 인스턴스 공유
+
+【작업】 단위 기능으로만 존재하던 LDAP/AD snapshot, header projection, listing cache를 실제 서버에
+연결한다. 신규 MIME projection은 세 유입 경로에서 계산해 message core batch에 함께 기록하고,
+JMAP `Email/query` cache key는 인증 principal·resource/actor permission 세대·데이터 세대·허용
+mailbox 집합·전체 query를 포함한다. 관리 API의 sync/rebuild/flush는 앱이 소유한 실제 자원을 쓴다.
+directory 설정은 provider별 tenant 범위를 고정하고, identity list/link/unlink 명령으로 email 추측
+없이 immutable key를 로컬 account에 연결한다. password 로그인은 별도 flag로 마지막에 연다.
+
+【테스트】
+
+- TC-P11.T1.a runtime port
+  - 단언: 관리 sync/rebuild/flush가 DB·BlobStore·JMAP cache singleton을 실제로 변경한다.
+  - 검출: registry에는 명령이 보이지만 실행하면 501이거나 다른 프로세스 cache를 비우는 회귀.
+- TC-P11.T1.b ingest atomicity
+  - 단언: SMTP/LMTP·IMAP APPEND·JMAP import가 projection을 만들고 core batch 실패 시 함께 롤백한다.
+  - 검출: backfill 전 신규 메시지의 projection 누락 또는 부분 projection.
+- TC-P11.T1.c cache isolation
+  - 단언: 같은 query는 hit하고 데이터·ACL·directory membership·principal 변화는 miss한다.
+  - 검출: shared mailbox 결과가 다른 사용자나 옛 권한 세대로 재사용되는 회귀.
+- TC-P11.T1.d squash-safe seal
+  - 단언: commit ancestry가 사라져도 같은 산출물은 봉인이고, 정의/파일 digest 변화는 무효다.
+  - 검출: squash merge 직후 main CI만 실패하거나 변경된 산출물을 옛 봉인이 승인하는 회귀.
+
+## 🚪 GATE P11
+
+| id | 검사 | 명령 | 통과 기준 |
+|---|---|---|---|
+| G-P11.1 | 전체 verify | `npm run verify` | fail=0, todo=0 |
+| G-P11.2 | runtime 통합 | `node --test apps/server/test/shared-mailbox-runtime.test.ts apps/server/test/directory-ldap.test.ts apps/server/test/jmap-shared-account.test.ts` | sync·rebuild·flush·LDAP·cache pass |
+| G-P11.3 | admin 배선 | gate 내부 grep | `sharedMailboxRuntime` 주입 검출 |
+| G-P11.4 | listing 배선 | gate 내부 grep | `getOrLoadListing` 실제 호출 검출 |
+| G-P11.5 | ingest 배선 | gate 내부 grep | `headerProjections` core batch 검출 |
 
 ## 막혔을 때
 
@@ -500,5 +553,5 @@ IMAP·JMAP·관리 명령에서 서로 다른 결론을 얻지 않아야 하며,
 
 ## 코드 미확인 TC
 
-없음. P0~P10의 산출 경로는 기존 코드와 계획서의 실제 함수·migration·테스트 경로를 대조해
+없음. P0~P11의 산출 경로는 기존 코드와 계획서의 실제 함수·migration·테스트 경로를 대조해
 기록했다. 구현 중 경로가 바뀌면 해당 TC의 검출줄과 GATE 명령을 같은 커밋에서 갱신한다.

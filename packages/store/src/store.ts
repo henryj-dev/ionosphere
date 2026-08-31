@@ -501,6 +501,7 @@ export class Store {
         stmts.push({ sql: `DELETE FROM messages WHERE id IN (${p})`, params: idChunk });
         stmts.push({ sql: `DELETE FROM message_keywords WHERE message_id IN (${p})`, params: idChunk });
         stmts.push({ sql: `DELETE FROM message_addresses WHERE message_id IN (${p})`, params: idChunk });
+        stmts.push({ sql: `DELETE FROM message_header_projection WHERE message_id IN (${p})`, params: idChunk });
         // ★검색 부산물도 **여기서** 지운다. 예전엔 message_text·search_index만 남았고,
         //   message_text에는 제목과 본문 텍스트가 들어간다 — 사용자가 지운 메일의 본문이
         //   DB와 백업에 영구히 남는다는 뜻이었다(저장소 낭비 이전에 삭제 계약이 깨진 것).
@@ -770,6 +771,23 @@ export class Store {
       );
       const kwRows = keywordsLower.map((k) => [accountId, messageId, k]);
       stmts.push(...multiRowInsertStatements("message_keywords", ["account_id", "message_id", "keyword"], kwRows));
+      const headerRows = (input.headerProjections ?? []).map((projection) => [
+        messageId,
+        projection.occurrence,
+        projection.name,
+        projection.kind,
+        projection.displayValue,
+        projection.sortValue,
+        projection.dateValue,
+        projection.addressValue,
+      ]);
+      stmts.push(
+        ...multiRowInsertStatements(
+          "message_header_projection",
+          ["message_id", "occurrence", "name", "kind", "display_value", "sort_value", "date_value", "address_value"],
+          headerRows,
+        ),
+      );
 
       // message_auth — Phase 2 인증 파이프라인 몫 (의도적 생략)
       // message_text / search_index는 아래에서 core batch 커밋 후 후속 배치로 채운다(§7-1: 검색은
@@ -1363,6 +1381,7 @@ export class Store {
         stmts.push({ sql: `DELETE FROM messages WHERE id IN (${ph})`, params: idChunk });
         stmts.push({ sql: `DELETE FROM message_keywords WHERE message_id IN (${ph})`, params: idChunk });
         stmts.push({ sql: `DELETE FROM message_addresses WHERE message_id IN (${ph})`, params: idChunk });
+        stmts.push({ sql: `DELETE FROM message_header_projection WHERE message_id IN (${ph})`, params: idChunk });
         // ★검색 부산물도 **여기서** 지운다. 예전엔 message_text·search_index만 남았고,
         //   message_text에는 제목과 본문 텍스트가 들어간다 — 사용자가 지운 메일의 본문이
         //   DB와 백업에 영구히 남는다는 뜻이었다(저장소 낭비 이전에 삭제 계약이 깨진 것).
@@ -1457,6 +1476,7 @@ export class Store {
         { sql: "DELETE FROM messages WHERE id = ?", params: [messageId] },
         { sql: "DELETE FROM message_keywords WHERE message_id = ?", params: [messageId] },
         { sql: "DELETE FROM message_addresses WHERE message_id = ?", params: [messageId] },
+        { sql: "DELETE FROM message_header_projection WHERE message_id = ?", params: [messageId] },
         // 검색 부산물 — 위 청크 경로와 같은 이유로 함께 지운다(삭제 계약).
         { sql: "DELETE FROM message_text WHERE message_id = ?", params: [messageId] },
         { sql: "DELETE FROM search_index WHERE message_id = ?", params: [messageId] },
@@ -1631,6 +1651,25 @@ export class Store {
       else addrBy.set(id, [r]);
     }
 
+    // COPY는 새 message id를 만들므로 원본과 같은 header 읽기 모델도 코어 배치에서 복제한다.
+    // 검색 부산물처럼 후속 best-effort로 두면 사본만 projection이 없는 영구 불일치가 생긴다.
+    const headerRows =
+      input.op === "copy"
+        ? await queryInChunks(
+            this.db,
+            ids,
+            (ph) => `SELECT message_id, occurrence, name, kind, display_value, sort_value, date_value, address_value
+                     FROM message_header_projection WHERE message_id IN (${ph})`,
+          )
+        : [];
+    const headersBy = new Map<string, typeof headerRows>();
+    for (const r of headerRows) {
+      const id = String(r.message_id);
+      const list = headersBy.get(id);
+      if (list) list.push(r);
+      else headersBy.set(id, [r]);
+    }
+
     const now = Date.now();
     const nextModseq = acct.modseq + 1;
     const pairs: { messageId: string; uid: number }[] = [];
@@ -1645,6 +1684,7 @@ export class Store {
     const blobRefRows: unknown[][] = [];
     const copiedKeywordRows: unknown[][] = [];
     const copiedAddrRows: unknown[][] = [];
+    const copiedHeaderRows: unknown[][] = [];
     /** 검색 부산물 복제용 (원본 → 사본). 코어 배치 커밋 뒤에 처리한다(§7-1). */
     const copySources: { from: string; to: string }[] = [];
     /** 사본이 계정 사용량에 더하는 바이트 — 사본은 진짜 새 메시지다. */
@@ -1741,6 +1781,18 @@ export class Store {
       for (const a of addrBy.get(id) ?? []) {
         copiedAddrRows.push([input.accountId, copyId, Number(a.kind), Number(a.pos), a.name == null ? null : String(a.name), String(a.email)]);
       }
+      for (const h of headersBy.get(id) ?? []) {
+        copiedHeaderRows.push([
+          copyId,
+          Number(h.occurrence),
+          String(h.name),
+          String(h.kind),
+          String(h.display_value),
+          String(h.sort_value),
+          h.date_value == null ? null : Number(h.date_value),
+          h.address_value == null ? null : String(h.address_value),
+        ]);
+      }
       copySources.push({ from: id, to: copyId });
       copyBytes += size;
     }
@@ -1767,6 +1819,11 @@ export class Store {
       ...multiRowInsertStatements("blob_refs", ["blob_id", "account_id", "ref_kind", "ref_id", "created_at"], blobRefRows),
       ...multiRowInsertStatements("message_keywords", ["account_id", "message_id", "keyword"], copiedKeywordRows),
       ...multiRowInsertStatements("message_addresses", ["account_id", "message_id", "kind", "pos", "name", "email"], copiedAddrRows),
+      ...multiRowInsertStatements(
+        "message_header_projection",
+        ["message_id", "occurrence", "name", "kind", "display_value", "sort_value", "date_value", "address_value"],
+        copiedHeaderRows,
+      ),
       ...multiRowInsertStatements("message_mailbox", ["mailbox_id", "uid", "message_id", "savedate", "deleted"], mmRows),
       ...multiRowInsertStatements("expunged", ["mailbox_id", "uid", "modseq", "created_at"], expungedRows),
     ];
@@ -1906,6 +1963,7 @@ export class Store {
       { sql: "DELETE FROM messages WHERE id = ?", params: [messageId] },
       { sql: "DELETE FROM message_keywords WHERE message_id = ?", params: [messageId] },
       { sql: "DELETE FROM message_addresses WHERE message_id = ?", params: [messageId] },
+      { sql: "DELETE FROM message_header_projection WHERE message_id = ?", params: [messageId] },
       // 검색 부산물 — 위 청크 경로와 같은 이유로 함께 지운다(삭제 계약).
       { sql: "DELETE FROM message_text WHERE message_id = ?", params: [messageId] },
       { sql: "DELETE FROM search_index WHERE message_id = ?", params: [messageId] },

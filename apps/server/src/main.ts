@@ -14,6 +14,7 @@ import { createCertSource, httpChallengeServer, type AcmeChallenge, type CertSou
 import { dnsProviderFromConfig } from "./cf-dns.ts";
 import { FsBlobStore, isBlobGcMode, S3BlobStore, type BlobGcMode, type BlobStore } from "@ionosphere/store";
 import { HTTP_SERVICES, IonosphereApp, type AppAuditOptions, type HttpServiceName, type ServiceHosts, type TlsListenerName } from "./app.ts";
+import { directorySourcesFromJson } from "./directory-config.ts";
 
 // ★구 `IONOSPHERE_*` env를 새 이름으로 넘긴다 — 반드시 env를 처음 읽기 **전에**.
 // 코드 배포와 `/etc/*.env` 교체를 따로 할 수 있게 하는 전환 장치다(packages/core/src/env-legacy.ts).
@@ -471,6 +472,7 @@ assertNoPort80Conflict();
 warnRemovedEnv();
 
 const hostname = process.env.IONOSPHERE_HOSTNAME ?? "localhost";
+const directorySources = directorySourcesFromJson(process.env.IONOSPHERE_DIRECTORIES);
 
 const app = new IonosphereApp({
   hostname,
@@ -490,6 +492,9 @@ const app = new IonosphereApp({
       ? { blobs, blobsFallback: new FsBlobStore(process.env.IONOSPHERE_BLOBS ?? "blobs") }
       : { blobs };
   })(),
+  // LDAP/AD provider 배열. JSON 전체를 한 번에 검증해 부분 설정이 조용히 비활성화되지 않게 한다.
+  ...(directorySources ? { directorySources } : {}),
+  ...(process.env.IONOSPHERE_DIRECTORY_LOGIN === "1" ? { directoryLogin: true } : {}),
   // 역할별 분리를 위해 리스너를 끌 수 있다: `off`(대소문자 무시)면 그 리스너를 띄우지 않는다.
   // `0`은 "끔"이 아니라 임시 포트(테스트 관례)라 별도 토큰이 필요하다.
   ...optionalPort("smtpPort", process.env.IONOSPHERE_SMTP_PORT, 2525),

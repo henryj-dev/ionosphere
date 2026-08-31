@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "@ionosphere/testkit";
 import { MAIL_CAPABILITY, JmapEngine } from "@ionosphere/proto-jmap";
 import { allMigrations, migrate, openSqlite } from "@ionosphere/db";
-import { FsBlobStore, Store } from "@ionosphere/store";
+import { FsBlobStore, ListingCache, Store, type JmapEmailQueryResult } from "@ionosphere/store";
 import { buildMailModule } from "../src/jmap-backend.ts";
 
 describe("JMAP shared account", () => {
@@ -29,8 +29,9 @@ describe("JMAP shared account", () => {
       envelope: { subject: "shared", subjectBase: "shared", msgidHash: null, sentAt: null, preview: "body", hasAttachment: false, addresses: [], threadRefHashes: [] },
       keywords: [],
     });
+    const listingCache = new ListingCache<JmapEmailQueryResult>({ ttlMs: 5000 });
     const engine = new JmapEngine({
-      modules: [buildMailModule(db, store, blobs)],
+      modules: [buildMailModule(db, store, blobs, listingCache)],
       capabilities: [MAIL_CAPABILITY],
       sessionState: () => "0",
     });
@@ -50,12 +51,17 @@ describe("JMAP shared account", () => {
     expect(list[0]?.myRights.mayAddItems).toBe(false);
     const query = response.methodResponses[1]![1] as { ids: string[] };
     expect(query.ids).toEqual([appended.messageId]);
+    expect(listingCache.size).toBe(1);
+    await engine.handle({ using: [MAIL_CAPABILITY], methodCalls: [["Email/query", { accountId: shared.accountId, filter: { inMailbox: sharedMailboxId } }, "cache-hit"]] }, actor.accountId);
+    expect(listingCache.size).toBe(1);
     const email = response.methodResponses[2]![1] as { list: { id: string }[] };
     expect(email.list.map((item) => item.id)).toEqual([appended.messageId]);
     const thread = response.methodResponses[3]![1] as { list: { emailIds: string[] }[] };
     expect(thread.list[0]?.emailIds).toEqual([appended.messageId]);
     const queryState = (response.methodResponses[1]![1] as { queryState: string }).queryState;
     await store.setMailboxAcl(tenantId, sharedMailboxId, String(actorPrincipal[0]!.id), "lr");
+    await engine.handle({ using: [MAIL_CAPABILITY], methodCalls: [["Email/query", { accountId: shared.accountId, filter: { inMailbox: sharedMailboxId } }, "acl-miss"]] }, actor.accountId);
+    expect(listingCache.size).toBe(2);
     const stale = await engine.handle({ using: [MAIL_CAPABILITY], methodCalls: [["Email/changes", { accountId: shared.accountId, sinceState: queryState }, "c4"]] }, actor.accountId);
     expect(stale.methodResponses[0]).toEqual(["error", { type: "cannotCalculateChanges" }, "c4"]);
     await db.close();

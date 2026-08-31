@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { describe, test } from "node:test";
 import { expect } from "@ionosphere/testkit";
 import { allMigrations, migrate, openSqlite, type DbDriver, type Statement } from "@ionosphere/db";
-import { FsBlobStore, putBlob, Store } from "@ionosphere/store";
+import { FsBlobStore, projectHeaders, putBlob, Store } from "@ionosphere/store";
 
 const N = 40;
 
@@ -68,6 +68,7 @@ async function setup() {
         preview: null, hasAttachment: false, addresses: [], threadRefHashes: [],
       },
       keywords: [],
+      headerProjections: projectHeaders(bytes),
     });
     messageIds.push(r.messageId);
   }
@@ -143,6 +144,7 @@ describe("copyOrMoveMessages", () => {
     expect(await count(db, "SELECT COUNT(*) AS n FROM message_mailbox WHERE mailbox_id = ?", [target])).toBe(N);
     expect(await count(db, "SELECT COUNT(*) AS n FROM message_mailbox WHERE mailbox_id = ?", [mailboxId])).toBe(N);
     expect(await count(db, "SELECT total_count AS n FROM mailboxes WHERE id = ?", [target])).toBe(N);
+    expect(await count(db, "SELECT COUNT(*) AS n FROM message_header_projection")).toBe(N * 4);
     // uid는 대상 메일함에서 중복 없이 이어져야 한다.
     expect(new Set(pairs.map((p) => p.uid)).size).toBe(N);
     await db.close();
@@ -175,6 +177,7 @@ describe("copyOrMoveMessages", () => {
     expect(threw).toBe(true);
     expect(await count(db, "SELECT COUNT(*) AS n FROM message_mailbox WHERE mailbox_id = ?", [target])).toBe(0);
     expect(await count(db, "SELECT total_count AS n FROM mailboxes WHERE id = ?", [target])).toBe(0);
+    expect(await count(db, "SELECT COUNT(*) AS n FROM message_header_projection")).toBe(N * 2);
     // 원본도 그대로여야 한다.
     expect(await count(db, "SELECT COUNT(*) AS n FROM message_mailbox WHERE mailbox_id = ?", [mailboxId])).toBe(N);
     await db.close();

@@ -23,7 +23,7 @@ import {
   type ListenerShutdown,
   type Logger,
 } from "@ionosphere/core";
-import { authenticate, lookupBlob, putBlob, Store, type BlobStore, type JmapStates } from "@ionosphere/store";
+import { authenticate, lookupBlob, putBlob, Store, type BlobStore, type JmapEmailQueryResult, type JmapStates, type ListingCache } from "@ionosphere/store";
 import { BLOB_STATUS, REF_KIND, type DbDriver } from "@ionosphere/db";
 import type { OutboundPolicy } from "@ionosphere/mta";
 import {
@@ -47,6 +47,10 @@ export interface JmapServerOptions {
   db: DbDriver;
   store: Store;
   blobs: BlobStore;
+  /** 프로세스 단위 JMAP Email/query cache. 관리 명령이 같은 인스턴스를 비운다. */
+  listingCache?: ListingCache<JmapEmailQueryResult>;
+  /** local credential과 directory password를 합친 조립층 인증기. */
+  authenticatePassword?: (user: string, pass: string) => Promise<{ accountId: string; credKind?: string | undefined } | null>;
   hostname: string;
   /** 세션/URL 생성용 외부 베이스 URL(예: https://mx.ionosphere.test). 미지정 시 요청 Host 사용. */
   externalBaseUrl?: string;
@@ -145,7 +149,7 @@ export class JmapServer {
     this.audit = opts.audit ?? noopAuditSink;
     const modules: CapabilityModule[] = [
       coreModule,
-      buildMailModule(opts.db, opts.store, opts.blobs),
+      buildMailModule(opts.db, opts.store, opts.blobs, opts.listingCache),
       buildSubmissionModule(opts.db, opts.store, opts.blobs, opts.outbound),
       buildQuotaModule(opts.store),
       buildVacationModule(opts.db, opts.store),
@@ -412,12 +416,15 @@ export class JmapServer {
     if (idx === -1) return { ok: false, presented: true };
     const user = decoded.slice(0, idx);
     const pass = decoded.slice(idx + 1);
-    const result = await authenticate(this.opts.db, user, pass, "jmap");
+    const result = this.opts.authenticatePassword
+      ? await this.opts.authenticatePassword(user, pass)
+      : await authenticate(this.opts.db, user, pass, "jmap");
     if (!result) {
       this.log.warn("auth failed", { user });
       return { ok: false, presented: true, user };
     }
-    const email = user.toLowerCase();
+    const account = await this.opts.db.query({ sql: "SELECT email FROM accounts WHERE id = ? AND status = 1", params: [result.accountId] });
+    const email = String(account.rows[0]?.email ?? user).toLowerCase();
     this.authCache.set(cacheKey, { accountId: result.accountId, email, expiresAt: now + AUTH_CACHE_TTL_MS });
 
     /**

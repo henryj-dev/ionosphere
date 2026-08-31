@@ -1,5 +1,5 @@
 import { describe, expect, test } from "@ionosphere/testkit";
-import { allMigrations, migrate, openSqlite } from "@ionosphere/db";
+import { allMigrations, BatchConflictError, migrate, openSqlite } from "@ionosphere/db";
 
 describe("migrate", () => {
   test("001 전체 적용 + 테이블 존재 확인", async () => {
@@ -40,6 +40,20 @@ describe("migrate", () => {
     ]);
     const { rows } = await db.query({ sql: "SELECT COUNT(*) AS count FROM principals" });
     expect(Number(rows[0]?.count)).toBe(3);
+    await db.close();
+  });
+
+  test("024는 같은 tenant/provider에서 account 하나를 identity 하나에만 연결한다", async () => {
+    const db = await openSqlite();
+    await migrate(db, allMigrations);
+    await db.batch([
+      { sql: "INSERT INTO directory_identities (id, tenant_id, provider, external_key, account_id, login_names, last_seen_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params: ["identity-a", "tenant-a", "ad", "guid:a", "account-a", "[]", 1, 1] },
+      { sql: "INSERT INTO directory_identities (id, tenant_id, provider, external_key, account_id, login_names, last_seen_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params: ["identity-b", "tenant-a", "ldap", "uid=b", "account-a", "[]", 1, 1] },
+      { sql: "INSERT INTO directory_identities (id, tenant_id, provider, external_key, account_id, login_names, last_seen_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params: ["identity-c", "tenant-b", "ad", "guid:c", "account-a", "[]", 1, 1] },
+    ]);
+    await expect(db.batch([
+      { sql: "INSERT INTO directory_identities (id, tenant_id, provider, external_key, account_id, login_names, last_seen_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params: ["identity-duplicate", "tenant-a", "ad", "guid:duplicate", "account-a", "[]", 1, 1] },
+    ])).rejects.toBeInstanceOf(BatchConflictError);
     await db.close();
   });
 

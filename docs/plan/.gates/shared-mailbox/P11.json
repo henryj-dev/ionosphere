@@ -1,0 +1,72 @@
+{
+  "sealVersion": 2,
+  "phase": "P11",
+  "sealed": true,
+  "head": "ec173de34a8ad3eedcea88bf4c29ccc0bbe3407d",
+  "at": "2026-08-31T02:07:53.463Z",
+  "waived": false,
+  "reason": null,
+  "definitionDigest": "2a470f0e38d4d2be1ab1979949a565795dee272995a0217806eec32330672d42",
+  "contentDigest": "254790fe2501b8fbd9454d0dffc1e38909899084998c51956791f6066c406d1f",
+  "outputs": {
+    "apps/server/src/app.ts": "16fa63e180f3ee506c553467a51ddc7f1c591cec7a95b96d3028097bb261b724",
+    "apps/server/src/main.ts": "ff28a276dcb6952f795d2ab96bf58842e1b33fa4831d03349fd770d3347a4edc",
+    "apps/server/src/directory-ldap.ts": "96677c1e83f17d3f5ad851928b25a4af7d28974184ab61b4f5a2228e939beac3",
+    "apps/server/src/directory-source.ts": "de708e77d37012a888d4a161e522e4d33ec10bfd5bb453bbb2db6dc4da2ee8af",
+    "apps/server/src/directory-config.ts": "f672e2fc06c3fa060a4dc0cfc6c00316d2114fe7a93b67565d668d739173a6a2",
+    "apps/server/src/shared-mailbox-runtime.ts": "8aa705efd6fe4e24ec492d627cc104e410557b547db86eec6bfb926d6cadefdf",
+    "apps/server/src/jmap-backend.ts": "861ff029f35478da7fb3e553b609229aa50da97c82f74a5134a76a555ca8db23",
+    "apps/server/src/jmap-server.ts": "373b8cb7b0b270db387e7b3c85fcf18c3c0f0c339b8550ac911af04de6a0eb45",
+    "packages/api/src/server.ts": "2a327534d2e77f2ff25c089031db36a00b667cf15f115679f320c6a07cbea201",
+    "packages/api/test/api.test.ts": "5aca3bb247a4dacb1d4829e7676a06d92d5c877c520a8a3ee3776b485fba150f",
+    "packages/admin-cmd/src/shared-mailbox.ts": "4a1a58141d520dafcb62c4654392d86f6bd9a55a255b6eb5cbac648203864980",
+    "packages/admin-cmd/test/shared-mailbox.test.ts": "d734ef5926d43d7e97eb6286ce6a4d62a80a4465213caef1232a2da2ffce4b27",
+    "packages/store/src/store.ts": "c441c2c3225a52e079497d7ad8d9233d49e595e5db73aad24bcf451426bab5fa",
+    "packages/store/src/types.ts": "b6ca572a2b24bff89161d19cd4a3e30666792c1a2e876dfe74b82bb7cb3478b8",
+    "scripts/gates/shared-mailbox.ts": "64b1ad5aace4afba25168b54c44c06ab86666daf5d7bf9a30a59a6d5a1f1334e",
+    "packages/core/test/gated-todo-gate.test.ts": "529d524cd0d702dfeca8db5be7f039843a5c3a264b574ab2776d5c8e57b36b80",
+    ".gitleaks.toml": "6b1b74c411d28f9a18e4f58bef3b1bdae65d35da7477352e50617c51d31a1833",
+    ".gitleaksignore": "9fbc5162c90a526291906941c0a7d2abdd42a08197fd4d1c6c9cc4060b2efe69",
+    ".github/workflows/ci.yml": "a5f8ca16b63dc01cc20918a0890bed1722e4019202085f32f3a8c7f00597a461",
+    "package.json": "56045f43176abc643270284959fe71d34e883205e3dc360ba84a64449886d592",
+    "docs/plan/SHARED-MAILBOX-ACL-DIRECTORY-CACHE-todo.md": "ab3778189ae70143bb087631fef28e74dc242e3b5aeaf62c4dd6939f8b649315",
+    "docs/OPERATIONS.md": "a7ca9b000e32d319244bc5f65331f4c7cf9fcf7b57d45932754c5366d03c199c",
+    "apps/server/test/shared-mailbox-runtime.test.ts": "3ef985407d862d466b1fe028525be2c3469f34a08239446ae68625d3a8906849",
+    "apps/server/test/directory-config.test.ts": "2ba72337a7f0f1e7d271013e47adb26d2cc28c7fa83db3f72ff6b17862af4e3f",
+    "apps/server/test/jmap-shared-account.test.ts": "cdb9c3a04d67aff7fe77ca179a98944725e470ae62c82e2e2ee2932430e66740",
+    "apps/server/test/tls-per-listener.test.ts": "57975800b9a82195124a1a433ed85b036f0fc7677db7328a863f057c795d0dbc",
+    "packages/store/test/s3-blob.test.ts": "113fe82284862b2a4e81c93a63f56c25eaf8b7301197f5961cae6876434f979a"
+  },
+  "checks": [
+    {
+      "id": "G-P11.1",
+      "ok": true,
+      "measured": 0,
+      "limit": 0
+    },
+    {
+      "id": "G-P11.2",
+      "ok": true,
+      "measured": 0,
+      "limit": 0
+    },
+    {
+      "id": "G-P11.3",
+      "ok": true,
+      "measured": 7,
+      "limit": 1
+    },
+    {
+      "id": "G-P11.4",
+      "ok": true,
+      "measured": 2,
+      "limit": 1
+    },
+    {
+      "id": "G-P11.5",
+      "ok": true,
+      "measured": 1,
+      "limit": 1
+    }
+  ]
+}

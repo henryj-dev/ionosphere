@@ -8,11 +8,16 @@ import { buildSnippet, snippetTermsFromFilter } from "./snippet.ts";
 import {
   getVacationResponse,
   lookupBlob,
+  projectHeaders,
   setVacationResponse,
   Store,
+  getOrLoadListing,
+  listingCacheKey,
+  type ListingCache,
   type BlobStore,
   type JmapEmailFilter,
   type JmapEmailMeta,
+  type JmapEmailQueryResult,
   type MailboxRow,
   type VacationResponseRow,
 } from "@ionosphere/store";
@@ -214,7 +219,7 @@ function toJmapEmailMeta(m: JmapEmailMeta): JmapObject {
   };
 }
 
-export function buildMailModule(db: DbDriver, store: Store, blobs: BlobStore): CapabilityModule {
+export function buildMailModule(db: DbDriver, store: Store, blobs: BlobStore, listingCache?: ListingCache<JmapEmailQueryResult>): CapabilityModule {
   const mailboxGetSource: GetSource = {
     state: async (accountId) => (await store.jmapState(accountId)).mailbox,
     get: async (accountId, ids) => {
@@ -265,7 +270,7 @@ export function buildMailModule(db: DbDriver, store: Store, blobs: BlobStore): C
       "Mailbox/set": (args, ctx) => standardSet(args, ctx.accountId, ctx, mailboxSetSource),
       "Email/get": (args, ctx) => emailGet(args, ctx.accountId, db, store, blobs),
       "Email/changes": (args, ctx) => scopedJmapChanges(args, ctx.accountId, db, store, "email"),
-      "Email/query": (args, ctx) => emailQuery(args, ctx.accountId, db, store),
+      "Email/query": (args, ctx) => emailQuery(args, ctx.accountId, db, store, listingCache),
       "Email/set": (args, ctx) => standardSet(args, ctx.accountId, ctx, buildEmailSetSource(db, store, blobs)),
       "Email/import": (args, ctx) => emailImport(args, ctx, store, buildEmailSetSource(db, store, blobs)),
       "Email/copy": (args, ctx) => emailCopy(args, ctx.accountId),
@@ -420,6 +425,7 @@ function buildEmailSetSource(db: DbDriver, store: Store, blobs: BlobStore): SetS
           envelope: toAppendEnvelope(parsed),
           keywords,
           searchText: toSearchText(parsed),
+          headerProjections: projectHeaders(raw),
         });
       } catch (err) {
         throw wrapStore(err);
@@ -892,7 +898,7 @@ function project(obj: JmapObject, props: Set<string>): JmapObject {
 }
 
 /** Email/query (RFC 8621 §4.4, v1) — inMailbox/날짜/크기/키워드 필터 + receivedAt 정렬. */
-async function emailQuery(args: Record<string, unknown>, accountId: string, db: DbDriver, store: Store): Promise<Record<string, unknown>> {
+async function emailQuery(args: Record<string, unknown>, accountId: string, db: DbDriver, store: Store, listingCache?: ListingCache<JmapEmailQueryResult>): Promise<Record<string, unknown>> {
   const acc = await requestedAccountId(args, accountId);
   const context = await principalContext(db, accountId);
   const allowedMailboxIds = await store.accessibleMailboxIds(context, acc);
@@ -932,7 +938,25 @@ async function emailQuery(args: Record<string, unknown>, accountId: string, db: 
 
   const position = typeof args.position === "number" && args.position >= 0 ? args.position : 0;
   const limit = typeof args.limit === "number" && args.limit >= 0 ? Math.min(args.limit, 500) : 500;
-  const { ids, total } = await store.queryEmails(acc, filter, ascending, position, limit, allowedMailboxIds);
+  const load = (): Promise<JmapEmailQueryResult> => store.queryEmails(acc, filter, ascending, position, limit, allowedMailboxIds);
+  let queryResult: JmapEmailQueryResult;
+  if (listingCache) {
+    const resourceState = await store.jmapState(acc);
+    const actorState = acc === accountId ? resourceState : await store.jmapState(accountId);
+    const key = listingCacheKey({
+      principalId: context.principalId,
+      mailboxId: filter.inMailbox ?? `account:${acc}`,
+      mailboxModseq: Number(resourceState.email),
+      aclVersion: Number(resourceState.permission),
+      permissionsVersion: Number(actorState.permission),
+      query: { accountId: acc, allowedMailboxIds: [...allowedMailboxIds].sort(), filter, ascending, position, limit },
+    });
+    // ListingCache는 배열을 저장한다. 한 query 결과를 길이 1의 봉투에 넣어 ids와 total을 함께 보존한다.
+    queryResult = (await getOrLoadListing(listingCache, key, async () => [await load()]))[0]!;
+  } else {
+    queryResult = await load();
+  }
+  const { ids, total } = queryResult;
   return { accountId: acc, queryState: state, canCalculateChanges: false, position, total, limit, ids };
 }
 

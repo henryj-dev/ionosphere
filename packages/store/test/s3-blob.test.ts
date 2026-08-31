@@ -380,6 +380,7 @@ describe("재시도·타임아웃", () => {
   test("응답 없는 서버는 타임아웃으로 끊는다(무한 정지 금지)", async () => {
     fake = await startFakeS3();
     fake.hang = true;
+    let attempts = 0;
     const store = new S3BlobStore({
       endpoint: `http://127.0.0.1:${fake.port}`,
       region: "us-east-1",
@@ -388,11 +389,17 @@ describe("재시도·타임아웃", () => {
       secretAccessKey: "s",
       forcePathStyle: true,
       timeoutMs: 60,
+      fetch: async (input, init) => {
+        attempts += 1;
+        return await fetch(input, init);
+      },
     });
     const started = Date.now();
     await expect(store.get("c".repeat(64))).rejects.toThrow(/시도 실패/);
     // 4회 × 60ms + 백오프 상한 — 무한 대기가 아니라는 것만 보증한다.
     expect(Date.now() - started).toBeLessThan(4_000);
-    expect(fake.requests).toHaveLength(4);
+    // 부하가 높으면 60ms abort가 서버의 request 이벤트보다 먼저 도착할 수 있다. 서버가
+    // 관측한 개수가 아니라 실제 fetch 호출 수를 세어 재시도 계약을 결정적으로 검증한다.
+    expect(attempts).toBe(4);
   });
 });

@@ -44,6 +44,8 @@ import {
   type CommandFailure,
   type CommandRegistry,
   type CommandSpec,
+  type AdminObserver,
+  type SharedMailboxAdminPort,
   type TlsAdminPort,
 } from "@ionosphere/admin-cmd";
 import { matchRoute } from "./routes.ts";
@@ -82,6 +84,10 @@ export interface AdminApiDeps {
    * 생략 시 기록하지 않는다(`noopAuditSink`) — 기존 동작 그대로.
    */
   audit?: AuditSink;
+  /** 디렉터리 동기화·header 재생성·프로세스 cache flush의 실제 런타임 구현. */
+  sharedMailbox?: SharedMailboxAdminPort;
+  /** 명령 계층 관측 포트. 입력값을 받지 않아 자격증명과 필터가 로그에 섞이지 않는다. */
+  observer?: AdminObserver;
 }
 
 /** 서버 전역 TLS 관리 인터페이스(root 전용). upload는 sealed 모드에서만 제공. */
@@ -573,6 +579,8 @@ export class AdminApiServer {
       masterKey: this.deps.masterKey,
       resolveTxt: this.deps.resolveTxt,
       resolveMx: this.deps.resolveMx,
+      ...(this.deps.sharedMailbox ? { sharedMailbox: this.deps.sharedMailbox } : {}),
+      ...(this.deps.observer ? { observer: this.deps.observer } : {}),
       ...(this.deps.tls ? { tls: toTlsPort(this.deps.tls) } : {}),
     };
   }

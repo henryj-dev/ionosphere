@@ -45,10 +45,12 @@ import { isSrsAddress, srsForward, srsReverse } from "@ionosphere/srs";
 import {
   authenticate,
   putBlob,
+  projectHeaders,
   Store,
   StoreQuotaError,
   type AppendAddress,
   type BlobStore,
+  type HeaderProjection,
   scramKeysFor,
   scramAuthorize,
   claimVacationReply,
@@ -282,6 +284,8 @@ interface PreparedInbound {
    * 잡는 카운터가 정확히 그 경로에서 증가하지 않았다. RFC 5321 §4.4는 Received 추가를 MUST로 요구한다.
    */
   stored: Uint8Array;
+  /** 저장될 최종 MIME 바이트에서 계산해 fanout 계정들이 공유하는 bounded header 읽기 모델. */
+  headerProjections: readonly HeaderProjection[];
   blobId: string;
   /** putBlob()이 기록한 세대 — appendMessage로 그대로 넘겨 blobs 행을 같은 세대로 맞춘다. */
   blobGeneration: number;
@@ -1256,6 +1260,7 @@ export class IonosphereSmtpBackend implements SmtpBackend {
       kind: "ok",
       parsed,
       stored,
+      headerProjections: projectHeaders(stored),
       blobId,
       blobGeneration: generation,
       size,
@@ -1501,6 +1506,7 @@ export class IonosphereSmtpBackend implements SmtpBackend {
           ...(parsed.from[0] ? { from: `${parsed.from[0].name ?? ""} ${parsed.from[0].email}` } : {}),
           ...(parsed.to.length > 0 ? { to: parsed.to.map((a) => a.email).join(" ") } : {}),
         },
+        headerProjections: prep.headerProjections,
       });
       // message_auth 저장 (검증 성공 시) — 원본 재파싱 없이 조회 가능 (SCHEMA §9-3)
       if (authCodes) {
@@ -1922,6 +1928,7 @@ export class IonospherePop3Backend implements Pop3Backend {
    * DbMaildropLock(@ionosphere/store)을 주입해야 RFC 1939 §3 배타성이 성립한다.
    */
   private readonly lock: MaildropLock;
+  private readonly authenticatePassword: (user: string, pass: string) => Promise<{ accountId: string; credKind?: string | undefined } | null>;
   /** accountId → INBOX mailboxId (세션 간 캐시 아님 — commit 시 재사용 위해 세션 수명만). */
   private readonly inboxByAccount = new Map<string, string>();
   /** accountId → 이 프로세스가 잡은 락 세션. 없으면 락을 안 잡은 것 = 풀 것도 없다. */
@@ -1933,16 +1940,18 @@ export class IonospherePop3Backend implements Pop3Backend {
     blobs: BlobStore,
     logger: Logger = noopLogger,
     lock: MaildropLock = new InProcessMaildropLock(),
+    authenticatePassword?: (user: string, pass: string) => Promise<{ accountId: string; credKind?: string | undefined } | null>,
   ) {
     this.db = db;
     this.store = store;
     this.blobs = blobs;
     this.log = logger.child({ component: "pop3" });
     this.lock = lock;
+    this.authenticatePassword = authenticatePassword ?? (async (user, pass) => authenticate(this.db, user, pass, "pop3"));
   }
 
   async authenticate(user: string, pass: string) {
-    const result = await authenticate(this.db, user, pass, "pop3");
+    const result = await this.authenticatePassword(user, pass);
     if (!result) {
       this.log.warn("auth failed", { user });
       return null;

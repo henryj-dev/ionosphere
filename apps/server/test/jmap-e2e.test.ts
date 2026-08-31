@@ -305,6 +305,11 @@ describe("Identity + 블롭 업로드/import/download", () => {
     expect(email.subject).toBe("imported via jmap");
     expect((email.keywords as Record<string, boolean>).$draft).toBe(true);
     expect((email.mailboxIds as Record<string, boolean>)[inboxId]).toBe(true);
+    const { rows: projection } = await app.db.query({
+      sql: "SELECT display_value FROM message_header_projection WHERE message_id = ? AND name = 'subject'",
+      params: [emailId],
+    });
+    expect(projection[0]!.display_value).toBe("imported via jmap");
 
     // 5) download 왕복
     const dl = await fetch(`${base}/jmap/download/${acc()}/${upBody.blobId}/msg.eml`, { headers: { authorization: AUTH } });

@@ -1,10 +1,27 @@
 {
+  "sealVersion": 2,
   "phase": "P6",
   "sealed": true,
-  "head": "cae458de3b148d798f5f462119a3be18d47b4c78",
-  "at": "2026-08-30T12:59:48.011Z",
+  "head": "45002ba2922ba363986d561a52b2a1d9dfb9b643",
+  "at": "2026-08-31T01:39:53.653Z",
   "waived": false,
   "reason": null,
+  "definitionDigest": "a4701921f31b23fc8b7f02aac333295c43bf72155026bb4e6292bf70d66ac100",
+  "contentDigest": "794f2beaf4f262d19d392e7e517a1e5abbc60c68a0dd9789df73425318c16e70",
+  "outputs": {
+    "packages/core/src/directory.ts": "9a5bdf47c5f581521f6fd62f178bc737fdd1284f771e512be516c691c2917c66",
+    "packages/core/src/index.ts": "6407cc8ef0ecc6748a791b2ec5d969553c46dbe9963bc900949c612086529b25",
+    "packages/core/test/directory.test.ts": "61625a4783ece4323996413f179120db8b69e96164c92ad9c73d5bf8ae8649db",
+    "packages/db/src/index.ts": "41e23e43214f0ec1f2fbc59c6804bf2bab0fd2b1e8505efed7d841048b1c38b9",
+    "packages/db/src/migrations/021_directory_identity.ts": "c439601f44856f766b2781153f78a1ee37a0d9d54faf868282003b671f744143",
+    "packages/db/src/migrations/024_directory_identity_account_unique.ts": "dadfef361c39d1cdf497c86f6f80091e250d40bc2cef56ae2e10933b54ca5c24",
+    "packages/db/test/migrate.test.ts": "bdbe7ad2d9a28a603dfc00876e4acb3b1836add486827d38f2503bb573a46205",
+    "docs/SCHEMA.md": "8cf1b4a8ebc4ae03d1f981c4335bced2ab1465342101988e57eb683d287e9a31",
+    "packages/store/src/directory-sync.ts": "4b4c26d4c4090c6116756b96c7640637bb357497d4f16684ca96384d2e484f7a",
+    "packages/store/test/directory-sync.test.ts": "11d0c03033d0ec70d3e8ba85222113a81e243f3a4115f301530a4ce0b4ffe18a",
+    "apps/server/src/directory-ldap.ts": "96677c1e83f17d3f5ad851928b25a4af7d28974184ab61b4f5a2228e939beac3",
+    "apps/server/test/directory-ldap.test.ts": "beaa855ec9cf04af67009989ac70309f500f0ca5be5b7c088a899401483cd6c7"
+  },
   "checks": [
     {
       "id": "G-P6.1",

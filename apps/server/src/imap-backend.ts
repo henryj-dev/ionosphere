@@ -14,6 +14,7 @@ import { parseMessage, type ParsedAddress, type ParsedMessage } from "@ionospher
 import {
   authenticate,
   putBlob,
+  projectHeaders,
   queryInChunks,
   StoreError,
   StoreQuotaError,
@@ -66,16 +67,18 @@ export class IonosphereImapBackend implements ImapBackend {
   private readonly store: Store;
   private readonly blobs: BlobStore;
   private readonly log: Logger;
+  private readonly authenticatePassword: (user: string, pass: string) => Promise<{ accountId: string; credKind?: string | undefined } | null>;
 
-  constructor(db: DbDriver, store: Store, blobs: BlobStore, logger: Logger = noopLogger) {
+  constructor(db: DbDriver, store: Store, blobs: BlobStore, logger: Logger = noopLogger, authenticatePassword?: (user: string, pass: string) => Promise<{ accountId: string; credKind?: string | undefined } | null>) {
     this.db = db;
     this.store = store;
     this.blobs = blobs;
     this.log = logger.child({ component: "imap" });
+    this.authenticatePassword = authenticatePassword ?? (async (user, pass) => authenticate(this.db, user, pass, "imap"));
   }
 
   async authenticate(user: string, pass: string): Promise<{ accountId: string; credKind?: string | undefined } | null> {
-    const result = await authenticate(this.db, user, pass, "imap");
+    const result = await this.authenticatePassword(user, pass);
     if (!result) {
       this.log.warn("auth failed", { user });
       return null;
@@ -701,6 +704,7 @@ export class IonosphereImapBackend implements ImapBackend {
           ...(parsed.from[0] ? { from: `${parsed.from[0].name ?? ""} ${parsed.from[0].email}` } : {}),
           ...(parsed.to.length > 0 ? { to: parsed.to.map((a) => a.email).join(" ") } : {}),
         },
+        headerProjections: projectHeaders(item.raw),
       });
     }
 

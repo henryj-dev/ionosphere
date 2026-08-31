@@ -2,7 +2,7 @@
 
 > 상태: **동결** (v1 → 이중 리뷰 → v2 → 이중 재검증 → v2.1) · 전제: [PLAN.md](../PLAN.md) + [PROTOCOLS.md](PROTOCOLS.md) §0
 >
-> **적용된 마이그레이션(2026-08-30 기준 022까지)** — 정본은 `packages/db/src/migrations/`다.
+> **적용된 마이그레이션(2026-08-31 기준 024까지)** — 정본은 `packages/db/src/migrations/`다.
 > 코어 DDL은 001이고, 그 뒤는 아래 절에 따로 적었다:
 >
 > | # | 이름 | 어디에 |
@@ -30,6 +30,7 @@
 > | 021 | directory_identity | **§4-2** |
 > | 022 | header_projection | **§5-4** |
 > | 023 | listing_indexes | **§5-5** |
+> | 024 | directory_identity_account_unique | **§4-2** |
 >
 > ⚠ 새 마이그레이션을 넣으면 **이 표와 해당 절을 같이 갱신할 것.** 009·010이 한동안 코드에만
 > 있고 이 문서에 없었다 — "동결 스키마"를 자처하는 문서가 실제 테이블을 빠뜨리면, 그것을 읽고
@@ -293,6 +294,7 @@ CREATE TABLE directory_identities (
   status        SMALLINT NOT NULL DEFAULT 1
 );
 CREATE UNIQUE INDEX ux_directory_identity ON directory_identities(tenant_id, provider, external_key);
+CREATE UNIQUE INDEX ux_directory_identity_account ON directory_identities(tenant_id, provider, account_id);
 
 CREATE TABLE directory_group_members (
   tenant_id          VARCHAR(26) NOT NULL,
@@ -308,6 +310,8 @@ CREATE TABLE directory_group_members (
 
 동기화는 완전 snapshot을 한 배치로 반영한다. 조회 실패 때는 호출하지 않고 기존 행을 삭제하지
 않으며, 성공한 snapshot에서 제거된 membership만 정리한 뒤 관련 `permissions_version`을 증가시킨다.
+024의 두 번째 UNIQUE 인덱스는 같은 provider에서 로컬 account 하나가 둘 이상의 외부 identity에
+연결되는 TOCTOU를 DB에서 막는다. `account_id IS NULL`인 미연결 identity는 여러 행을 허용한다.
 
 ## 5. DDL — 메일 스토어 코어
 

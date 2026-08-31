@@ -1,5 +1,5 @@
 import { describe, expect, test } from "@ionosphere/testkit";
-import { DIRECTORY_TRANSPORT, DirectoryError, DirectoryProvider, externalIdentityKey, mapDirectoryIdentity, resolveNestedGroups, validateDirectoryConfig } from "../src/directory.ts";
+import { DIRECTORY_TRANSPORT, DirectoryError, DirectoryProvider, externalIdentityKey, mapDirectoryIdentity, resolveNestedGroups, validateDirectoryConfig, type DirectorySnapshotReader } from "../src/directory.ts";
 
 describe("directory mapping", () => {
   test("LDAPS와 StartTLS만 simple bind 설정을 통과시킨다", () => {
@@ -52,5 +52,17 @@ describe("directory mapping", () => {
     const client = { bindService: async () => { throw new Error("timeout"); }, authenticateUser: async () => null, close: async () => {} };
     const result = await new DirectoryProvider({ transport: DIRECTORY_TRANSPORT.ldaps, url: "ldaps://directory.test", bindDn: "cn=reader", bindPassword: "secret", timeoutMs: 1000 }, client).authenticate("a", "password");
     expect(result).toBe(null);
+  });
+
+  test("snapshot reader 계약은 로컬 accountId를 외부 snapshot에 싣지 않는다", async () => {
+    const reader: DirectorySnapshotReader = {
+      readSnapshot: async () => ({
+        identities: [{ externalKey: "sid:S-1", loginNames: ["user"], email: null, displayName: null, groupExternalKeys: ["sid:G-1"] }],
+        groups: [{ externalKey: "sid:G-1", displayName: "Group", memberExternalKeys: ["sid:S-1"] }],
+      }),
+      close: async () => {},
+    };
+    const snapshot = await reader.readSnapshot();
+    expect("accountId" in snapshot.identities[0]!).toBe(false);
   });
 });

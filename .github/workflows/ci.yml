@@ -99,6 +99,8 @@ jobs:
       # 간헐 실패가 나므로 CI에서는 낮춰 고정한다.
       - run: npm test -- --test-concurrency=2
       - run: npm run smoke
+      # 단계별 --seal 중에는 자기 봉인이 아직 없으므로 complete 검사는 전체 검증 뒤 CI에서만 돈다.
+      - run: npm run gate:shared-mailbox:complete
 
   # **정책 층은 이 저장소 것이 아니다.** 자격증명·워크플로 감사·의존성 리뷰는 이 저장소가
   # 무엇을 만드는지와 무관하게 다섯 저장소가 같은 것을 묻는 축이다. 복제해 들고 있으면
