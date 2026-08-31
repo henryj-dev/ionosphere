@@ -198,6 +198,7 @@ const GATES: Record<string, Phase> = {
       "packages/store/src/types.ts",
       "scripts/gates/shared-mailbox.ts",
       "packages/core/test/gated-todo-gate.test.ts",
+      ".gitleaks.toml",
       ".github/workflows/ci.yml",
       "package.json",
       "docs/plan/SHARED-MAILBOX-ACL-DIRECTORY-CACHE-todo.md",
