@@ -91,7 +91,12 @@ export async function backfillHeaderProjection(db: DbDriver, blobs: BlobStore, o
     const messageId = String(row.id);
     const projections = projectHeaders(await blobs.get(String(row.blob_id)));
     statements.push({ sql: "DELETE FROM message_header_projection WHERE message_id = ?", params: [messageId] });
-    for (const projection of projections) statements.push({ sql: "INSERT INTO message_header_projection (message_id, occurrence, name, kind, display_value, sort_value, date_value, address_value) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params: [messageId, projection.occurrence, projection.name, projection.kind, projection.displayValue, projection.sortValue, projection.dateValue, projection.addressValue] });
+    // Blob을 읽는 동안 메시지가 최종 삭제될 수 있다. 존재 조건을 projection 쓰기와 같은
+    // 원자 배치에서 다시 확인하지 않으면 삭제 뒤 고아 projection을 되살린다.
+    for (const projection of projections) statements.push({
+      sql: "INSERT INTO message_header_projection (message_id, occurrence, name, kind, display_value, sort_value, date_value, address_value) SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM messages WHERE id = ?)",
+      params: [messageId, projection.occurrence, projection.name, projection.kind, projection.displayValue, projection.sortValue, projection.dateValue, projection.addressValue, messageId],
+    });
     statements.push({ sql: "UPDATE header_backfill_checkpoints SET last_message_id = ?, updated_at = ? WHERE id = ?", params: [messageId, options.now ?? Date.now(), "default"] });
     processed++;
   }

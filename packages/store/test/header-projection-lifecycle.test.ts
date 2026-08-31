@@ -1,5 +1,6 @@
 import { describe, expect, test } from "@ionosphere/testkit";
-import { projectHeaders } from "../src/header-projection.ts";
+import { backfillHeaderProjection, projectHeaders } from "../src/header-projection.ts";
+import type { BlobStore } from "../src/blob.ts";
 import type { Store } from "../src/store.ts";
 import type { DbDriver } from "@ionosphere/db";
 import { makeAppendInput, setupFixture } from "./helpers.ts";
@@ -115,6 +116,28 @@ describe("header projection ingest lifecycle", () => {
     const messageId = await appendProjected(store, accountId, [inboxId]);
 
     await store.destroyMessage(accountId, messageId);
+    expect(await projectionCount(db, messageId)).toBe(0);
+    await db.close();
+  });
+
+  test("rebuild가 blob을 읽는 동안 삭제된 message의 projection을 되살리지 않는다", async () => {
+    const { db, store, accountId, inboxId } = await setupFixture();
+    const messageId = await appendProjected(store, accountId, [inboxId]);
+    await db.batch([
+      { sql: "DELETE FROM message_header_projection" },
+      { sql: "UPDATE header_backfill_checkpoints SET last_message_id = ? WHERE id = ?", params: ["", "default"] },
+    ]);
+    const deletingBlobStore: BlobStore = {
+      async get() {
+        // SELECT와 projection batch 사이의 실제 경합 지점을 결정적으로 재현한다.
+        await db.query({ sql: "DELETE FROM messages WHERE id = ?", params: [messageId] });
+        return raw;
+      },
+      async put() { throw new Error("호출되면 안 됨"); },
+      async remove() { throw new Error("호출되면 안 됨"); },
+    };
+
+    expect(await backfillHeaderProjection(db, deletingBlobStore)).toBe(1);
     expect(await projectionCount(db, messageId)).toBe(0);
     await db.close();
   });
