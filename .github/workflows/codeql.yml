@@ -38,7 +38,7 @@ jobs:
           # 코드가 집을 수 있는 것만 남는다.
           persist-credentials: false
 
-      - uses: github/codeql-action/init@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+      - uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           languages: javascript-typescript
           # 테스트 경로 제외 — 이유는 그 파일 안에 적었다.
@@ -49,7 +49,7 @@ jobs:
 
       # ★빌드 단계가 없다. 이 저장소는 트랜스파일하지 않고 `.ts`를 그대로 실행하므로
       # CodeQL이 소스를 직접 읽으면 된다(autobuild를 부르면 할 일이 없어 헛돈다).
-      - uses: github/codeql-action/analyze@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+      - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           category: "/language:javascript-typescript"
 
