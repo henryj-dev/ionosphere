@@ -9,6 +9,12 @@ updates:
     schedule:
       interval: monthly
     open-pull-requests-limit: 3
+    # init/analyze는 실행 중 같은 설정 파일을 공유하므로 버전이 갈리면 분석이 즉시 실패한다.
+    # upload-sarif까지 같은 릴리즈 묶음으로 올려 CodeQL 액션 핀을 한 PR에서 관리한다.
+    groups:
+      codeql-actions:
+        patterns:
+          - "github/codeql-action/*"
     commit-message:
       # 이 저장소의 커밋 제목 규약(한국어 + 접두사)에 맞춘다.
       prefix: "정리"
