@@ -19,7 +19,7 @@ HTTP, and database access are thin adapters around them.
 ![node](https://img.shields.io/badge/node-24%2B-5FA04E?logo=node.js&logoColor=white)
 ![typescript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
 ![runtime deps](https://img.shields.io/badge/runtime%20deps-node%3A%20builtins-success)
-[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 <br/>
 
@@ -858,6 +858,6 @@ change. Pin what you deploy, and read [`SCHEMA.md`](docs/SCHEMA.md) before upgra
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE).
 
 <sub>Built for reliable mail delivery, clear boundaries, and boring operations.</sub>

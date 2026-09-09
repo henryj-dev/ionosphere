@@ -19,7 +19,7 @@ SMTP 수신, IMAP·POP3 접근, JMAP, 발송, Sieve 필터링, 포워딩, 도메
 ![node](https://img.shields.io/badge/node-24%2B-5FA04E?logo=node.js&logoColor=white)
 ![typescript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
 ![runtime deps](https://img.shields.io/badge/runtime%20deps-node%3A%20builtins-success)
-[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 <br/>
 
@@ -891,6 +891,6 @@ REST API·CLI·브라우저 관리 콘솔, SQLite·PostgreSQL·MySQL 과 로컬 
 
 ## 라이선스
 
-MIT. [LICENSE](LICENSE) 를 참고하세요.
+Apache-2.0. [LICENSE](LICENSE) 를 참고하세요.
 
 <sub>신뢰할 수 있는 메일 배달과 명확한 경계, 지루할 만큼 예측 가능한 운영을 위해.</sub>
