@@ -23,6 +23,7 @@ export {
   MAX_HEADER_LINE_BYTES,
   MAX_HEADER_SECTION_BYTES,
   POP3_IDLE_TIMEOUT_MS,
+  PREAUTH_DEADLINE_MS,
   MAX_RECEIVED_HOPS,
 } from "./limits.ts";
 export type { MaildropLock } from "./maildrop-lock.ts";
@@ -82,7 +83,17 @@ export {
 } from "./scram.ts";
 export { ScramServerSession, type ScramStep, type ScramStoredKeys } from "./scram-session.ts";
 export { applyLegacyEnvAliases, LegacyEnvConflictError } from "./env-legacy.ts";
-export { PeerConnectionLimiter, DEFAULT_MAX_CONNECTIONS_PER_PEER } from "./peer-limit.ts";
+export { PeerConnectionLimiter, DEFAULT_MAX_CONNECTIONS_PER_PEER, type PeerLimitOptions } from "./peer-limit.ts";
+export {
+  SESSION_CLOSE_REASON,
+  SessionMeter,
+  createLogSessionReporter,
+  noopSessionReporter,
+  type SessionCloseReason,
+  type SessionMeterOptions,
+  type SessionReporter,
+  type SessionSummary,
+} from "./session-meter.ts";
 export {
   PRINCIPAL_KIND,
   type MailboxOperation,

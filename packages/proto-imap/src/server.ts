@@ -12,13 +12,17 @@ import {
   AUDIT_SURFACE,
   AuthFailureThrottle,
   MAX_LISTENER_CONNECTIONS,
+  PREAUTH_DEADLINE_MS,
   PeerConnectionLimiter,
+  SessionMeter,
   noopAuditSink,
+  noopSessionReporter,
   normalizeIp,
   trackListener,
   type AuditSink,
   type ListenerShutdown,
   type ScramStoredKeys,
+  type SessionReporter,
 } from "@ionosphere/core";
 import { ImapEngine, type ImapAction, type ImapBackendRequest, type ImapBackendResponse } from "./engine.ts";
 import * as zlib from "node:zlib";
@@ -83,6 +87,13 @@ export interface ImapServerOptions {
    * 생략 시 기록하지 않는다(`noopAuditSink`) — 기존 동작 그대로.
    */
   audit?: AuditSink;
+  /**
+   * 세션 종료 요약 — 조립층이 **하나를 만들어** 모든 리스너에 넘긴다(core session-meter.ts).
+   * 생략 시 남기지 않는다. 인증 전 마감은 이것과 무관하게 항상 걸린다.
+   */
+  sessions?: SessionReporter;
+  /** 인증 전 마감(ms) — 테스트용 재정의. 기본 `PREAUTH_DEADLINE_MS`. */
+  preauthDeadlineMs?: number;
 }
 
 /** RFC 9051 §5.4 — 최소 30분 유휴 타임아웃. */
@@ -303,6 +314,17 @@ export class ImapServer {
     };
     const writeText = (text: string): void => write(new TextEncoder().encode(`${text}\r\n`));
 
+    const meter = new SessionMeter({
+      surface: AUDIT_SURFACE.imap,
+      socket: rawSocket,
+      reporter: this.opts.sessions ?? noopSessionReporter,
+      preauthDeadlineMs: this.opts.preauthDeadlineMs ?? PREAUTH_DEADLINE_MS,
+      onPreauthDeadline: () => {
+        writeText("* BYE login timeout");
+        if (!socket.destroyed) socket.end();
+      },
+    });
+
     const runActions = async (actions: ImapAction[]): Promise<void> => {
       for (const action of actions) {
         switch (action.kind) {
@@ -338,10 +360,16 @@ export class ImapServer {
           case "authVerified": {
             const ip = normalizeIp(socket.remoteAddress);
             const ok = (await backend.scramAuthorize?.(action.user)) ?? null;
+            // ★백엔드를 기다리는 사이 인증 전 마감이 발동했으면 결과를 버린다 — 연결은 이미 끊기는
+            //   중이고 여기서 재개하면 닫힌 세션이 계정 상태로 넘어간다(코드 검수 지적).
+            if (meter.deadlinePassed) break;
+            meter.attempted(action.user);
             if (ok) {
               accountId = ok.accountId;
+              meter.authenticated(ok.accountId);
               this.authThrottle.clear(ip);
             } else {
+              meter.authFailed();
               this.authThrottle.recordFailure(ip);
             }
             this.audit.record({
@@ -367,6 +395,8 @@ export class ImapServer {
            */
           case "authFailed": {
             const ip = normalizeIp(socket.remoteAddress);
+            meter.attempted(action.user);
+            meter.authFailed();
             this.authThrottle.recordFailure(ip);
             this.audit.record({
               ts: Date.now(),
@@ -381,6 +411,7 @@ export class ImapServer {
           }
           case "auth": {
             const ip = normalizeIp(socket.remoteAddress);
+            meter.attempted(action.user);
             // 차단 중이면 백엔드를 부르지 않는다 — 실패마다 scrypt가 도는 걸 막는 게 요점.
             if (this.authThrottle.blocked(ip)) {
               /**
@@ -396,14 +427,20 @@ export class ImapServer {
                 ip,
                 user: action.user,
               });
+              meter.authFailed();
               await runActions(engine.authResult(null));
               break;
             }
             const result = await backend.authenticate(action.user, action.pass);
+            // ★백엔드를 기다리는 사이 인증 전 마감이 발동했으면 결과를 버린다 — 연결은 이미 끊기는
+            //   중이고 여기서 재개하면 닫힌 세션이 계정 상태로 넘어간다(코드 검수 지적).
+            if (meter.deadlinePassed) break;
             if (result) {
               accountId = result.accountId;
+              meter.authenticated(result.accountId);
               this.authThrottle.clear(ip);
             } else {
+              meter.authFailed();
               this.authThrottle.recordFailure(ip);
             }
             this.audit.record({
@@ -425,6 +462,7 @@ export class ImapServer {
               await runActions(engine.backendResult({ kind: "no", message: "not authenticated" }));
               break;
             }
+            meter.request();
             let res: ImapBackendResponse;
             try {
               res = await backend.request(accountId, action.req);
@@ -551,6 +589,7 @@ export class ImapServer {
     };
     attachData(rawSocket);
     socket.on("timeout", () => {
+      meter.idleTimedOut();
       writeText("* BYE idle timeout");
       if (!socket.destroyed) socket.end();
     });

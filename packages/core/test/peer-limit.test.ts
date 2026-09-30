@@ -7,7 +7,7 @@
  */
 import { describe, test } from "node:test";
 import { expect } from "@ionosphere/testkit";
-import { PeerConnectionLimiter } from "@ionosphere/core";
+import { PeerConnectionLimiter, createLogger } from "@ionosphere/core";
 
 describe("PeerConnectionLimiter", () => {
   test("상한까지 받고 그 뒤로 거절한다", () => {
@@ -77,5 +77,42 @@ describe("PeerConnectionLimiter", () => {
     expect(l.tryAcquire(undefined)).toBe(true);
     expect(l.tryAcquire("garbage")).toBe(true);
     expect(l.tryAcquire("")).toBe(false);
+  });
+
+  /**
+   * ★거절이 **보여야** 한다(2026-09-30). 예전엔 로그·메트릭 없이 소켓만 끊어, 정상 사용자가
+   * 튕겨도 공격자가 상한에 닿아도 아무도 알 수 없었다. 다만 거절마다 찍으면 공격이 곧 로그
+   * 폭주이므로 **포화 구간마다 한 줄**, 규모는 훅(메트릭)으로 센다.
+   */
+  test("포화 구간마다 한 번만 로깅하고, 거절은 전부 훅으로 센다", () => {
+    const lines: string[] = [];
+    let rejected = 0;
+    const l = new PeerConnectionLimiter({
+      limit: 4,
+      logger: createLogger({ format: "json", sink: (x) => void lines.push(x) }),
+      onReject: () => rejected++,
+    });
+    // 같은 /64의 서로 다른 주소 — 주소마다 따로 세면 상한이 걸리지 않는다.
+    const ip = "2001:db8:1:1::1";
+    for (let i = 0; i < 4; i++) expect(l.tryAcquire(`2001:db8:1:1::${i + 1}`)).toBe(true);
+    for (let i = 0; i < 5; i++) expect(l.tryAcquire("2001:db8:1:1::9")).toBe(false);
+    expect(rejected).toBe(5);
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toContain("2001:db8:1:1::/64");
+
+    // 한 자리 났다가 다시 차는 것은 **같은 구간**이다 — 다시 찍지 않는다.
+    l.release(ip);
+    l.tryAcquire(ip);
+    expect(l.tryAcquire(ip)).toBe(false);
+    expect(lines.length).toBe(1);
+
+    // 절반(2) 이하로 내려오면 구간이 끝난다 → 다음 포화는 다시 한 줄.
+    l.release(ip);
+    l.release(ip);
+    expect(l.countFor(ip)).toBe(2);
+    l.tryAcquire(ip);
+    l.tryAcquire(ip);
+    expect(l.tryAcquire(ip)).toBe(false);
+    expect(lines.length).toBe(2);
   });
 });

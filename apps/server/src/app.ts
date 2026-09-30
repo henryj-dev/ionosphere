@@ -1,5 +1,5 @@
 /** 올인원 서버 조립 — DB/블롭/스토어/프로토콜 리스너를 한 프로세스로 (PLAN.md §4). */
-import { AuthFailureThrottle, PeerConnectionLimiter, MAX_MESSAGE_BYTES, noopAuditSink, noopLogger, rfc5322Date, ulid, type AuditSink, type Logger } from "@ionosphere/core";
+import { AuthFailureThrottle, PeerConnectionLimiter, MAX_MESSAGE_BYTES, createLogSessionReporter, noopAuditSink, noopLogger, rfc5322Date, ulid, type AuditSink, type Logger, type SessionReporter } from "@ionosphere/core";
 import { allMigrations, describeDbSpec, migrate, MTA_QUEUE_STATUS, openDatabase, type DbDriver } from "@ionosphere/db";
 import {
   authenticate,
@@ -540,7 +540,12 @@ export class IonosphereApp {
    * IP 프리픽스별 동시 연결 상한 — `authThrottle`과 **같은 이유로 하나를 공유한다**.
    * 리스너마다 새로 만들면 "IP당 N개"가 리스너 수만큼 곱해진다.
    */
-  private readonly peerLimit = new PeerConnectionLimiter();
+  private readonly peerLimit: PeerConnectionLimiter;
+  /**
+   * 세션 종료 요약 — 같은 이유로 하나를 만들어 IMAP·POP3·ManageSieve에 넘긴다.
+   * 메트릭 훅은 `this.metrics`를 **호출 시점에** 읽는다(계측은 start()에서 생긴다).
+   */
+  private readonly sessions: SessionReporter;
   db!: DbDriver;
   store!: Store;
   blobs!: BlobStore;
@@ -633,6 +638,13 @@ export class IonosphereApp {
     parseCidrList(opts.trustedRelays ?? []);
     this.opts = opts;
     this.authThrottle = new AuthFailureThrottle({ ...(opts.logger ? { logger: opts.logger } : {}) });
+    this.peerLimit = new PeerConnectionLimiter({
+      ...(opts.logger ? { logger: opts.logger } : {}),
+      onReject: () => this.metrics?.peerLimitRejections.inc(),
+    });
+    this.sessions = createLogSessionReporter(opts.logger ?? noopLogger, (s) =>
+      this.metrics?.sessions.inc({ surface: s.surface, reason: s.reason }),
+    );
   }
 
   /**
@@ -1089,6 +1101,7 @@ export class IonosphereApp {
       this.pop3 = new Pop3Server({
         authThrottle: this.authThrottle,
         peerLimit: this.peerLimit,
+        sessions: this.sessions,
         audit: this.audit,
         hostname: this.opts.hostname,
         backend: new IonospherePop3Backend(this.db, this.store, this.blobs, ctx.log, this.maildropLock, (user, pass) => this.authenticatePassword(user, pass, "pop3")),
@@ -1110,6 +1123,7 @@ export class IonosphereApp {
       this.pop3s = new Pop3Server({
         authThrottle: this.authThrottle,
         peerLimit: this.peerLimit,
+        sessions: this.sessions,
         audit: this.audit,
         hostname: this.opts.hostname,
         backend: new IonospherePop3Backend(this.db, this.store, this.blobs, ctx.log, this.maildropLock, (user, pass) => this.authenticatePassword(user, pass, "pop3")),
@@ -1140,6 +1154,7 @@ export class IonosphereApp {
       this.imap = new ImapServer({
         authThrottle: this.authThrottle,
         peerLimit: this.peerLimit,
+        sessions: this.sessions,
         audit: this.audit,
         hostname: this.opts.hostname,
         backend: imapBackend,
@@ -1161,6 +1176,7 @@ export class IonosphereApp {
         this.imaps = new ImapServer({
           authThrottle: this.authThrottle,
           peerLimit: this.peerLimit,
+          sessions: this.sessions,
           audit: this.audit,
           hostname: this.opts.hostname,
           backend: imapBackend,
@@ -1220,6 +1236,8 @@ export class IonosphereApp {
     if (manageSieveListener) {
       this.managesieve = new ManageSieveServer({
         authThrottle: this.authThrottle,
+        peerLimit: this.peerLimit,
+        sessions: this.sessions,
         audit: this.audit,
         hostname: this.opts.hostname,
         backend: new IonosphereManageSieveBackend(this.db, this.store, (user, pass) => this.authenticatePassword(user, pass, "sieve")),
@@ -1383,7 +1401,12 @@ export class IonosphereApp {
       ...(cfg.s3 ? { target: cfg.s3 } : {}),
       ...(cfg.shipIntervalMs !== undefined ? { intervalMs: cfg.shipIntervalMs } : {}),
       ...(cfg.localRetainDays !== undefined ? { localRetainDays: cfg.localRetainDays } : {}),
-      ...(this.metrics ? { onShipFailure: () => this.metrics!.auditShipFailures.inc({}) } : {}),
+      ...(this.metrics
+        ? {
+            onShipFailure: () => this.metrics!.auditShipFailures.inc({}),
+            onShipDropped: () => this.metrics!.auditShipDropped.inc({}),
+          }
+        : {}),
     });
     this.auditShipper.start();
 

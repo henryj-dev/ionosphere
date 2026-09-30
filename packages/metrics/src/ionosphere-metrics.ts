@@ -39,6 +39,19 @@ export interface IonosphereMetrics {
    * `localRetainDays`가 지나면 버려지므로, 이 값이 오르면 그 기간 안에 손을 써야 한다.
    */
   auditShipFailures: Counter;
+  /**
+   * 이관하지 못한 채 보존기간을 넘겨 **버린** 감사 로그 파일 수. 실패 카운터는 재시도 대기(파일이
+   * 로컬에 남아 있음)와 유실을 가르지 못한다 — 실패는 매 tick 다시 세지므로 파일 하나가 여러 번
+   * 오른다. 이 값이 0이 아니면 그 기간의 기록은 **되돌릴 수 없다**.
+   */
+  auditShipDropped: Counter;
+  /**
+   * 닫힌 세션 수 — 라벨 surface=imap|pop3|managesieve, reason=closed|idle|preauth.
+   * `reason=preauth`가 인증하지 않고 붙들다 마감에 끊긴 연결이다(2026-09-30 사서함 호스트 점유 사고).
+   */
+  sessions: Counter;
+  /** IP 프리픽스별 동시 연결 상한에 걸려 거절된 연결 수. 로그는 포화 구간마다 한 줄뿐이라 규모는 여기서 본다. */
+  peerLimitRejections: Counter;
 }
 
 export function createIonosphereMetrics(registry: Registry = new Registry()): IonosphereMetrics {
@@ -54,5 +67,8 @@ export function createIonosphereMetrics(registry: Registry = new Registry()): Io
     blobFallbackReads: registry.counter("ionosphere_blob_fallback_reads_total", "옛 블롭 백엔드로 폴백해 읽은 횟수(전환 완료 판단용)"),
     auditEvents: registry.counter("ionosphere_audit_events_total", "접근 감사 이벤트 수(surface, outcome)"),
     auditShipFailures: registry.counter("ionosphere_audit_ship_failures_total", "감사 로그 오브젝트 스토리지 이관 실패 수"),
+    auditShipDropped: registry.counter("ionosphere_audit_ship_dropped_total", "이관 실패 상태로 보존기간을 넘겨 버린 감사 로그 파일 수"),
+    sessions: registry.counter("ionosphere_sessions_total", "닫힌 연결 세션 수(surface, reason=closed|idle|preauth)"),
+    peerLimitRejections: registry.counter("ionosphere_peer_limit_rejections_total", "IP 프리픽스 동시 연결 상한으로 거절된 연결 수"),
   };
 }

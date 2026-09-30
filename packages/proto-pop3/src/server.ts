@@ -10,8 +10,11 @@ import {
   AUDIT_SURFACE,
   AuthFailureThrottle,
   MAX_LISTENER_CONNECTIONS,
+  PREAUTH_DEADLINE_MS,
   PeerConnectionLimiter,
+  SessionMeter,
   noopAuditSink,
+  noopSessionReporter,
   normalizeIp,
   POP3_IDLE_TIMEOUT_MS,
   trackListener,
@@ -20,6 +23,7 @@ import {
   type ListenerShutdown,
   type MaildropLock,
   type ScramStoredKeys,
+  type SessionReporter,
 } from "@ionosphere/core";
 import { Pop3Engine, type Pop3Action, type Pop3EngineMessage } from "./engine.ts";
 
@@ -95,6 +99,13 @@ export interface Pop3ServerOptions {
    * 생략 시 기록하지 않는다(`noopAuditSink`) — 기존 동작 그대로.
    */
   audit?: AuditSink;
+  /**
+   * 세션 종료 요약 — 조립층이 **하나를 만들어** 모든 리스너에 넘긴다(core session-meter.ts).
+   * 생략 시 남기지 않는다. 인증 전 마감은 이것과 무관하게 항상 걸린다.
+   */
+  sessions?: SessionReporter;
+  /** 인증 전 마감(ms) — 테스트용 재정의. 기본 `PREAUTH_DEADLINE_MS`. */
+  preauthDeadlineMs?: number;
 }
 
 /**
@@ -157,6 +168,8 @@ export class Pop3Server {
   private readonly peerLimit: PeerConnectionLimiter;
   /** 접근 감사 싱크 — 미주입 시 no-op(호출부가 `?.`를 쓰지 않게). */
   private readonly audit: AuditSink;
+  private readonly sessions: SessionReporter;
+  private readonly preauthDeadlineMs: number;
 
   constructor(opts: Pop3ServerOptions) {
     this.hostname = opts.hostname;
@@ -164,6 +177,8 @@ export class Pop3Server {
     this.authThrottle = opts.authThrottle ?? new AuthFailureThrottle();
     this.peerLimit = opts.peerLimit ?? new PeerConnectionLimiter();
     this.audit = opts.audit ?? noopAuditSink;
+    this.sessions = opts.sessions ?? noopSessionReporter;
+    this.preauthDeadlineMs = opts.preauthDeadlineMs ?? PREAUTH_DEADLINE_MS;
     this.backend = opts.backend;
     this.tlsOpts = opts.tls;
     // 평문 리스너의 STLS 자재. tlsOpts와 분리해 둬야 리스너 종류를 바꾸지 않는다.
@@ -291,6 +306,16 @@ export class Pop3Server {
     };
     const writeText = (text: string): void => write(new TextEncoder().encode(`${text}\r\n`));
 
+    // 요약의 계정은 meter가 따로 든다 — `accountId`는 maildrop 해제·열기 실패 때 null로 되돌려진다.
+    const meter = new SessionMeter({
+      surface: AUDIT_SURFACE.pop3,
+      socket: rawSocket,
+      reporter: this.sessions,
+      preauthDeadlineMs: this.preauthDeadlineMs,
+      // POP3에는 비요청 응답이 없으므로(RFC 1939) 유휴 타임아웃과 같이 말없이 닫는다.
+      onPreauthDeadline: () => void finish(),
+    });
+
     /**
      * 인증 이후 명령의 감사 기록 — 세션 공통 필드(IP·accountId)를 여기서 한 번만 채운다.
      *
@@ -346,10 +371,15 @@ export class Pop3Server {
           case "authVerified": {
             const ip = normalizeIp(socket.remoteAddress);
             const ok = (await backend.scramAuthorize?.(action.user)) ?? null;
+            // ★백엔드를 기다리는 사이 인증 전 마감이 발동했으면 결과를 버린다 — 연결은 이미 끊기는
+            //   중이고 여기서 재개하면 닫힌 세션이 계정 상태로 넘어간다(코드 검수 지적).
+            if (meter.deadlinePassed) break;
+            meter.attempted(action.user);
             if (ok) {
               accountId = ok.accountId;
               this.authThrottle.clear(ip);
             } else {
+              meter.authFailed();
               this.authThrottle.recordFailure(ip);
             }
             this.audit.record({
@@ -375,6 +405,8 @@ export class Pop3Server {
            */
           case "authFailed": {
             const ip = normalizeIp(socket.remoteAddress);
+            meter.attempted(action.user);
+            meter.authFailed();
             this.authThrottle.recordFailure(ip);
             this.audit.record({
               ts: Date.now(),
@@ -389,6 +421,7 @@ export class Pop3Server {
           }
           case "auth": {
             const ip = normalizeIp(socket.remoteAddress);
+            meter.attempted(action.user);
             // 차단 중이면 백엔드를 부르지 않는다 — 실패마다 scrypt가 도는 걸 막는 게 요점.
             if (this.authThrottle.blocked(ip)) {
               /**
@@ -404,14 +437,19 @@ export class Pop3Server {
                 ip,
                 user: action.user,
               });
+              meter.authFailed();
               await runActions(engine.authResult(null));
               break;
             }
             const result = await backend.authenticate(action.user, action.pass);
+            // ★백엔드를 기다리는 사이 인증 전 마감이 발동했으면 결과를 버린다 — 연결은 이미 끊기는
+            //   중이고 여기서 재개하면 닫힌 세션이 계정 상태로 넘어간다(코드 검수 지적).
+            if (meter.deadlinePassed) break;
             if (result) {
               accountId = result.accountId;
               this.authThrottle.clear(ip);
             } else {
+              meter.authFailed();
               this.authThrottle.recordFailure(ip);
             }
             this.audit.record({
@@ -429,7 +467,19 @@ export class Pop3Server {
           }
           case "openMaildrop": {
             if (accountId === null) break; // 방어적 — auth 성공 없이 도달 불가
+            // 이미 끝난 세션이면 잠금을 잡지 않는다 — 잡으면 풀어 줄 세션이 없다.
+            if (ended || socket.destroyed) break;
+            meter.request();
             const result = await backend.openMaildrop(accountId);
+            /**
+             * ★잠금을 기다리는 사이 연결이 닫혔으면 바로 푼다. `close`의 `release()`는 그때
+             * 계정이 없어서(또는 아직 잠금 전이라) 아무것도 하지 않았다 — 두면 이 계정은 다른
+             * 세션에서 `maildrop already locked`로 남는다.
+             */
+            if (result.ok && (ended || socket.destroyed)) {
+              await release();
+              break;
+            }
             /**
              * 실패 사유를 구분해 남긴다: `inUse`는 다른 세션이 잠금을 들고 있는 정상 경합이고
              * (RFC 1939 §3 `-ERR maildrop already locked`), 그 외는 백엔드 오류다. 이 구분이 없으면
@@ -440,6 +490,12 @@ export class Pop3Server {
             });
             if (result.ok) {
               sessionMessages = result.messages;
+              /**
+               * POP3는 **maildrop을 연 뒤에야** 인증 후 상태다. 자격증명만 맞고 잠금 경합으로
+               * 열기에 실패하면 엔진은 AUTHORIZATION에 머무는데, 그때 마감을 풀어 두면 유효한
+               * 자격증명으로 인증 전 연결을 10분씩 붙들 수 있다(코드 검수 지적).
+               */
+              meter.authenticated(accountId);
             } else {
               accountId = null;
             }
@@ -447,6 +503,7 @@ export class Pop3Server {
             break;
           }
           case "retrieve": {
+            meter.request();
             const msg = sessionMessages[action.msgnum - 1];
             if (!msg || accountId === null) {
               audit("retrieve", AUDIT_OUTCOME.denied, { msgnum: action.msgnum });
@@ -466,6 +523,7 @@ export class Pop3Server {
             break;
           }
           case "commitDeletions": {
+            meter.request();
             if (accountId === null) {
               await runActions(engine.commitDeletionsResult(false));
               break;
@@ -536,7 +594,10 @@ export class Pop3Server {
     };
 
     attachData(rawSocket);
-    socket.on("timeout", () => void finish());
+    socket.on("timeout", () => {
+      meter.idleTimedOut();
+      void finish();
+    });
     socket.on("error", () => void release());
     socket.on("close", () => void release());
 
