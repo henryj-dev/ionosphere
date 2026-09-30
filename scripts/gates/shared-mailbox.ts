@@ -394,9 +394,14 @@ function assertComplete(): number {
  * 한 줄 고칠 때마다 CI가 막히고, 봉인을 다시 찍어야 했다(PR #21이 P4·P6·P11을 재봉인했다).
  * 끝난 계획이 이후 모든 변경의 문지기가 되는 셈이고, 재봉인은 사람 손을 거쳐야 해서 매번 멈춘다.
  *
- * 봉인의 뜻은 "그 단계의 검사가 그때 통과했다"는 기록이다. 그 기록이 **변조되지 않았는지**와
- * **정의가 바뀌지 않았는지**는 계속 지키고, 지금 코드가 여전히 옳은지는 단계 검사가 쓰던
- * 테스트가 `npm test`에서 매번 본다. 계획을 다시 열면 `--assert-complete`로 돌아간다.
+ * 봉인의 뜻은 "그 단계의 검사가 그때 통과했다"는 기록이다. archived는 세 가지를 본다:
+ *  1. 기록이 온전한가 — 정의 digest 일치, contentDigest 자기 일관, 검사 기록이 정의의 검사 id와
+ *     같고 전부 통과였는가(waive 없음). 이 digest들은 키가 없어 **의도적 위조는 못 막는다** —
+ *     봉인 파일 변경은 PR diff에 드러나고, 그 검토가 막는다. 여기서는 실수·부분 편집을 잡는다.
+ *  2. **grep·file 검사는 지금도 돌린다.** 테넌트 격리(`tenant_id = ?`)·권한 확인(`hasMailboxRight`)
+ *     같은 구조 불변식이라, 파일 digest와 무관하게 싸게 확인할 수 있고 npm test가 대신 봐 주지 않는다.
+ *  3. command 검사(테스트 실행)는 돌리지 않는다 — 같은 테스트가 `npm test`에서 매번 돈다.
+ * 계획을 다시 열면 `--assert-complete`로 돌아간다.
  */
 function sealRecordIntact(phase: string, seal: Seal): boolean {
   const definition = GATES[phase];
@@ -407,7 +412,13 @@ function sealRecordIntact(phase: string, seal: Seal): boolean {
   // 봉인 파일을 손으로 고치면 contentDigest가 어긋난다 — 기록 변조 검출.
   if (seal.contentDigest !== contentDigest(seal.outputs)) return false;
   const recorded = Object.keys(seal.outputs);
-  return recorded.length === definition.outputs.length && definition.outputs.every((output) => seal.outputs?.[output] !== undefined);
+  if (recorded.length !== definition.outputs.length || !definition.outputs.every((output) => seal.outputs?.[output] !== undefined)) return false;
+  // 검사가 있는 단계는 waive로 봉인될 수 없다(seal()이 거부한다) — 기록도 그래야 한다.
+  if (definition.checks.length > 0 && seal.waived) return false;
+  const checks = (seal as Seal & { checks?: Array<{ id: string; ok: boolean }> }).checks ?? [];
+  const ids = checks.map((check) => check.id).sort();
+  const expected = definition.checks.map((check) => check.id).sort();
+  return ids.length === expected.length && ids.every((id, i) => id === expected[i]) && checks.every((check) => check.ok === true);
 }
 
 function assertArchived(): number {
@@ -420,6 +431,14 @@ function assertArchived(): number {
     } else if (!sealRecordIntact(phase, seal)) {
       console.error(`FAIL ${phase}: 봉인 기록이 정의와 맞지 않거나 변조됨`);
       failed = true;
+    }
+    for (const check of GATES[phase]?.checks ?? []) {
+      if (check.kind === "command") continue;
+      const result = runCheck(check);
+      if (!result.ok) {
+        console.error(`FAIL ${check.id} measured=${result.measured} limit=${result.limit ?? "-"} ${result.message}`);
+        failed = true;
+      }
     }
   }
   if (!failed) console.log(`ARCHIVED OK — ${phaseNames().length}단계 봉인 기록 온전`);

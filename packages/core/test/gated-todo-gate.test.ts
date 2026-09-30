@@ -185,22 +185,25 @@ test("P0 gate: 빈 waive 사유는 거부한다", () => {
   assert.match(`${result.stdout}${result.stderr}`, /waive 사유가 비어 있음/);
 });
 
-/**
- * 봉인 사본을 만들고 한 단계 봉인을 바꾼 뒤 게이트를 돌린다.
- * `recomputeContent`가 true면 contentDigest를 다시 계산해 **정상 봉인처럼 보이게** 만든다 —
- * "봉인 뒤 산출물 파일만 바뀐" 상황을 흉내 낸다. false면 기록만 어긋난 변조 상황이다.
- */
-function runWithEditedSeal(phase: string, recomputeContent: boolean, ...args: string[]) {
+type SealRecord = {
+  outputs: Record<string, string>;
+  contentDigest: string;
+  definitionDigest: string;
+  checks: Array<{ id: string; ok: boolean }>;
+};
+
+function recomputeContentDigest(seal: SealRecord): void {
+  const entries = Object.entries(seal.outputs).sort(([left], [right]) => left.localeCompare(right));
+  seal.contentDigest = createHash("sha256").update(JSON.stringify(entries)).digest("hex");
+}
+
+/** 봉인 사본을 만들고 한 단계 봉인을 `edit`로 바꾼 뒤 게이트를 돌린다. */
+function runWithEditedSeal(phase: string, edit: (seal: SealRecord) => void, ...args: string[]) {
   const fixture = mkdtempSync(resolve(tmpdir(), "ionosphere-gate-archived-"));
   cpSync(sealDir, fixture, { recursive: true });
   const path = resolve(fixture, `${phase}.json`);
-  const seal = JSON.parse(readFileSync(path, "utf8")) as { outputs: Record<string, string>; contentDigest: string };
-  const first = Object.keys(seal.outputs)[0]!;
-  seal.outputs[first] = "0".repeat(64);
-  if (recomputeContent) {
-    const entries = Object.entries(seal.outputs).sort(([left], [right]) => left.localeCompare(right));
-    seal.contentDigest = createHash("sha256").update(JSON.stringify(entries)).digest("hex");
-  }
+  const seal = JSON.parse(readFileSync(path, "utf8")) as SealRecord;
+  edit(seal);
   writeFileSync(path, `${JSON.stringify(seal, null, 2)}\n`);
   try {
     return spawnSync(process.execPath, [gate, ...args], {
@@ -213,21 +216,47 @@ function runWithEditedSeal(phase: string, recomputeContent: boolean, ...args: st
   }
 }
 
+/** "봉인 뒤 산출물 파일만 바뀐" 상황 — 기록한 digest가 지금 파일과 다르지만 기록 자체는 일관된다. */
+const outputDrifted = (seal: SealRecord): void => {
+  seal.outputs[Object.keys(seal.outputs)[0]!] = "0".repeat(64);
+  recomputeContentDigest(seal);
+};
+
 /**
  * ★archived 모드의 존재 이유 — 끝난 계획이 공용 파일 변경을 막지 않아야 한다.
- * 같은 상황에서 complete는 여전히 막는 것까지 봐야 두 모드가 실제로 다르다는 증명이 된다.
+ * complete가 **바로 그 단계(P4) 때문에** 막는지까지 봐야 두 모드가 다르다는 증명이 된다 —
+ * 다른 단계가 이미 어긋나 있으면 "complete가 실패했다"만으로는 아무것도 증명하지 못한다.
  */
-test("archived gate: 봉인 뒤 산출물이 바뀌어도 기록이 온전하면 통과하고, complete는 막는다", () => {
-  const archived = runWithEditedSeal("P4", true, "--assert-archived");
+test("archived gate: 봉인 뒤 산출물이 바뀌어도 기록이 온전하면 통과하고, complete는 그 단계를 막는다", () => {
+  const archived = runWithEditedSeal("P4", outputDrifted, "--assert-archived");
   assert.equal(archived.status, 0, archived.stderr);
-  const complete = runWithEditedSeal("P4", true, "--assert-complete");
+  const complete = runWithEditedSeal("P4", outputDrifted, "--assert-complete");
   assert.notEqual(complete.status, 0);
+  assert.match(complete.stderr, /FAIL P4: 봉인 정의 또는 산출물 digest 불일치/);
 });
 
 test("archived gate: 봉인 기록을 손으로 고치면(contentDigest 불일치) 거부한다", () => {
-  const result = runWithEditedSeal("P6", false, "--assert-archived");
+  const result = runWithEditedSeal("P6", (seal) => {
+    seal.outputs[Object.keys(seal.outputs)[0]!] = "0".repeat(64);
+  }, "--assert-archived");
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /P6: 봉인 기록이 정의와 맞지 않거나 변조됨/);
+});
+
+test("archived gate: 통과하지 못한 검사가 기록된 봉인은 거부한다", () => {
+  const result = runWithEditedSeal("P5", (seal) => {
+    seal.checks[0]!.ok = false;
+  }, "--assert-archived");
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /P5: 봉인 기록이 정의와 맞지 않거나 변조됨/);
+});
+
+test("archived gate: 정의 digest가 어긋난 봉인은 거부한다(단계 정의가 봉인 뒤 바뀜)", () => {
+  const result = runWithEditedSeal("P2", (seal) => {
+    seal.definitionDigest = "0".repeat(64);
+  }, "--assert-archived");
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /P2: 봉인 기록이 정의와 맞지 않거나 변조됨/);
 });
 
 test("archived gate: 한 단계 봉인이라도 없으면 거부한다", () => {
