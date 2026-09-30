@@ -282,11 +282,20 @@ export class Pop3Server {
 
     socket.setTimeout(IDLE_TIMEOUT_MS);
 
+    /**
+     * `openMaildrop`을 기다리는 중인가. 그 사이 세션이 끝나면 여기서 해제하지 않고 **열기 경로에
+     * 맡긴다.** 잠금을 이미 잡았는지 아직인지 이 시점에는 알 수 없는데, 백엔드의 해제는 계정 단위라
+     * (소유자를 가리지 않는다) 잡기 전에 부르면 **같은 계정의 다른 세션 잠금을 푼다**.
+     * 열기가 끝나 결과를 알게 된 뒤에 풀어야 자기 잠금만 푼다(2026-09-30 코드 검수).
+     */
+    let opening = false;
+
     const release = async (): Promise<void> => {
       if (released || accountId === null) return;
       released = true;
       const id = accountId;
       accountId = null;
+      if (opening) return; // 열기 경로가 결과를 보고 푼다(위 주석)
       try {
         await backend.releaseMaildrop(id);
       } catch {
@@ -472,7 +481,13 @@ export class Pop3Server {
             meter.request();
             // 기다리는 사이 `release()`가 `accountId`를 null로 되돌릴 수 있다 — 잠근 계정을 따로 쥔다.
             const lockedId = accountId;
-            const result = await backend.openMaildrop(lockedId);
+            opening = true;
+            let result: Awaited<ReturnType<Pop3Backend["openMaildrop"]>>;
+            try {
+              result = await backend.openMaildrop(lockedId);
+            } finally {
+              opening = false;
+            }
             /**
              * ★잠금을 기다리는 사이 세션이 끝났으면(인증 전 마감·클라이언트 종료) **여기서 직접** 푼다.
              *
@@ -481,7 +496,7 @@ export class Pop3Server {
              * 예전 코드가 그랬고, 잠금과 갱신 타이머가 남아 그 계정은 재시작 전까지
              * `maildrop already locked`로 막혔다(2026-09-30 독립 리뷰, maildrop-late-lock.test.ts).
              */
-            if (result.ok && (ended || socket.destroyed)) {
+            if (result.ok && (ended || socket.destroyed || released)) {
               released = true;
               accountId = null;
               try {
@@ -489,6 +504,8 @@ export class Pop3Server {
               } catch {
                 // 해제 실패는 백엔드가 로깅한다(release()와 같은 처분).
               }
+              // 잡았다가 바로 푼 것도 흔적을 남긴다 — "왜 잠금이 잠깐 잡혔다 사라졌나"의 답이다.
+              audit("openMaildrop", AUDIT_OUTCOME.ok, { reason: "lateRelease" });
               break;
             }
             /**

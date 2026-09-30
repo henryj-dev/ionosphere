@@ -52,8 +52,9 @@ function slowLockBackend(): {
     },
     retrieve: async () => new Uint8Array(),
     commitDeletions: async () => {},
-    releaseMaildrop: async () => {
-      held = false;
+    releaseMaildrop: async (id) => {
+      // 다른 계정 id로 푸는 버그를 통과시키지 않도록 id를 본다.
+      if (id === "acc-1") held = false;
     },
   };
   // ★잡힌 뒤에 검사해야 한다. grant 직후 바로 보면 백엔드가 아직 잡기 전이라 "안 잡힘"을
@@ -134,5 +135,78 @@ describe("POP3 — 늦게 얻은 maildrop 잠금", () => {
     c.send("QUIT\r\n");
     await c.closed;
     expect(await settle(lock.held)).toBe(false);
+  });
+});
+
+/**
+ * 실제 백엔드처럼 **계정 id 하나에 세션 하나**를 두는 공유 잠금. 해제는 소유자를 가리지 않는다
+ * (apps/server backend.ts의 `sessions`가 accountId로 키를 잡는 것과 같다). 그래서 어댑터가
+ * 자기가 잡지 않은 잠금에 대해 `releaseMaildrop`을 부르면 **남의 잠금이 풀린다.**
+ */
+function sharedLockBackend(): { backend: Pop3Backend; owner: () => string | undefined; pauseNextOpen: () => { started: Promise<void>; resume: () => void } } {
+  let holder: string | undefined;
+  let seq = 0;
+  let pause: { gate: Promise<void>; started: () => void } | null = null;
+  const backend: Pop3Backend = {
+    authenticate: async (u, p) => (u === "alice" && p === "secret" ? { accountId: "acc-1" } : null),
+    openMaildrop: async () => {
+      const me = `s${++seq}`;
+      if (pause) {
+        const p = pause;
+        pause = null;
+        p.started();
+        await p.gate;
+      }
+      if (holder !== undefined) return { ok: false, inUse: true };
+      holder = me;
+      return { ok: true, messages: [] };
+    },
+    retrieve: async () => new Uint8Array(),
+    commitDeletions: async () => {},
+    releaseMaildrop: async () => {
+      holder = undefined;
+    },
+  };
+  return {
+    backend,
+    owner: () => holder,
+    pauseNextOpen: () => {
+      let resume!: () => void;
+      const gate = new Promise<void>((r) => (resume = r));
+      let started!: () => void;
+      const startedP = new Promise<void>((r) => (started = r));
+      pause = { gate, started };
+      return { started: startedP, resume };
+    },
+  };
+}
+
+describe("POP3 — 잠금을 기다리다 끊긴 세션이 남의 잠금을 풀지 않는다", () => {
+  /**
+   * ★세션 B가 잠금을 들고 있는데, 같은 계정의 세션 A가 잠금을 기다리는 사이 끊긴다.
+   * 예전엔 A의 close가 `releaseMaildrop`을 불러 **B의 잠금이 풀렸다** — B가 배타성을 잃어
+   * 두 세션이 같은 maildrop에 동시에 expunge할 수 있었다(2026-09-30 코드 검수).
+   */
+  test("★기다리는 중 끊긴 세션의 close가 다른 세션의 잠금을 풀지 않는다", async () => {
+    const lock = sharedLockBackend();
+    const port = await start(lock.backend, 60_000);
+    const b = client(port);
+    await b.waitFor("+OK");
+    b.send("USER alice\r\nPASS secret\r\n");
+    await b.waitFor("maildrop");
+    const heldBy = lock.owner();
+    expect(heldBy).toBeDefined();
+
+    const paused = lock.pauseNextOpen();
+    const a = client(port);
+    await a.waitFor("+OK");
+    a.send("USER alice\r\nPASS secret\r\n");
+    await paused.started;
+    a.sock.destroy();
+    await a.closed;
+    await new Promise((r) => setTimeout(r, 50));
+    paused.resume();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(lock.owner()).toBe(heldBy);
   });
 });
