@@ -1994,23 +1994,36 @@ export class IonospherePop3Backend implements Pop3Backend {
       return { ok: false as const, inUse: true };
     }
     this.sessions.set(accountId, { owner, heartbeat: null });
-    const inbox = await this.store.getMailboxByRole(accountId, "inbox");
-    if (!inbox) {
-      await this.releaseSession(accountId);
-      return { ok: false as const, inUse: false };
+    /**
+     * ★계약: **예외로 끝나면 잠금도 없다.** 잡은 뒤 조회가 던지면 여기서 풀고 다시 던진다.
+     * 어댑터는 예외를 받았을 때 잠금을 잡았는지 알 수 없고, 해제가 계정 단위라 추측으로 부르면
+     * 같은 계정의 다른 세션 잠금을 풀 수 있다 — 정리는 잡은 쪽이 해야 한다(2026-09-30 코드 검수).
+     */
+    try {
+      const inbox = await this.store.getMailboxByRole(accountId, "inbox");
+      if (!inbox) {
+        await this.releaseSession(accountId);
+        return { ok: false as const, inUse: false };
+      }
+      // 리스 갱신은 락을 실제로 들고 있는 동안만 — 시작 지점을 open 성공 이후로 둔 이유다.
+      this.startHeartbeat(accountId, owner);
+      this.inboxByAccount.set(accountId, inbox.id);
+      const items = await this.store.listMessages(inbox.id);
+      const messages: Pop3MaildropMessage[] = items
+        .filter((m) => !m.deleted)
+        .map((m) => ({
+          uidl: m.messageId, // 영속 UIDL = 불변 message id (SCHEMA.md §10)
+          sizeBytes: m.sizeBytes,
+          ref: { uid: m.uid, messageId: m.messageId } satisfies Pop3Ref,
+        }));
+      return { ok: true as const, messages };
+    } catch (err) {
+      this.inboxByAccount.delete(accountId);
+      await this.releaseSession(accountId).catch(() => {
+        /* 해제 실패는 원래 오류를 가리지 않는다 — DB 락이면 리스 만료로 풀린다 */
+      });
+      throw err;
     }
-    // 리스 갱신은 락을 실제로 들고 있는 동안만 — 시작 지점을 open 성공 이후로 둔 이유다.
-    this.startHeartbeat(accountId, owner);
-    this.inboxByAccount.set(accountId, inbox.id);
-    const items = await this.store.listMessages(inbox.id);
-    const messages: Pop3MaildropMessage[] = items
-      .filter((m) => !m.deleted)
-      .map((m) => ({
-        uidl: m.messageId, // 영속 UIDL = 불변 message id (SCHEMA.md §10)
-        sizeBytes: m.sizeBytes,
-        ref: { uid: m.uid, messageId: m.messageId } satisfies Pop3Ref,
-      }));
-    return { ok: true as const, messages };
   }
 
   async retrieve(_accountId: string, msg: Pop3MaildropMessage) {

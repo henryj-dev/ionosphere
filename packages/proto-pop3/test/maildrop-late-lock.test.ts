@@ -143,22 +143,31 @@ describe("POP3 — 늦게 얻은 maildrop 잠금", () => {
  * (apps/server backend.ts의 `sessions`가 accountId로 키를 잡는 것과 같다). 그래서 어댑터가
  * 자기가 잡지 않은 잠금에 대해 `releaseMaildrop`을 부르면 **남의 잠금이 풀린다.**
  */
-function sharedLockBackend(): { backend: Pop3Backend; owner: () => string | undefined; pauseNextOpen: () => { started: Promise<void>; resume: () => void } } {
+function sharedLockBackend(): {
+  backend: Pop3Backend;
+  owner: () => string | undefined;
+  /** 다음 열기를 멈춘다. `afterAcquire`면 잠금을 **잡은 뒤** 멈춘다(실제 백엔드의 DB 조회 구간). */
+  pauseNextOpen: (afterAcquire?: boolean) => { started: Promise<void>; resume: () => void };
+} {
   let holder: string | undefined;
   let seq = 0;
-  let pause: { gate: Promise<void>; started: () => void } | null = null;
+  let pause: { gate: Promise<void>; started: () => void; afterAcquire: boolean } | null = null;
   const backend: Pop3Backend = {
     authenticate: async (u, p) => (u === "alice" && p === "secret" ? { accountId: "acc-1" } : null),
     openMaildrop: async () => {
       const me = `s${++seq}`;
-      if (pause) {
-        const p = pause;
-        pause = null;
+      const p = pause;
+      pause = null;
+      if (p && !p.afterAcquire) {
         p.started();
         await p.gate;
       }
       if (holder !== undefined) return { ok: false, inUse: true };
       holder = me;
+      if (p && p.afterAcquire) {
+        p.started();
+        await p.gate;
+      }
       return { ok: true, messages: [] };
     },
     retrieve: async () => new Uint8Array(),
@@ -170,12 +179,12 @@ function sharedLockBackend(): { backend: Pop3Backend; owner: () => string | unde
   return {
     backend,
     owner: () => holder,
-    pauseNextOpen: () => {
+    pauseNextOpen: (afterAcquire = false) => {
       let resume!: () => void;
       const gate = new Promise<void>((r) => (resume = r));
       let started!: () => void;
       const startedP = new Promise<void>((r) => (started = r));
-      pause = { gate, started };
+      pause = { gate, started, afterAcquire };
       return { started: startedP, resume };
     },
   };
@@ -208,5 +217,34 @@ describe("POP3 — 잠금을 기다리다 끊긴 세션이 남의 잠금을 풀�
     paused.resume();
     await new Promise((r) => setTimeout(r, 50));
     expect(lock.owner()).toBe(heldBy);
+  });
+
+  /**
+   * 잠금을 **잡은 뒤** 멈춘 사이 끊기는 경우 — 이 세션이 잠금을 끝까지 쥐고 있다가 열기가 끝나면
+   * 자기 잠금을 푼다. 그 사이 다른 세션은 [IN-USE]를 받는다(남의 잠금을 빼앗지도, 풀지도 않는다).
+   */
+  test("잠금을 잡은 뒤 기다리다 끊기면 자기 잠금만 풀고, 그 사이 다른 세션은 IN-USE", async () => {
+    const lock = sharedLockBackend();
+    const port = await start(lock.backend, 60_000);
+    const paused = lock.pauseNextOpen(true);
+    const a = client(port);
+    await a.waitFor("+OK");
+    a.send("USER alice\r\nPASS secret\r\n");
+    await paused.started;
+    const heldByA = lock.owner();
+    expect(heldByA).toBeDefined();
+    a.sock.destroy();
+    await a.closed;
+    await new Promise((r) => setTimeout(r, 50));
+    // A의 close가 잠금을 풀지 않았다 — 아직 열기 중이라 결과를 보고 풀어야 한다.
+    expect(lock.owner()).toBe(heldByA);
+
+    const c = client(port);
+    await c.waitFor("+OK");
+    c.send("USER alice\r\nPASS secret\r\n");
+    await c.waitFor("-ERR");
+    paused.resume();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(lock.owner()).toBeUndefined();
   });
 });

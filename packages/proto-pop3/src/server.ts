@@ -45,6 +45,11 @@ export interface Pop3Backend {
   scramAuthorize?(user: string): Promise<{ accountId: string; credKind?: string } | null>;
   /** `credKind`는 선택 — 접근 감사 로그가 자격증명 종류를 남길 때만 쓴다(IMAP과 같은 계약). */
   authenticate(user: string, pass: string): Promise<{ accountId: string; credKind?: string | undefined } | null>;
+  /**
+   * ★계약: **예외로 끝나면 잠금을 쥐고 있지 않아야 한다**(잡았다면 스스로 풀고 던진다).
+   * 어댑터는 예외를 받았을 때 잠금 여부를 알 수 없고, `releaseMaildrop`은 계정 단위라 추측으로
+   * 부르면 같은 계정의 다른 세션 잠금을 풀 수 있다. `{ ok: false }`도 잠금이 없다는 뜻이다.
+   */
   openMaildrop(
     accountId: string,
   ): Promise<{ ok: true; messages: Pop3MaildropMessage[] } | { ok: false; inUse: boolean }>;
@@ -505,7 +510,16 @@ export class Pop3Server {
                 // 해제 실패는 백엔드가 로깅한다(release()와 같은 처분).
               }
               // 잡았다가 바로 푼 것도 흔적을 남긴다 — "왜 잠금이 잠깐 잡혔다 사라졌나"의 답이다.
-              audit("openMaildrop", AUDIT_OUTCOME.ok, { reason: "lateRelease" });
+              // `audit()`는 지금의 accountId(방금 null)를 읽으므로 잠근 계정을 직접 적는다.
+              this.audit.record({
+                ts: Date.now(),
+                surface: AUDIT_SURFACE.pop3,
+                action: "openMaildrop",
+                outcome: AUDIT_OUTCOME.ok,
+                ip: normalizeIp(socket.remoteAddress),
+                accountId: lockedId,
+                detail: { reason: "lateRelease" },
+              });
               break;
             }
             /**
