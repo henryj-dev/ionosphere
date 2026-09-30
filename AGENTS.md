@@ -128,19 +128,21 @@ Actions의 **Release & deploy**(`.github/workflows/release.yml`, `workflow_dispa
 
 마이그레이션이 포함된 릴리즈 전에는 DB 백업(`scripts/backup.sh`) — 절차는 운영 저장소 문서에 있다.
 운영 저장소의 배포는 라이브 리비전과 비교해 마이그레이션 변경이 있으면 **배포 직전에 자동으로 백업을 뜬다**
-(2026-09-30 로그로 확인). 그래도 범위를 사람에게 먼저 알리는 것은 위 §워크트리의 규칙대로 에이전트 몫이다.
+(2026-09-30 로그로 확인). 그래도 범위를 사람에게 먼저 알리는 것은 아래 §에이전트는 워크트리의 규칙대로 에이전트 몫이다.
 
 ## 에이전트는 워크트리, 사람은 메인에서 작업
 
 **에이전트**의 `Edit`/`Write`/트리 변경 git 명령은 메인 작업 트리에서 **항상 거부**된다.
-단독 세션이어도 같다. **사람은 메인에서 수정·커밋·push 할 수 있다** — git `pre-commit`은
-에이전트 하네스 환경 변수가 있을 때만 메인 커밋을 막는다.
+단독 세션이어도 같다. **사람은 메인 트리에서 수정·커밋할 수 있다** — git `pre-commit`은
+에이전트 하네스 환경 변수가 있을 때만 메인 커밋을 막는다. 다만 원격 main에는 **사람도 PR로만**
+들어간다(아래 — 저장소 ruleset에 우회자가 없다).
 
 작업 흐름:
 
     # 하네스 전용 도구가 있으면 그것을 쓰고, 없으면 모든 에이전트 공통 생성기:
     python3 scripts/claude-hooks/enter-worktree.py <이름>
     # 출력된 .claude/worktrees/<이름> 경로에서 작업·커밋
+    [ -L node_modules ] && rm node_modules     # ★심링크가 있으면 먼저 지운다 — 아래 ⚠
     npm ci                                     # 워크트리 전용 의존성 (.claude/worktree-bootstrap.md)
     npm run verify
     git fetch origin && git rebase origin/main
@@ -150,9 +152,15 @@ Actions의 **Release & deploy**(`.github/workflows/release.yml`, `workflow_dispa
 ⚠ **`node_modules`를 메인 트리에서 심링크하지 말 것.** 그러면 `@ionosphere/*` 워크스페이스 링크가
 **메인 트리의 `packages/`** 를 가리켜, 워크트리에서 `npm run verify`를 돌려도 워크트리가 아니라
 메인 코드를 검증한다 — 초록이 아무것도 증명하지 않는다(2026-09-30 실측). `npm ci`는 1초 안팎이다.
+**심링크가 걸린 채로 `npm ci`를 돌리면 더 나쁘다** — npm이 심링크를 따라가 `node_modules` 안을
+지우므로 **메인 트리의 의존성이 사라진다.** 하네스 전용 워크트리 도구는 `.claude/settings.json`의
+`worktree.symlinkDirectories` 때문에 이 심링크를 자동으로 건다. 그래서 위 흐름은 `npm ci` 앞에서
+심링크를 먼저 지운다.
 
-**main에는 PR로만 들어간다.** 저장소 규칙(branch protection)이 main 직접 push를 거부한다
-(2026-09-30 확인). CI가 초록이어야 머지할 수 있고, **머지는 사람이 한다.**
+**main에는 PR로만 들어간다.** 저장소 ruleset(`main`, 우회자 없음)이 main 직접 push를 거부한다
+(2026-09-30 확인) — PR 필수·squash 머지·필수 검사(`gate`·`codeql`). CI가 초록이어야 머지할 수 있다.
+**머지는 사람이 한다** — 이건 기계가 강제하지 않는다(필수 승인 수 0이라 에이전트도 머지할 수 있다).
+사람이 지키는 규약이다.
 에이전트의 작업 사이클은 **PR을 올리고 CI가 초록인 것**까지다 — 워크트리에 커밋만 남기고
 PR을 미루면 그 사이클은 아직 끝나지 않은 것이다.
 
