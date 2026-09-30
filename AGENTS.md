@@ -142,7 +142,7 @@ Actions의 **Release & deploy**(`.github/workflows/release.yml`, `workflow_dispa
     # 하네스 전용 도구가 있으면 그것을 쓰고, 없으면 모든 에이전트 공통 생성기:
     python3 scripts/claude-hooks/enter-worktree.py <이름>
     # 출력된 .claude/worktrees/<이름> 경로에서 작업·커밋
-    [ -L node_modules ] && rm node_modules     # ★심링크가 있으면 먼저 지운다 — 아래 ⚠
+    [ ! -L node_modules ] || rm node_modules   # ★심링크가 있으면 먼저 지운다 — 아래 ⚠
     npm ci                                     # 워크트리 전용 의존성 (.claude/worktree-bootstrap.md)
     npm run verify
     git fetch origin && git rebase origin/main
