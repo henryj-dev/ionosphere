@@ -504,15 +504,19 @@ describe("접근 감사 — 관리 REST API", () => {
     expect(JSON.stringify(events)).not.toContain(ROOT);
   });
 
-  test("인증 실패는 denied로 남고, 주체 정보는 비어 있다", async () => {
+  /**
+   * ★401은 `fail`이다 — 다른 표면의 인증 실패와 같은 값이어야 "인증 실패" 집계에 들어간다.
+   * 예전엔 `denied`로 남아 관리 API 대입 공격이 권한 거부 쪽에 숨었다.
+   */
+  test("인증 실패(401)는 fail로 남고, 주체 정보는 비어 있다", async () => {
     const base = `http://127.0.0.1:${app.adminPort}`;
     await fetch(`${base}/v1/accounts`, { headers: { authorization: "Bearer wrong-token-value" } });
 
     await refresh();
-    const denied = bySurface(AUDIT_SURFACE.api).filter((e) => e.outcome === AUDIT_OUTCOME.denied);
-    expect(denied.length).toBeGreaterThan(0);
-    const last = denied.at(-1)!;
-    expect(last.detail?.status).toBe(401);
+    const api = bySurface(AUDIT_SURFACE.api).filter((e) => e.detail?.status === 401);
+    expect(api.length).toBeGreaterThan(0);
+    const last = api.at(-1)!;
+    expect(last.outcome).toBe(AUDIT_OUTCOME.fail);
     // 인증 전 거부이므로 주체가 없다 — 그 부재가 곧 "인증을 통과하지 못했다"는 뜻이다.
     expect(last.detail?.apiKeyId).toBeUndefined();
     expect(last.tenantId).toBeUndefined();

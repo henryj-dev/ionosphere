@@ -396,11 +396,17 @@ export class AdminApiServer {
         ts: Date.now(),
         surface: AUDIT_SURFACE.api,
         action: `${req.method ?? "?"} ${new URL(req.url ?? "/", "http://localhost").pathname}`,
-        // 401/403은 `denied`(권한), 4xx는 `fail`(요청 오류), 429는 `throttled`. 5xx도 `fail`.
+        /**
+         * 403만 `denied`(인증은 됐는데 권한 부족)다. **401은 `fail`** — 자격증명이 틀린 것이라
+         * 다른 표면의 인증 실패와 같은 값이어야 한다. 예전엔 401도 `denied`로 세어, 관리 API
+         * 대입 공격이 "인증 실패" 집계에서 빠지고 "권한 거부" 쪽에 숨었다(2026-09-30 정정,
+         * 알림을 만드는 쪽이 fail·denied를 합쳐야만 공격을 볼 수 있었다).
+         * 나머지 4xx·5xx는 `fail`, 429는 `throttled`.
+         */
         outcome:
           status === 429
             ? AUDIT_OUTCOME.throttled
-            : status === 401 || status === 403
+            : status === 403
               ? AUDIT_OUTCOME.denied
               : status >= 400
                 ? AUDIT_OUTCOME.fail

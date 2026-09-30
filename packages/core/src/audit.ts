@@ -46,8 +46,15 @@ export type AuditSurface = (typeof AUDIT_SURFACE)[keyof typeof AUDIT_SURFACE];
  * 것이다. 스로틀 차단은 지금 어느 로그에도 남지 않는데(어댑터가 백엔드를 부르지 않고 조기 반환),
  * 공격 활동이 가장 잘 드러나는 갈래가 바로 그것이다.
  *
- * `denied`는 인증은 됐지만 **권한이 없어** 거부된 경우(관리 API 스코프 부족 등) — 인증 실패와
+ * `denied`는 인증은 됐지만 **권한이 없어** 거부된 경우(관리 API 403·IMAP ACL 등) — 인증 실패와
  * 섞으면 "자격증명 탈취 시도"와 "권한 밖 접근 시도"를 구분할 수 없다.
+ *
+ * ⚠ **인증이 없는 표면에서는 뜻이 다르다.** 25(smtp)·lmtp의 `deliver`는 인증 단계가 없으므로
+ * `denied`가 **메시지 수신 거절**(스팸·DMARC·정책·일시 오류)을 뜻한다. submission의 `deliver`
+ * `denied`는 인증된 사용자의 발송이 정책에 막힌 것이다. 또 IMAP·POP3의 `denied`는 없는 메일함
+ * SELECT 같은 **평범한 NO 응답**까지 포함한다. 그래서 `denied`를 집계할 때는 **surface로 나눠야**
+ * 한다 — 합치면 스팸 파도가 "권한 거부 급증"으로 보인다(2026-09-30 외부 알림 설계에서 드러남).
+ * 관리 API의 401(자격증명 불일치)은 `fail`이다 — 예전엔 `denied`로 세어 인증 실패 집계에서 빠졌다.
  */
 export const AUDIT_OUTCOME = {
   ok: "ok",
@@ -55,7 +62,7 @@ export const AUDIT_OUTCOME = {
   fail: "fail",
   /** 스로틀에 걸려 검증조차 하지 않음. */
   throttled: "throttled",
-  /** 인증은 됐으나 권한 부족. */
+  /** 인증은 됐으나 권한 부족. 인증 없는 표면(smtp·lmtp)에서는 수신 거절 — 위 주석 참조. */
   denied: "denied",
 } as const;
 
