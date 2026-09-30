@@ -127,6 +127,8 @@ Actions의 **Release & deploy**(`.github/workflows/release.yml`, `workflow_dispa
 태그를 받아 수행한다. 라이브 구성(호스트 역할·주소·백업 절차)의 정본도 그쪽이다.
 
 마이그레이션이 포함된 릴리즈 전에는 DB 백업(`scripts/backup.sh`) — 절차는 운영 저장소 문서에 있다.
+운영 저장소의 배포는 라이브 리비전과 비교해 마이그레이션 변경이 있으면 **배포 직전에 자동으로 백업을 뜬다**
+(2026-09-30 로그로 확인). 그래도 범위를 사람에게 먼저 알리는 것은 위 §워크트리의 규칙대로 에이전트 몫이다.
 
 ## 에이전트는 워크트리, 사람은 메인에서 작업
 
@@ -139,15 +141,26 @@ Actions의 **Release & deploy**(`.github/workflows/release.yml`, `workflow_dispa
     # 하네스 전용 도구가 있으면 그것을 쓰고, 없으면 모든 에이전트 공통 생성기:
     python3 scripts/claude-hooks/enter-worktree.py <이름>
     # 출력된 .claude/worktrees/<이름> 경로에서 작업·커밋
-    ln -s ../../../node_modules node_modules   # 워크트리엔 의존성이 없다 (.claude/worktree-bootstrap.md)
+    npm ci                                     # 워크트리 전용 의존성 (.claude/worktree-bootstrap.md)
     npm run verify
-    git fetch origin && git rebase origin/main && git push origin HEAD:main
+    git fetch origin && git rebase origin/main
+    git push -u origin HEAD:<브랜치>
+    gh pr create --base main
 
-**대화(작업 사이클)가 끝났다고 선언하려면 이 push까지 끝나 있어야 한다 — 그것이 곧
-「메인 브랜치로 머지」다.** 별도의 병합 절차는 없다. 워크트리에 커밋만 남기고 push를
-미루면 그 사이클은 아직 메인에 반영되지 않은 것이다.
-⚠ **이 저장소는 main 푸시가 곧 라이브 배포다**(3대 자동 배포). push 전에 `npm run verify`가
-통과해 있어야 하고, 마이그레이션이 포함되면 §라이브 배포의 백업 절차를 먼저 밟는다.
+⚠ **`node_modules`를 메인 트리에서 심링크하지 말 것.** 그러면 `@ionosphere/*` 워크스페이스 링크가
+**메인 트리의 `packages/`** 를 가리켜, 워크트리에서 `npm run verify`를 돌려도 워크트리가 아니라
+메인 코드를 검증한다 — 초록이 아무것도 증명하지 않는다(2026-09-30 실측). `npm ci`는 1초 안팎이다.
+
+**main에는 PR로만 들어간다.** 저장소 규칙(branch protection)이 main 직접 push를 거부한다
+(2026-09-30 확인). CI가 초록이어야 머지할 수 있고, **머지는 사람이 한다.**
+에이전트의 작업 사이클은 **PR을 올리고 CI가 초록인 것**까지다 — 워크트리에 커밋만 남기고
+PR을 미루면 그 사이클은 아직 끝나지 않은 것이다.
+
+**머지는 배포가 아니다.** 라이브에 나가는 것은 사람이 §릴리즈·배포의 **Release & deploy**를
+실행할 때뿐이다. 에이전트가 사람에게 배포를 권할 때는 **먼저 배포 범위를 확인해 알린다**:
+라이브 리비전(운영 저장소의 마지막 배포)에서 이번 커밋까지 무엇이 나가는지, 특히
+`packages/db/src/migrations/` 변경이 끼는지. 2026-09-30에는 라이브가 한 달 전 리비전이라
+마이그레이션 14개가 함께 나갔는데, 그 사실을 배포 **뒤에** 알렸다.
 
 메인은 세션 시작·종료에 자동 fast-forward된다 — 다만 이건 안전망일 뿐, **사용자는
 기다리지 않고 언제든 메인 트리에서 직접 `git pull`(ff-only)을 받아도 된다.**
