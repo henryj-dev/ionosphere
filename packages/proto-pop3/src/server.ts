@@ -470,14 +470,25 @@ export class Pop3Server {
             // 이미 끝난 세션이면 잠금을 잡지 않는다 — 잡으면 풀어 줄 세션이 없다.
             if (ended || socket.destroyed) break;
             meter.request();
-            const result = await backend.openMaildrop(accountId);
+            // 기다리는 사이 `release()`가 `accountId`를 null로 되돌릴 수 있다 — 잠근 계정을 따로 쥔다.
+            const lockedId = accountId;
+            const result = await backend.openMaildrop(lockedId);
             /**
-             * ★잠금을 기다리는 사이 연결이 닫혔으면 바로 푼다. `close`의 `release()`는 그때
-             * 계정이 없어서(또는 아직 잠금 전이라) 아무것도 하지 않았다 — 두면 이 계정은 다른
-             * 세션에서 `maildrop already locked`로 남는다.
+             * ★잠금을 기다리는 사이 세션이 끝났으면(인증 전 마감·클라이언트 종료) **여기서 직접** 푼다.
+             *
+             * `release()`를 다시 부르면 안 된다. 세션이 끝날 때 이미 한 번 돌아 `released=true`가
+             * 됐고 — 그때는 잠금 전이라 풀 것이 없었다 — 두 번째 호출은 아무것도 하지 않는다.
+             * 예전 코드가 그랬고, 잠금과 갱신 타이머가 남아 그 계정은 재시작 전까지
+             * `maildrop already locked`로 막혔다(2026-09-30 독립 리뷰, maildrop-late-lock.test.ts).
              */
             if (result.ok && (ended || socket.destroyed)) {
-              await release();
+              released = true;
+              accountId = null;
+              try {
+                await backend.releaseMaildrop(lockedId);
+              } catch {
+                // 해제 실패는 백엔드가 로깅한다(release()와 같은 처분).
+              }
               break;
             }
             /**
@@ -495,7 +506,7 @@ export class Pop3Server {
                * 열기에 실패하면 엔진은 AUTHORIZATION에 머무는데, 그때 마감을 풀어 두면 유효한
                * 자격증명으로 인증 전 연결을 10분씩 붙들 수 있다(코드 검수 지적).
                */
-              meter.authenticated(accountId);
+              meter.authenticated(lockedId);
             } else {
               accountId = null;
             }
