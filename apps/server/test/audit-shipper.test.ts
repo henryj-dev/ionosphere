@@ -283,6 +283,30 @@ describe("★보존기간 — 디스크가 차는 것이 더 나쁘다", () => {
     expect(existsSync(join(dir, "audit-2026-07-01.jsonl"))).toBe(false);
     expect(existsSync(join(dir, "audit-2026-08-03.jsonl"))).toBe(true);
   });
+
+  /**
+   * ★실패 카운터만으로는 "재시도 대기"와 "유실"을 가를 수 없었다(2026-09-30 문의). 실패는 파일이
+   * 남아 있는 한 매 tick 다시 세므로 한 파일이 여러 번 오른다. 버린 것은 **따로** 세야 한다.
+   */
+  test("onShipDropped 훅은 버린 파일에만 호출된다(실패와 구분)", async () => {
+    const dir = tmp();
+    const { target } = fakeS3(500);
+    writeDay(dir, "2026-07-20"); // 보존기간 초과 → 버림
+    writeDay(dir, "2026-08-02"); // 보존기간 안 → 남김
+    let fails = 0;
+    let dropped = 0;
+    const s = new AuditShipper({
+      dir,
+      host: "mx",
+      target,
+      localRetainDays: 7,
+      onShipFailure: () => fails++,
+      onShipDropped: () => dropped++,
+    });
+    await s.tick(NOW);
+    expect(fails).toBe(2);
+    expect(dropped).toBe(1);
+  });
 });
 
 describe("워커 수명주기", () => {

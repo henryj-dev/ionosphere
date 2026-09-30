@@ -54,8 +54,10 @@ export interface AuditShipperOptions {
    */
   localRetainDays?: number;
   logger?: Logger;
-  /** 이관 실패 관측 훅(메트릭 배선용). */
+  /** 이관 실패 관측 훅(메트릭 배선용). 파일이 로컬에 남아 재시도되는 경우도 포함한다. */
   onShipFailure?: () => void;
+  /** 보존기간을 넘겨 파일을 **버렸을 때** 훅 — 실패와 달리 되돌릴 수 없는 유실이다. */
+  onShipDropped?: () => void;
 }
 
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000;
@@ -79,6 +81,7 @@ export class AuditShipper {
   private readonly localRetainDays: number;
   private readonly log: Logger;
   private readonly onShipFailure?: () => void;
+  private readonly onShipDropped?: () => void;
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
 
@@ -90,6 +93,7 @@ export class AuditShipper {
     this.localRetainDays = opts.localRetainDays ?? DEFAULT_LOCAL_RETAIN_DAYS;
     this.log = (opts.logger ?? noopLogger).child({ component: "audit-ship" });
     if (opts.onShipFailure) this.onShipFailure = opts.onShipFailure;
+    if (opts.onShipDropped) this.onShipDropped = opts.onShipDropped;
   }
 
   start(): void {
@@ -142,6 +146,7 @@ export class AuditShipper {
           try {
             await unlink(path);
             result.dropped++;
+            this.onShipDropped?.();
             this.log.warn("이관 실패 상태로 보존기간을 넘겨 감사 로그를 버렸다 — 이관 경로를 점검할 것", {
               file: name,
               retainDays: this.localRetainDays,
