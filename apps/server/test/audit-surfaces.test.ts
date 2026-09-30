@@ -523,6 +523,40 @@ describe("접근 감사 — 관리 REST API", () => {
     expect(JSON.stringify(events)).not.toContain("wrong-token-value");
   });
 
+  /**
+   * 경계의 반대쪽 — 인증은 됐는데 권한이 없는 403은 `denied`로 남아야 한다. 401만 `fail`로
+   * 옮긴 것이므로, 이 테스트가 없으면 403까지 `fail`로 뭉개는 회귀를 잡지 못한다.
+   */
+  test("권한 부족(403)은 denied로 남고, 주체 정보가 있다", async () => {
+    const base = `http://127.0.0.1:${app.adminPort}`;
+    const t = (await (
+      await fetch(`${base}/v1/tenants`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${ROOT}`, "content-type": "application/json" },
+        body: JSON.stringify({ name: "audit-tenant-403" }),
+      })
+    ).json()) as { tenantId: string };
+    const k = (await (
+      await fetch(`${base}/v1/api-keys?tenantId=${t.tenantId}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${ROOT}`, "content-type": "application/json" },
+        body: JSON.stringify({ scopes: "admin" }),
+      })
+    ).json()) as { key: string };
+    // 테넌트 키로 root 전용 엔드포인트를 부른다 — 인증은 통과, 권한에서 막힌다.
+    const res = await fetch(`${base}/v1/tenants`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${k.key}`, "content-type": "application/json" },
+      body: JSON.stringify({ name: "should-not-exist" }),
+    });
+    expect(res.status).toBe(403);
+
+    await refresh();
+    const last = bySurface(AUDIT_SURFACE.api).filter((e) => e.detail?.status === 403).at(-1);
+    expect(last?.outcome).toBe(AUDIT_OUTCOME.denied);
+    expect(last?.detail?.apiKeyId).toBeTruthy();
+  });
+
   test("/healthz는 기록하지 않는다(초 단위 생존 확인이 다른 줄을 파묻는다)", async () => {
     await refresh();
     const before = bySurface(AUDIT_SURFACE.api).length;
