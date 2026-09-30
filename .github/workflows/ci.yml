@@ -99,8 +99,10 @@ jobs:
       # 간헐 실패가 나므로 CI에서는 낮춰 고정한다.
       - run: npm test -- --test-concurrency=2
       - run: npm run smoke
-      # 단계별 --seal 중에는 자기 봉인이 아직 없으므로 complete 검사는 전체 검증 뒤 CI에서만 돈다.
-      - run: npm run gate:shared-mailbox:complete
+      # 공유 메일함 계획은 P11 봉인으로 끝났다. 끝난 계획의 봉인은 **기록**으로만 지킨다 —
+      # 현재 파일과 비교하면(complete) 봉인 산출물에 든 공용 파일을 고치는 모든 PR이 막힌다.
+      # 계획을 다시 열면 이 줄을 gate:shared-mailbox:complete로 되돌린다(scripts/gates 주석).
+      - run: npm run gate:shared-mailbox:archived
 
   # **정책 층은 이 저장소 것이 아니다.** 자격증명·워크플로 감사·의존성 리뷰는 이 저장소가
   # 무엇을 만드는지와 무관하게 다섯 저장소가 같은 것을 묻는 축이다. 복제해 들고 있으면

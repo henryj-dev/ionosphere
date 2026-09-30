@@ -184,3 +184,54 @@ test("P0 gate: 빈 waive 사유는 거부한다", () => {
   assert.notEqual(result.status, 0);
   assert.match(`${result.stdout}${result.stderr}`, /waive 사유가 비어 있음/);
 });
+
+/**
+ * 봉인 사본을 만들고 한 단계 봉인을 바꾼 뒤 게이트를 돌린다.
+ * `recomputeContent`가 true면 contentDigest를 다시 계산해 **정상 봉인처럼 보이게** 만든다 —
+ * "봉인 뒤 산출물 파일만 바뀐" 상황을 흉내 낸다. false면 기록만 어긋난 변조 상황이다.
+ */
+function runWithEditedSeal(phase: string, recomputeContent: boolean, ...args: string[]) {
+  const fixture = mkdtempSync(resolve(tmpdir(), "ionosphere-gate-archived-"));
+  cpSync(sealDir, fixture, { recursive: true });
+  const path = resolve(fixture, `${phase}.json`);
+  const seal = JSON.parse(readFileSync(path, "utf8")) as { outputs: Record<string, string>; contentDigest: string };
+  const first = Object.keys(seal.outputs)[0]!;
+  seal.outputs[first] = "0".repeat(64);
+  if (recomputeContent) {
+    const entries = Object.entries(seal.outputs).sort(([left], [right]) => left.localeCompare(right));
+    seal.contentDigest = createHash("sha256").update(JSON.stringify(entries)).digest("hex");
+  }
+  writeFileSync(path, `${JSON.stringify(seal, null, 2)}\n`);
+  try {
+    return spawnSync(process.execPath, [gate, ...args], {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...process.env, IONOSPHERE_GATE_SEAL_DIR: fixture },
+    });
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+}
+
+/**
+ * ★archived 모드의 존재 이유 — 끝난 계획이 공용 파일 변경을 막지 않아야 한다.
+ * 같은 상황에서 complete는 여전히 막는 것까지 봐야 두 모드가 실제로 다르다는 증명이 된다.
+ */
+test("archived gate: 봉인 뒤 산출물이 바뀌어도 기록이 온전하면 통과하고, complete는 막는다", () => {
+  const archived = runWithEditedSeal("P4", true, "--assert-archived");
+  assert.equal(archived.status, 0, archived.stderr);
+  const complete = runWithEditedSeal("P4", true, "--assert-complete");
+  assert.notEqual(complete.status, 0);
+});
+
+test("archived gate: 봉인 기록을 손으로 고치면(contentDigest 불일치) 거부한다", () => {
+  const result = runWithEditedSeal("P6", false, "--assert-archived");
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /P6: 봉인 기록이 정의와 맞지 않거나 변조됨/);
+});
+
+test("archived gate: 한 단계 봉인이라도 없으면 거부한다", () => {
+  const result = runWithSealFixture("P7", "--assert-archived");
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /P7: 봉인 없음/);
+});
