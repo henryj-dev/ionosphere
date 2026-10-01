@@ -70,3 +70,28 @@ test("인프로세스 락은 인스턴스마다 따로다 — DB 락이 필요�
   await a.releaseMaildrop(accountId);
   await b.releaseMaildrop(accountId);
 });
+
+/**
+ * ★계약: openMaildrop이 **예외로 끝나면 잠금도 없다.**
+ *
+ * 잠금을 잡은 뒤 DB 조회(getMailboxByRole·listMessages)가 던지면, 어댑터는 잠금을 잡았는지 알 수
+ * 없다. 그렇다고 어댑터가 추측으로 releaseMaildrop을 부르면 해제가 계정 단위라 **남의 잠금을
+ * 풀 수 있다.** 그래서 정리는 잡은 쪽(백엔드)이 한다. 예전엔 여기서 잠금이 남아, 세션이 이미
+ * 끝난 경우 그 계정이 다른 세션에서 [IN-USE]로 막혔다(2026-09-30 코드 검수 재현).
+ */
+test("잠금을 잡은 뒤 조회가 던지면 백엔드가 잠금을 풀고 던진다", async () => {
+  const lock = new DbMaildropLock(db);
+  const failingStore = Object.assign(Object.create(store) as Store, {
+    listMessages: async () => {
+      throw new Error("simulated db outage");
+    },
+  });
+  const broken = new IonospherePop3Backend(db, failingStore, blobs, noopLogger, lock);
+  const healthy = new IonospherePop3Backend(db, store, blobs, noopLogger, lock);
+
+  await expect(broken.openMaildrop(accountId)).rejects.toThrow("simulated db outage");
+  // 던진 쪽이 잠금을 남겼다면 여기서 [IN-USE]가 나온다.
+  const reopened = await healthy.openMaildrop(accountId);
+  expect(reopened.ok).toBe(true);
+  await healthy.releaseMaildrop(accountId);
+});
