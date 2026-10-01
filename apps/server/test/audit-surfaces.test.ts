@@ -504,19 +504,57 @@ describe("접근 감사 — 관리 REST API", () => {
     expect(JSON.stringify(events)).not.toContain(ROOT);
   });
 
-  test("인증 실패는 denied로 남고, 주체 정보는 비어 있다", async () => {
+  /**
+   * ★401은 `fail`이다 — 다른 표면의 인증 실패와 같은 값이어야 "인증 실패" 집계에 들어간다.
+   * 예전엔 `denied`로 남아 관리 API 대입 공격이 권한 거부 쪽에 숨었다.
+   */
+  test("인증 실패(401)는 fail로 남고, 주체 정보는 비어 있다", async () => {
     const base = `http://127.0.0.1:${app.adminPort}`;
     await fetch(`${base}/v1/accounts`, { headers: { authorization: "Bearer wrong-token-value" } });
 
     await refresh();
-    const denied = bySurface(AUDIT_SURFACE.api).filter((e) => e.outcome === AUDIT_OUTCOME.denied);
-    expect(denied.length).toBeGreaterThan(0);
-    const last = denied.at(-1)!;
-    expect(last.detail?.status).toBe(401);
+    const api = bySurface(AUDIT_SURFACE.api).filter((e) => e.detail?.status === 401);
+    expect(api.length).toBeGreaterThan(0);
+    const last = api.at(-1)!;
+    expect(last.outcome).toBe(AUDIT_OUTCOME.fail);
     // 인증 전 거부이므로 주체가 없다 — 그 부재가 곧 "인증을 통과하지 못했다"는 뜻이다.
     expect(last.detail?.apiKeyId).toBeUndefined();
     expect(last.tenantId).toBeUndefined();
     expect(JSON.stringify(events)).not.toContain("wrong-token-value");
+  });
+
+  /**
+   * 경계의 반대쪽 — 인증은 됐는데 권한이 없는 403은 `denied`로 남아야 한다. 401만 `fail`로
+   * 옮긴 것이므로, 이 테스트가 없으면 403까지 `fail`로 뭉개는 회귀를 잡지 못한다.
+   */
+  test("권한 부족(403)은 denied로 남고, 주체 정보가 있다", async () => {
+    const base = `http://127.0.0.1:${app.adminPort}`;
+    const t = (await (
+      await fetch(`${base}/v1/tenants`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${ROOT}`, "content-type": "application/json" },
+        body: JSON.stringify({ name: "audit-tenant-403" }),
+      })
+    ).json()) as { tenantId: string };
+    const k = (await (
+      await fetch(`${base}/v1/api-keys?tenantId=${t.tenantId}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${ROOT}`, "content-type": "application/json" },
+        body: JSON.stringify({ scopes: "admin" }),
+      })
+    ).json()) as { key: string };
+    // 테넌트 키로 root 전용 엔드포인트를 부른다 — 인증은 통과, 권한에서 막힌다.
+    const res = await fetch(`${base}/v1/tenants`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${k.key}`, "content-type": "application/json" },
+      body: JSON.stringify({ name: "should-not-exist" }),
+    });
+    expect(res.status).toBe(403);
+
+    await refresh();
+    const last = bySurface(AUDIT_SURFACE.api).filter((e) => e.detail?.status === 403).at(-1);
+    expect(last?.outcome).toBe(AUDIT_OUTCOME.denied);
+    expect(last?.detail?.apiKeyId).toBeTruthy();
   });
 
   test("/healthz는 기록하지 않는다(초 단위 생존 확인이 다른 줄을 파묻는다)", async () => {
