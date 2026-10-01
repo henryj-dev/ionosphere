@@ -12,6 +12,7 @@
     "lint": "node scripts/lint.ts",
     "verify": "npm run lint && npm run typecheck && npm test && npm run smoke",
     "gate:shared-mailbox:complete": "node scripts/gates/shared-mailbox.ts --assert-complete",
+    "gate:shared-mailbox:archived": "node scripts/gates/shared-mailbox.ts --assert-archived",
     "smoke": "node scripts/smoke.ts"
   },
   "dependencies": {

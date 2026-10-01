@@ -37,7 +37,13 @@ node scripts/gates/shared-mailbox.ts <단계> --seal --waived "사유"
 node scripts/gates/shared-mailbox.ts --status
 node scripts/gates/shared-mailbox.ts --assert-order
 node scripts/gates/shared-mailbox.ts --assert-complete
+node scripts/gates/shared-mailbox.ts --assert-archived
 ```
+
+**계획 종료 뒤(2026-09-30)** CI는 `--assert-archived`를 돈다. 봉인 기록이 온전한지(정의 digest·
+contentDigest·단계 누락)만 보고 현재 파일 바이트와는 비교하지 않는다. 봉인 산출물에 공용 파일이
+들어 있어서, `--assert-complete`를 계속 돌리면 그 파일을 고치는 모든 PR이 재봉인을 요구했다.
+계획을 다시 열면 CI를 `--assert-complete`로 되돌린다.
 
 봉인은 `docs/plan/.gates/shared-mailbox/<단계>.json`에 기록한다. 봉인 JSON에는 `sealVersion`,
 `phase`, `sealed`, `head`, `at`, `waived`, `reason`, `definitionDigest`, `contentDigest`,
