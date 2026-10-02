@@ -310,7 +310,9 @@ export class ImapServer {
     const onCommandResult = this.opts.onCommandResult;
     const rememberPending = (tag: string, label: ImapCommandLabel): void => {
       if (pendingCount >= MAX_PENDING_COMMANDS) {
-        // 가장 오래된 태그의 가장 오래된 항목을 민다(Map은 삽입 순서를 지킨다).
+        // 가장 먼저 들어온 **태그**의 첫 항목을 민다(Map은 태그 삽입 순서를 지킨다). 전체에서 가장 오래된
+        // 명령과 다를 수 있어, 상한을 넘긴 채 태그를 재사용하면 결과가 어긋날 수 있다 — 정상 트래픽은
+        // 4096에 닿지 않으므로 정확한 전역 순서를 위해 구조를 키우지 않았다.
         const oldest = pendingTags.keys().next();
         if (!oldest.done) {
           const q = pendingTags.get(oldest.value)!;
