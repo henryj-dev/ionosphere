@@ -941,8 +941,9 @@ export class ImapEngine {
     }
     if (ref === null || patterns === null) return bad("expects reference and pattern");
 
-    // 반환 옵션(RFC 5258 §3.2). SPECIAL-USE·CHILDREN은 **이미 항상** 내보내는 속성이라 받기만 한다
-    // (RFC 6154 §… 서버는 요청이 없어도 특수 용도 속성을 낼 수 있고, \HasChildren도 같다).
+    // 반환 옵션(RFC 5258 §3.2). SPECIAL-USE·CHILDREN은 **이미 항상** 내보내는 속성이라 받기만 한다 —
+    // 서버는 요청이 없어도 특수 용도 속성을 낼 수 있고(RFC 6154 §2), \HasChildren/\HasNoChildren도
+    // 요청과 무관하게 낼 수 있다(RFC 5258 §4, RFC 9051 §7.3.1).
     let statusItems: string[] | null = null;
     let returnSubscribed = false;
     const rest = args.slice(at + 2);
@@ -961,15 +962,15 @@ export class ImapEngine {
         } else if (opt === "STATUS") {
           const list = opts.items[i + 1];
           i += 1;
-          if (!list || list.kind !== "list") return [{ kind: "reply", text: `${cmd.tag} BAD STATUS expects item list` }];
+          if (!list || list.kind !== "list") return bad("RETURN STATUS expects item list");
           statusItems = [];
           for (const it of list.items) {
             const t = valueText(it)?.toUpperCase();
-            if (!t) return [{ kind: "reply", text: `${cmd.tag} BAD invalid STATUS item` }];
+            if (!t) return bad("invalid STATUS item");
             statusItems.push(t);
           }
         } else {
-          return [{ kind: "reply", text: `${cmd.tag} BAD unknown RETURN option` }];
+          return bad("unknown RETURN option");
         }
       }
     }
@@ -1011,8 +1012,8 @@ export class ImapEngine {
         (!select.has("SPECIAL-USE") || roleToAttribute(m.role) !== null);
       /**
        * RECURSIVEMATCH + SUBSCRIBED: 자기는 선택되지 않아도 **선택된 자손이 있으면** CHILDINFO로 낸다
-       * (RFC 5258 §3.5). 선택된 메일함의 조상을 한 번만 모아 둔다. SPECIAL-USE용 CHILDINFO 값은
-       * 정의돼 있지 않아 SUBSCRIBED일 때만 한다.
+       * (RFC 5258 §3.5). 선택된 메일함의 조상을 한 번만 모아 둔다. 자손은 **모든** 선택 조건을
+       * 통과해야 한다(passesSelection). SPECIAL-USE용 CHILDINFO 값은 정의돼 있지 않아 태그는 SUBSCRIBED뿐이다.
        */
       const childInfo = select.has("RECURSIVEMATCH") && select.has("SUBSCRIBED");
       const hasSelectedChild = new Set<string>();
@@ -1024,6 +1025,19 @@ export class ImapEngine {
         }
       }
       const childInfoSuffix = ' ("CHILDINFO" ("SUBSCRIBED"))';
+      /**
+       * 한 메일함의 속성 — 선택된 줄과 CHILDINFO만 내는 부모 줄이 **같은 조립**을 쓴다(예전엔 부모 줄이
+       * `()`라 RETURN (CHILDREN)을 줘도 \HasChildren이 빠졌다 — 코드 검수). `\Subscribed`는 선택된
+       * 줄에만 붙인다 — 부모 줄은 바로 "구독하지 않았다"는 뜻이다.
+       */
+      const listAttributes = (m: ImapMailbox, subscribedFlag: boolean): string => {
+        const attrs: string[] = [];
+        const special = roleToAttribute(m.role);
+        if (special) attrs.push(special);
+        attrs.push(parents.has(m.name) ? "\\HasChildren" : "\\HasNoChildren");
+        if (subscribedFlag) attrs.push("\\Subscribed");
+        return attrs.join(" ");
+      };
       for (const m of res.mailboxes) {
         if (!matches(m.name)) continue;
         if (verb === "LSUB" && m.subscribed === false) continue; // 구독 필터(영속화됨)
@@ -1031,19 +1045,16 @@ export class ImapEngine {
         const withChildInfo = childInfo && hasSelectedChild.has(m.name);
         if (!selected) {
           if (withChildInfo) {
-            actions.push({ kind: "reply", text: `* ${verb} () "${HIERARCHY_DELIMITER}" ${quoteMailboxName(m.name)}${childInfoSuffix}` });
+            actions.push({
+              kind: "reply",
+              text: `* ${verb} (${listAttributes(m, false)}) "${HIERARCHY_DELIMITER}" ${quoteMailboxName(m.name)}${childInfoSuffix}`,
+            });
           }
           continue;
         }
-        const attrs: string[] = [];
-        const special = roleToAttribute(m.role);
-        if (special) attrs.push(special);
-        const hasChildren = parents.has(m.name);
-        attrs.push(hasChildren ? "\\HasChildren" : "\\HasNoChildren");
-        if (returnSubscribed && m.subscribed !== false) attrs.push("\\Subscribed");
         actions.push({
           kind: "reply",
-          text: `* ${verb} (${attrs.join(" ")}) "${HIERARCHY_DELIMITER}" ${quoteMailboxName(m.name)}${withChildInfo ? childInfoSuffix : ""}`,
+          text: `* ${verb} (${listAttributes(m, returnSubscribed && m.subscribed !== false)}) "${HIERARCHY_DELIMITER}" ${quoteMailboxName(m.name)}${withChildInfo ? childInfoSuffix : ""}`,
         });
         // LIST-STATUS — 각 LIST 라인 뒤에 STATUS 인라인(RFC 5819)
         if (statusItems) {

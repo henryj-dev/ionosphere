@@ -65,8 +65,11 @@ describe("LIST-EXTENDED", () => {
 
   test("★선택 옵션과 RETURN을 함께 — 클라이언트가 실제로 보내는 모양", () => {
     const out = list('l LIST (SPECIAL-USE) "" "*" RETURN (SPECIAL-USE CHILDREN)');
-    expect(out.at(-1)).toBe("l OK LIST completed");
-    expect(out.length).toBe(3);
+    expect(out).toEqual([
+      '* LIST (\\Sent \\HasNoChildren) "/" "Sent"',
+      '* LIST (\\Trash \\HasNoChildren) "/" "Trash"',
+      "l OK LIST completed",
+    ]);
   });
 
   test("★여러 패턴 — 괄호 목록 중 하나라도 맞으면 낸다", () => {
@@ -76,14 +79,15 @@ describe("LIST-EXTENDED", () => {
 
   test("선택 옵션 SUBSCRIBED — 구독한 것만, \\Subscribed를 붙인다", () => {
     const out = list('l LIST (SUBSCRIBED) "" "*"');
-    expect(out).not.toContain('* LIST (\\HasChildren \\Subscribed) "/" "Work"');
+    // 구독하지 않은 Work는 아예 나오지 않는다.
     expect(out.some((l) => l.endsWith('"/" "Work"'))).toBe(false);
     expect(out).toContain('* LIST (\\HasNoChildren \\Subscribed) "/" "Work/Reports"');
   });
 
   test("SUBSCRIBED + RECURSIVEMATCH — 구독 안 한 부모도 구독한 자식이 있으면 CHILDINFO로 낸다", () => {
     const out = list('l LIST (SUBSCRIBED RECURSIVEMATCH) "" "%"');
-    expect(out).toContain('* LIST () "/" "Work" ("CHILDINFO" ("SUBSCRIBED"))');
+    // 부모 줄도 일반 줄과 같은 속성을 쓴다 — \Subscribed만 없다(구독하지 않았으므로).
+    expect(out).toContain('* LIST (\\HasChildren) "/" "Work" ("CHILDINFO" ("SUBSCRIBED"))');
   });
 
   test("RECURSIVEMATCH 단독·모르는 선택 옵션·모르는 RETURN 옵션은 BAD(RFC 5258 §3)", () => {
@@ -101,5 +105,25 @@ describe("LIST-EXTENDED", () => {
     expect(list('l LIST "" "INBOX" RETURN (STATUS (MESSAGES))')).toContain('* STATUS "INBOX" (MESSAGES 4)');
     // LSUB에는 확장 문법이 없다(RFC 5258은 LIST만 확장한다).
     expect(list('l LSUB (SUBSCRIBED) "" "*"').at(-1)).toMatch(/^l BAD /);
+  });
+
+  /** 빈 목록·조합 — 문법상 허용되는 경계 형태(코드 검수가 짚은 빈칸). */
+  test("빈 선택 목록·빈 RETURN·선택된 부모의 CHILDINFO·SPECIAL-USE+RECURSIVEMATCH·STATUS 조합", () => {
+    expect(list('l LIST () "" "*"')).toEqual(list('l LIST "" "*"'));
+    expect(list('l LIST "" "*" RETURN ()')).toEqual(list('l LIST "" "*"'));
+    expect(list('l LIST (SPECIAL-USE RECURSIVEMATCH) "" "*"').at(-1)).toBe("l OK LIST completed");
+    // 구독한 부모 + 구독한 자식 → 부모 줄 자체에 CHILDINFO가 붙는다(RFC 5258 §5 예시).
+    const nested = [mailbox({ name: "Fruit" }), mailbox({ name: "Fruit/Apple" })];
+    expect(list('l LIST (SUBSCRIBED RECURSIVEMATCH) "" "%"', nested)).toEqual([
+      '* LIST (\\HasChildren \\Subscribed) "/" "Fruit" ("CHILDINFO" ("SUBSCRIBED"))',
+      "l OK LIST completed",
+    ]);
+    expect(list('l LIST (SPECIAL-USE) "" "*" RETURN (STATUS (MESSAGES))')).toEqual([
+      '* LIST (\\Sent \\HasNoChildren) "/" "Sent"',
+      '* STATUS "Sent" (MESSAGES 4)',
+      '* LIST (\\Trash \\HasNoChildren) "/" "Trash"',
+      '* STATUS "Trash" (MESSAGES 4)',
+      "l OK LIST completed",
+    ]);
   });
 });
