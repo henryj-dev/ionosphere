@@ -124,3 +124,66 @@ describe("IMAP 세션 종료 요약", () => {
     expect(summaries.length).toBe(1);
   });
 });
+
+describe("IMAP 명령 계측", () => {
+  /**
+   * ★백엔드를 부르지 않는 명령도 세어지는가(2026-10-01). 감사 이벤트는 백엔드 요청에만 남아,
+   * 초당 수십 번 도는 NOOP·IDLE·BAD 루프가 지표에 흔적을 남기지 않았다.
+   * result=bad가 command와 함께 나와야 "어떤 명령이 BAD로 도는가"에 답한다.
+   */
+  test("★명령마다 결과가 보고되고, 종료 요약에 분포·모르는 명령 표본이 남는다", async () => {
+    const results: string[] = [];
+    const summaries: SessionSummary[] = [];
+    const server = new ImapServer({
+      hostname: "imap.test",
+      backend,
+      allowInsecureAuth: true,
+      sessions: { report: (s) => void summaries.push(s) },
+      onCommandResult: (command, result) => void results.push(`${command}:${result}`),
+    });
+    servers.push(server);
+    const port = await server.listen(0, "127.0.0.1");
+    const c = client(port);
+    await c.waitFor("* OK");
+    c.send("a1 NOOP\r\n");
+    await c.waitFor("a1 OK");
+    c.send("a2 XYZZY\r\n");
+    await c.waitFor("a2 BAD");
+    c.send("a3 LOGIN u@imap.test pw\r\n");
+    await c.waitFor("a3 OK");
+    c.send("a4 NOOP\r\n");
+    await c.waitFor("a4 OK");
+    c.send("\r\n"); // 태그조차 없는 줄 — 파싱 실패
+    await c.waitFor("* BAD");
+    c.send("a5 LOGOUT\r\n");
+    await c.closed;
+
+    expect(results).toEqual(["NOOP:ok", "unknown:bad", "LOGIN:ok", "NOOP:ok", "unparsed:bad", "LOGOUT:ok"]);
+    const s = await waitSummary(summaries);
+    expect(s.commands).toBe(6);
+    expect(s.commandCounts).toEqual({ LOGIN: 1, LOGOUT: 1, NOOP: 2, unknown: 1, unparsed: 1 });
+    expect(s.unknownCommands).toEqual(["XYZZY"]);
+    // 백엔드를 부르지 않은 명령은 requests에 안 들어간다 — 둘의 차이가 곧 이번 사고의 신호였다.
+    expect(s.requests).toBe(0);
+  });
+
+  test("진행 중 세션은 주기마다 한 줄을 남긴다(닫히기 전에 보인다)", async () => {
+    const progress: number[] = [];
+    const server = new ImapServer({
+      hostname: "imap.test",
+      backend,
+      allowInsecureAuth: true,
+      sessions: { report: () => {}, progress: (p) => void progress.push(p.commandsDelta ?? -1) },
+      sessionProgressIntervalMs: 80,
+    });
+    servers.push(server);
+    const port = await server.listen(0, "127.0.0.1");
+    const c = client(port);
+    await c.waitFor("* OK");
+    for (let i = 0; i < 5; i++) c.send(`n${i} NOOP\r\n`);
+    await c.waitFor("n4 OK");
+    const until = Date.now() + 2000;
+    while (progress.length === 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 10));
+    expect(progress[0]).toBe(5);
+  });
+});

@@ -22,6 +22,7 @@ import {
 } from "@ionosphere/core";
 import { ImapLineReader, type LinePart, type ReaderEvent } from "./reader.ts";
 import { ImapParseError, parseCommand, valueText, type ImapValue, type ParsedCommand } from "./parser.ts";
+import { imapCommandLabel, type ImapCommandLabel } from "./command-label.ts";
 import { formatUidSet, matchSequenceSet, parseSequenceSet, type SeqRange } from "./sequence-set.ts";
 import { evaluateSearch, parseSearchProgram, searchNeedsRaw } from "./search-criteria.ts";
 import { parseFetchItems, type FetchItem } from "./fetch-items.ts";
@@ -325,6 +326,12 @@ export interface ImapEngineOptions {
   /** 리더 한도 오버라이드(테스트용). */
   maxLineBytes?: number;
   maxLiteralBytes?: number;
+  /**
+   * 명령을 받았을 때 알림 — 어댑터가 명령 수·결과를 세는 데 쓴다(command-label.ts).
+   * 액션이 아니라 콜백인 이유: 관측일 뿐 프로토콜 흐름에 끼지 않는다. 액션으로 내면 모든
+   * 명령의 반환 배열이 바뀌어 엔진 테스트 전부가 관측 때문에 다시 써야 한다. I/O는 없다.
+   */
+  onCommand?: (tag: string, label: ImapCommandLabel, rawName: string) => void;
 }
 
 /** AUTHENTICATE 진행 상태 — continuation으로 SASL 데이터 라인을 기다리는 중. */
@@ -408,7 +415,10 @@ export class ImapEngine {
   /** 인증 후 복원할 리터럴 상한(APPEND 기준). 인증 전에는 훨씬 작은 값으로 리더를 조인다. */
   private readonly authedMaxLiteralBytes: number;
 
+  private readonly onCommand: ((tag: string, label: ImapCommandLabel, rawName: string) => void) | undefined;
+
   constructor(opts: ImapEngineOptions) {
+    this.onCommand = opts.onCommand;
     this.hostname = opts.hostname;
     this.secure = opts.secure ?? false;
     this.allowInsecureAuth = opts.allowInsecureAuth ?? false;
@@ -633,6 +643,7 @@ export class ImapEngine {
       const msg = err instanceof ImapParseError ? err.message : "parse error";
       return [{ kind: "reply", text: `* BAD ${msg}` }];
     }
+    this.onCommand?.(cmd.tag, imapCommandLabel(cmd), cmd.name);
 
     switch (cmd.name) {
       case "CAPABILITY":

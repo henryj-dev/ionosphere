@@ -37,6 +37,22 @@ export interface SessionSummary {
   accountId?: string;
   /** 인증 뒤 백엔드 요청 수 — 감사 이벤트 수와 같은 단위라 서로 대조할 수 있다. */
   requests: number;
+  /**
+   * 받은 명령 수(백엔드를 부르지 않는 명령 포함). **명령을 세는 표면(IMAP)에서만** 있다.
+   * `requests`와 따로 두는 이유(2026-10-01): IDLE/DONE·NOOP·BAD 루프는 백엔드를 부르지 않아
+   * `requests`가 0에 가까운데 회선은 초당 수십 번 왕복했다 — 둘의 차이가 곧 그 신호다.
+   */
+  commands?: number;
+  /**
+   * 명령 라벨별 횟수(0은 생략). 라벨은 표면이 정한 **닫힌 집합**이라 크기가 유계다.
+   * ★2026-10-01: 118 MB를 옮긴 세션들의 `requests`가 합 36이었다 — 무엇이 옮겼는지 이 분포가 답한다.
+   */
+  commandCounts?: Record<string, number>;
+  /**
+   * 엔진이 모르는 명령 이름 표본(세션당 최대 `MAX_UNKNOWN_SAMPLES`개, 정제·절단). **로그 전용**이다 —
+   * 메트릭 라벨로 쓰면 상대가 아무 문자열로 라벨을 무한히 늘린다. "어떤 명령이 BAD로 도는가"의 답.
+   */
+  unknownCommands?: string[];
   authFailures: number;
   /**
    * 연결 시점 소켓이 읽고 쓴 바이트 — **리스너마다 단위가 다르다**:
@@ -51,12 +67,39 @@ export interface SessionSummary {
   reason: SessionCloseReason;
 }
 
+/**
+ * 살아 있는 세션의 중간 요약 — 누계(SessionSummary의 값)에 **이번 주기의 증분**을 더한다.
+ *
+ * ★왜 필요한가(2026-10-01): 종료 요약은 소켓이 닫힐 때만 나온다. 며칠씩 열린 채 초당 수십 번
+ * 왕복하는 세션은 끝날 때까지 journal에 아무것도 없었고, 커널 소켓 계수는 소켓과 함께 사라져
+ * 09-29 조사가 거기서 막혔다. 주기마다 한 줄이면 "지금 누가 얼마나"를 볼 수 있다.
+ */
+export interface SessionProgress extends Omit<SessionSummary, "reason"> {
+  intervalMs: number;
+  /** 이번 주기에 받은 명령 수(명령을 세는 표면에서만). */
+  commandsDelta?: number;
+  bytesInDelta: number;
+  bytesOutDelta: number;
+}
+
 /** 요약을 받아 내보내는 쪽 — 조립층이 **하나를 만들어** 모든 리스너에 넘긴다(authThrottle과 같은 이유). */
 export interface SessionReporter {
   report(summary: SessionSummary): void;
+  /** 진행 중 요약 — 없으면 보내지 않는다(기존 구현과 테스트 스텁이 그대로 동작하게). */
+  progress?(summary: SessionProgress): void;
 }
 
 export const noopSessionReporter: SessionReporter = { report: () => {} };
+
+/**
+ * 진행 중 요약 주기 기본값. 정상 IDLE 세션은 이 사이 활동이 거의 없어 줄이 생략되고(아래),
+ * 비정상적으로 수다스러운 세션만 주기마다 한 줄을 남긴다 — 볼륨은 "문제 세션 수 × 주기"다.
+ */
+export const SESSION_PROGRESS_INTERVAL_MS = 10 * 60 * 1000;
+
+/** 세션당 남길 모르는 명령 이름 표본 수와 이름 길이 — 로그 한 줄이 상대 입력으로 부풀지 않게. */
+const MAX_UNKNOWN_SAMPLES = 5;
+const MAX_UNKNOWN_NAME_CHARS = 32;
 
 /**
  * 로그 한 줄 + 선택적 훅(메트릭 배선용). 훅으로 받는 이유는 `AuditFileSink.onRecord`와 같다 —
@@ -71,6 +114,10 @@ export function createLogSessionReporter(logger: Logger, onReport?: (s: SessionS
     report(s) {
       log.info("세션 종료", { ...s });
       onReport?.(s);
+    },
+    progress(s) {
+      // 메트릭 훅은 부르지 않는다 — sessions_total은 **닫힌** 세션 수다. 진행 줄이 세어지면 두 번 센다.
+      log.info("세션 진행", { ...s });
     },
   };
 }
@@ -97,6 +144,10 @@ export interface SessionMeterOptions {
   now?: () => number;
   /** 강제 종료 유예(ms) — 테스트용 재정의. */
   closeGraceMs?: number;
+  /** 명령 수를 센다(`command()` 호출). 이 표면만 요약에 `commands`가 들어간다. */
+  countCommands?: boolean;
+  /** 진행 중 요약 주기(ms). 0이거나 없으면 보내지 않는다. */
+  progressIntervalMs?: number;
 }
 
 export class SessionMeter {
@@ -112,6 +163,12 @@ export class SessionMeter {
   private authFailures = 0;
   private reason: SessionCloseReason = SESSION_CLOSE_REASON.closed;
   private reported = false;
+  private commands = 0;
+  private readonly commandCounts = new Map<string, number>();
+  private readonly unknownSamples = new Set<string>();
+  private progressTimer: ReturnType<typeof setInterval> | null = null;
+  /** 지난 진행 요약 시점의 누계 — 증분 계산용. */
+  private lastProgress = { commands: 0, bytesIn: 0, bytesOut: 0 };
 
   constructor(opts: SessionMeterOptions) {
     this.opts = opts;
@@ -132,7 +189,63 @@ export class SessionMeter {
       }, opts.preauthDeadlineMs);
       this.deadline.unref?.();
     }
+    const every = opts.progressIntervalMs ?? 0;
+    if (every > 0 && opts.reporter.progress) {
+      this.progressTimer = setInterval(() => this.reportProgress(every), every);
+      this.progressTimer.unref?.();
+    }
     opts.socket.once("close", () => this.finish());
+  }
+
+  /** 명령 하나를 받았다. `label`은 표면이 정한 닫힌 집합의 값이어야 한다(사용자 입력 그대로 금지). */
+  command(label: string): void {
+    this.commands++;
+    this.commandCounts.set(label, (this.commandCounts.get(label) ?? 0) + 1);
+  }
+
+  /** 엔진이 모르는 명령 이름을 표본으로 남긴다 — 정제(대문자·영숫자와 `-_.`만)·절단하고 개수를 묶는다. */
+  unknownCommand(raw: string): void {
+    if (this.unknownSamples.size >= MAX_UNKNOWN_SAMPLES) return;
+    const clean = raw.toUpperCase().replace(/[^A-Z0-9_.-]/g, "?").slice(0, MAX_UNKNOWN_NAME_CHARS);
+    if (clean.length > 0) this.unknownSamples.add(clean);
+  }
+
+  /** 누계 필드 — 종료 요약과 진행 요약이 같은 모양을 쓰게 한 곳에서 만든다. */
+  private totals(): Omit<SessionSummary, "reason"> {
+    const s = this.opts.socket;
+    return {
+      surface: this.opts.surface,
+      ip: normalizeIp(s.remoteAddress),
+      ...(this.user !== undefined ? { user: this.user } : {}),
+      ...(this.accountId !== undefined ? { accountId: this.accountId } : {}),
+      requests: this.requests,
+      ...(this.opts.countCommands
+        ? { commands: this.commands, commandCounts: Object.fromEntries([...this.commandCounts].sort(([a], [b]) => a.localeCompare(b))) }
+        : {}),
+      ...(this.unknownSamples.size > 0 ? { unknownCommands: [...this.unknownSamples] } : {}),
+      authFailures: this.authFailures,
+      bytesIn: s.bytesRead,
+      bytesOut: s.bytesWritten,
+      durationMs: this.now() - this.startedAt,
+    };
+  }
+
+  private reportProgress(intervalMs: number): void {
+    if (this.reported) return;
+    const t = this.totals();
+    const commandsDelta = this.commands - this.lastProgress.commands;
+    const bytesInDelta = t.bytesIn - this.lastProgress.bytesIn;
+    const bytesOutDelta = t.bytesOut - this.lastProgress.bytesOut;
+    this.lastProgress = { commands: this.commands, bytesIn: t.bytesIn, bytesOut: t.bytesOut };
+    // 조용한 세션(정상 IDLE)은 줄을 남기지 않는다 — 수천 개 IDLE 세션이 주기마다 줄을 쏟지 않게.
+    if (commandsDelta === 0 && bytesInDelta === 0 && bytesOutDelta === 0) return;
+    this.opts.reporter.progress?.({
+      ...t,
+      intervalMs,
+      ...(this.opts.countCommands ? { commandsDelta } : {}),
+      bytesInDelta,
+      bytesOutDelta,
+    });
   }
 
   /** 인증 시도(성공·실패 무관) — 사용자명을 요약에 남기기 위해. */
@@ -198,18 +311,10 @@ export class SessionMeter {
       clearTimeout(this.grace);
       this.grace = null;
     }
-    const s = this.opts.socket;
-    this.opts.reporter.report({
-      surface: this.opts.surface,
-      ip: normalizeIp(s.remoteAddress),
-      ...(this.user !== undefined ? { user: this.user } : {}),
-      ...(this.accountId !== undefined ? { accountId: this.accountId } : {}),
-      requests: this.requests,
-      authFailures: this.authFailures,
-      bytesIn: s.bytesRead,
-      bytesOut: s.bytesWritten,
-      durationMs: this.now() - this.startedAt,
-      reason: this.reason,
-    });
+    if (this.progressTimer) {
+      clearInterval(this.progressTimer);
+      this.progressTimer = null;
+    }
+    this.opts.reporter.report({ ...this.totals(), reason: this.reason });
   }
 }

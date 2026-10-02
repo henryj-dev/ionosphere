@@ -52,6 +52,12 @@ export interface IonosphereMetrics {
   sessions: Counter;
   /** IP 프리픽스별 동시 연결 상한에 걸려 거절된 연결 수. 로그는 포화 구간마다 한 줄뿐이라 규모는 여기서 본다. */
   peerLimitRejections: Counter;
+  /**
+   * IMAP 명령 완료 수 — 라벨 command(엔진이 아는 닫힌 집합 + unknown·unparsed), result=ok|no|bad.
+   * 감사 이벤트(audit_events_total)는 백엔드 요청만 세서 IDLE·NOOP·BAD 루프가 보이지 않았다
+   * (2026-10-01). `result="bad"`와 command가 함께 있어야 "어떤 명령이 BAD로 도는가"에 답한다.
+   */
+  imapCommands: Counter;
 }
 
 export function createIonosphereMetrics(registry: Registry = new Registry()): IonosphereMetrics {
@@ -70,5 +76,6 @@ export function createIonosphereMetrics(registry: Registry = new Registry()): Io
     auditShipDropped: registry.counter("ionosphere_audit_ship_dropped_total", "이관 실패 상태로 보존기간을 넘겨 버린 감사 로그 파일 수"),
     sessions: registry.counter("ionosphere_sessions_total", "닫힌 연결 세션 수(surface, reason=closed|idle|preauth)"),
     peerLimitRejections: registry.counter("ionosphere_peer_limit_rejections_total", "IP 프리픽스 동시 연결 상한으로 거절된 연결 수"),
+    imapCommands: registry.counter("ionosphere_imap_commands_total", "IMAP 명령 완료 수(command, result=ok|no|bad)"),
   };
 }

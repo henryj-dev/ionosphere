@@ -86,11 +86,13 @@ export { applyLegacyEnvAliases, LegacyEnvConflictError } from "./env-legacy.ts";
 export { PeerConnectionLimiter, DEFAULT_MAX_CONNECTIONS_PER_PEER, type PeerLimitOptions } from "./peer-limit.ts";
 export {
   SESSION_CLOSE_REASON,
+  SESSION_PROGRESS_INTERVAL_MS,
   SessionMeter,
   createLogSessionReporter,
   noopSessionReporter,
   type SessionCloseReason,
   type SessionMeterOptions,
+  type SessionProgress,
   type SessionReporter,
   type SessionSummary,
 } from "./session-meter.ts";
