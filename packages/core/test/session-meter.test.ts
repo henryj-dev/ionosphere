@@ -96,3 +96,128 @@ describe("SessionMeter", () => {
     expect(s.accountId).toBe("acct-1");
   });
 });
+
+describe("SessionMeter — 진행 중 요약·명령 분포", () => {
+  /**
+   * ★살아 있는 세션이 주기마다 증분을 보고하는가(2026-10-01). 종료 요약만 있으면 며칠 열린 채
+   * 초당 수십 번 왕복하는 세션은 끝날 때까지 journal에 없었다.
+   */
+  test("★활동이 있는 주기만 증분을 보고하고, 종료 요약에는 명령 분포가 들어간다", async () => {
+    const progress: import("@ionosphere/core").SessionProgress[] = [];
+    const summaries: SessionSummary[] = [];
+    let meter: SessionMeter | null = null;
+    let serverSock: Socket | null = null;
+    server = createServer((sock) => {
+      serverSock = sock;
+      meter = new SessionMeter({
+        surface: "imap",
+        socket: sock,
+        reporter: { report: (s) => void summaries.push(s), progress: (p) => void progress.push(p) },
+        preauthDeadlineMs: 0,
+        onPreauthDeadline: () => {},
+        countCommands: true,
+        progressIntervalMs: 60,
+        progressMinCommands: 1,
+        progressMinBytes: 1,
+      });
+      sock.on("data", () => {});
+    });
+    await new Promise<void>((r) => server!.listen(0, "127.0.0.1", () => r()));
+    const addr = server.address();
+    const c = connect(typeof addr === "object" && addr ? addr.port : 0, "127.0.0.1");
+    c.on("error", () => {});
+    clients.push(c);
+    await waitFor(() => meter ?? undefined);
+
+    meter!.command("NOOP");
+    meter!.command("NOOP");
+    meter!.command("IDLE");
+    c.write("x".repeat(10));
+    await waitFor(() => progress[0]);
+    expect(progress[0]!.commandsDelta).toBe(3);
+    expect(progress[0]!.bytesInDelta).toBe(10);
+    expect(progress[0]!.commandCounts).toEqual({ IDLE: 1, NOOP: 2 });
+
+    // 조용한 주기 두어 번 — 문턱 아래라 줄이 늘지 않아야 한다(정상 세션이 줄을 쏟지 않게).
+    await new Promise((r) => setTimeout(r, 200));
+    expect(progress.length).toBe(1);
+
+    meter!.command("NOOP");
+    await waitFor(() => progress[1]);
+    expect(progress[1]!.commandsDelta).toBe(1);
+    expect(progress[1]!.commands).toBe(4);
+
+    serverSock!.destroy();
+    const s = await waitFor(() => summaries[0]);
+    expect(s.commands).toBe(4);
+    expect(s.commandCounts).toEqual({ IDLE: 1, NOOP: 3 });
+    // 진행 줄은 닫힌 세션이 아니다 — 종료 요약은 정확히 한 번.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(summaries.length).toBe(1);
+  });
+
+  test("모르는 명령 표본은 정제·절단하고 세션당 5개로 묶는다", async () => {
+    const summaries: SessionSummary[] = [];
+    let meter: SessionMeter | null = null;
+    let serverSock: Socket | null = null;
+    server = createServer((sock) => {
+      serverSock = sock;
+      meter = new SessionMeter({
+        surface: "imap",
+        socket: sock,
+        reporter: { report: (s) => void summaries.push(s) },
+        preauthDeadlineMs: 0,
+        onPreauthDeadline: () => {},
+        countCommands: true,
+      });
+    });
+    await new Promise<void>((r) => server!.listen(0, "127.0.0.1", () => r()));
+    const addr = server.address();
+    const c = connect(typeof addr === "object" && addr ? addr.port : 0, "127.0.0.1");
+    c.on("error", () => {});
+    clients.push(c);
+    await waitFor(() => meter ?? undefined);
+    meter!.unknownCommand("xlist\r\n<script>");
+    meter!.unknownCommand("A".repeat(100));
+    for (let i = 0; i < 10; i++) meter!.unknownCommand(`CMD${i}`);
+    serverSock!.destroy();
+    const s = await waitFor(() => summaries[0]);
+    expect(s.unknownCommands?.length).toBe(5);
+    // 개행·꺾쇠 같은 문자는 `?`로 — 로그 한 줄을 깨거나 주입하지 못하게.
+    expect(s.unknownCommands?.[0]).toBe("XLIST???SCRIPT?");
+    expect(s.unknownCommands?.[1]!.length).toBe(32);
+  });
+
+  /**
+   * ★읽기 갈래만으로도 진행 줄이 남는가 — 2026-10-01 루프 소켓 하나는 10분에 0.93 MiB(바이트 문턱
+   * 미달)였고 작은 세그먼트가 명령인지조차 불분명했다(stardust 실측). 횟수만 큰 모양이 사각이었다.
+   */
+  test("★명령·바이트가 작아도 읽기 횟수가 문턱을 넘으면 보고한다", async () => {
+    const progress: import("@ionosphere/core").SessionProgress[] = [];
+    let meter: SessionMeter | null = null;
+    server = createServer((sock) => {
+      meter = new SessionMeter({
+        surface: "imap",
+        socket: sock,
+        reporter: { report: () => {}, progress: (p) => void progress.push(p) },
+        preauthDeadlineMs: 0,
+        onPreauthDeadline: () => {},
+        countCommands: true,
+        progressIntervalMs: 60,
+        progressMinCommands: 1000,
+        progressMinBytes: 1024 * 1024,
+        progressMinReads: 5,
+      });
+    });
+    await new Promise<void>((r) => server!.listen(0, "127.0.0.1", () => r()));
+    const addr = server.address();
+    const c = connect(typeof addr === "object" && addr ? addr.port : 0, "127.0.0.1");
+    c.on("error", () => {});
+    clients.push(c);
+    await waitFor(() => meter ?? undefined);
+    for (let i = 0; i < 6; i++) meter!.read();
+    const p = await waitFor(() => progress[0]);
+    expect(p.readsDelta).toBe(6);
+    expect(p.commandsDelta).toBe(0);
+  });
+});

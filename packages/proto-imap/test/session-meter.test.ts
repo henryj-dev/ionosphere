@@ -124,3 +124,136 @@ describe("IMAP 세션 종료 요약", () => {
     expect(summaries.length).toBe(1);
   });
 });
+
+describe("IMAP 명령 계측", () => {
+  /**
+   * ★백엔드를 부르지 않는 명령도 세어지는가(2026-10-01). 감사 이벤트는 백엔드 요청에만 남아,
+   * 초당 수십 번 도는 NOOP·IDLE·BAD 루프가 지표에 흔적을 남기지 않았다.
+   * result=bad가 command와 함께 나와야 "어떤 명령이 BAD로 도는가"에 답한다.
+   */
+  test("★명령마다 결과가 보고되고, 종료 요약에 분포·모르는 명령 표본이 남는다", async () => {
+    const results: string[] = [];
+    const summaries: SessionSummary[] = [];
+    const server = new ImapServer({
+      hostname: "imap.test",
+      backend,
+      allowInsecureAuth: true,
+      sessions: { report: (s) => void summaries.push(s) },
+      onCommandResult: (command, result) => void results.push(`${command}:${result}`),
+    });
+    servers.push(server);
+    const port = await server.listen(0, "127.0.0.1");
+    const c = client(port);
+    await c.waitFor("* OK");
+    c.send("a1 NOOP\r\n");
+    await c.waitFor("a1 OK");
+    c.send("a2 XYZZY\r\n");
+    await c.waitFor("a2 BAD");
+    c.send("a3 LOGIN u@imap.test pw\r\n");
+    await c.waitFor("a3 OK");
+    c.send("a4 NOOP\r\n");
+    await c.waitFor("a4 OK");
+    c.send("\r\n"); // 태그조차 없는 줄 — 파싱 실패
+    await c.waitFor("* BAD");
+    c.send("a5 LOGOUT\r\n");
+    await c.closed;
+
+    expect(results).toEqual(["NOOP:ok", "unknown:bad", "LOGIN:ok", "NOOP:ok", "unparsed:bad", "LOGOUT:ok"]);
+    const s = await waitSummary(summaries);
+    expect(s.commands).toBe(6);
+    expect(s.commandCounts).toEqual({ LOGIN: 1, LOGOUT: 1, NOOP: 2, unknown: 1, unparsed: 1 });
+    expect(s.unknownCommands).toEqual(["XYZZY"]);
+    // 백엔드를 부르지 않은 명령은 requests에 안 들어간다 — 둘의 차이가 곧 이번 사고의 신호였다.
+    expect(s.requests).toBe(0);
+  });
+
+  test("진행 중 세션은 주기마다 한 줄을 남긴다(닫히기 전에 보인다)", async () => {
+    const progress: number[] = [];
+    const server = new ImapServer({
+      hostname: "imap.test",
+      backend,
+      allowInsecureAuth: true,
+      sessions: { report: () => {}, progress: (p) => void progress.push(p.commandsDelta ?? -1) },
+      sessionProgressIntervalMs: 80,
+    });
+    servers.push(server);
+    const port = await server.listen(0, "127.0.0.1");
+    const c = client(port);
+    await c.waitFor("* OK");
+    // 기본 문턱(주기당 명령 30개)을 넘겨야 줄이 남는다 — 정상 세션은 여기 못 미친다.
+    for (let i = 0; i < 40; i++) c.send(`n${i} NOOP\r\n`);
+    await c.waitFor("n39 OK");
+    const until = Date.now() + 2000;
+    while (progress.length === 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 10));
+    expect(progress[0]).toBe(40);
+  });
+
+  /** 결과를 모으는 서버 하나를 띄우고 로그인까지 한 클라이언트를 돌려준다. */
+  async function loggedIn(): Promise<{ results: string[]; summaries: SessionSummary[]; c: ReturnType<typeof client> }> {
+    const results: string[] = [];
+    const summaries: SessionSummary[] = [];
+    const server = new ImapServer({
+      hostname: "imap.test",
+      backend,
+      allowInsecureAuth: true,
+      sessions: { report: (s) => void summaries.push(s) },
+      onCommandResult: (command, result) => void results.push(`${command}:${result}`),
+    });
+    servers.push(server);
+    const c = client(await server.listen(0, "127.0.0.1"));
+    await c.waitFor("* OK");
+    c.send("a0 LOGIN u@imap.test pw\r\n");
+    await c.waitFor("a0 OK");
+    results.length = 0;
+    return { results, summaries, c };
+  }
+
+  /**
+   * ★같은 태그를 재사용한 파이프라인(RFC는 SHOULD NOT일 뿐, 실제로 나온다). 태그당 하나만 들던
+   * 첫 판은 앞 명령의 응답이 나가기 전에 뒤 명령이 덮어써 LIST 결과가 NOOP으로 집계됐다(검수 재현).
+   */
+  test("★같은 태그를 재사용해도 결과가 명령 순서대로 붙는다", async () => {
+    const { results, c } = await loggedIn();
+    c.send('t LIST "" "*"\r\nt NOOP\r\n');
+    const until = Date.now() + 2000;
+    while (results.length < 2 && Date.now() < until) await new Promise((r) => setTimeout(r, 10));
+    expect(results).toEqual(["LIST:no", "NOOP:ok"]);
+  });
+
+  test("★대량 파이프라인에서도 결과가 빠지지 않는다(300개)", async () => {
+    const { results, c } = await loggedIn();
+    c.send(Array.from({ length: 300 }, (_, i) => `n${i} NOOP\r\n`).join(""));
+    await c.waitFor("n299 OK");
+    expect(results.length).toBe(300);
+  });
+
+  /**
+   * 태그 `*`·`%`는 RFC상 불가지만 **거부하지 않고 센다**. 거부는 새 BAD 경로라 "BAD를 받으면 재시도하는
+   * 루프" 가설과 같은 방향으로 작동할 수 있어, 쓰는 클라이언트가 있는지 먼저 본다(stardust 지적).
+   */
+  test("★`*`·`%` 태그는 거부하지 않고 wildcardTags로 센다", async () => {
+    const { results, summaries, c } = await loggedIn();
+    c.send("* NOOP\r\n");
+    await c.waitFor("* OK NOOP completed");
+    c.send("%1 NOOP\r\n");
+    await c.waitFor("%1 OK");
+    c.send("z LOGOUT\r\n");
+    await c.closed;
+    // `*` 태그의 완료는 untagged 줄과 구별되지 않아 결과를 추적하지 않는다. `%`는 추적한다.
+    expect(results).toEqual(["NOOP:ok", "LOGOUT:ok"]);
+    const s = await waitSummary(summaries);
+    expect(s.wildcardTags).toBe(2);
+    expect(s.commandCounts?.NOOP).toBe(2);
+    expect(s.reads).toBeGreaterThan(0);
+  });
+
+  test("모르는 UID 하위 명령은 표본에 하위 이름까지 남는다", async () => {
+    const { summaries, c } = await loggedIn();
+    c.send("u1 UID BOGUS 1\r\n");
+    await c.waitFor("u1 BAD");
+    c.send("z LOGOUT\r\n");
+    await c.closed;
+    const s = await waitSummary(summaries);
+    expect(s.unknownCommands).toEqual(["UID?BOGUS"]);
+  });
+});

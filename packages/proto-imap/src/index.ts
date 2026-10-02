@@ -21,7 +21,8 @@ export {
   type SectionSpec,
 } from "./fetch-format.ts";
 export { parseFetchItems, type FetchItem } from "./fetch-items.ts";
-export { ImapServer, type ImapBackend, type ImapServerOptions } from "./server.ts";
+export { IMAP_COMMAND_LABELS, imapCommandLabel, type ImapCommandLabel } from "./command-label.ts";
+export { ImapServer, type ImapBackend, type ImapCommandResult, type ImapServerOptions } from "./server.ts";
 export {
   HIERARCHY_DELIMITER,
   matchesListPattern,

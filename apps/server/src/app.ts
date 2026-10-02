@@ -546,6 +546,10 @@ export class IonosphereApp {
    * 메트릭 훅은 `this.metrics`를 **호출 시점에** 읽는다(계측은 start()에서 생긴다).
    */
   private readonly sessions: SessionReporter;
+  /** IMAP 명령 결과 → 메트릭. 143·993 두 리스너가 같은 것을 쓴다(지연 참조 — 계측은 start()에서 생긴다). */
+  private readonly imapCommandResult = (command: string, result: string): void => {
+    this.metrics?.imapCommands.inc({ command, result });
+  };
   db!: DbDriver;
   store!: Store;
   blobs!: BlobStore;
@@ -1155,6 +1159,7 @@ export class IonosphereApp {
         authThrottle: this.authThrottle,
         peerLimit: this.peerLimit,
         sessions: this.sessions,
+        onCommandResult: this.imapCommandResult,
         audit: this.audit,
         hostname: this.opts.hostname,
         backend: imapBackend,
@@ -1177,6 +1182,7 @@ export class IonosphereApp {
           authThrottle: this.authThrottle,
           peerLimit: this.peerLimit,
           sessions: this.sessions,
+          onCommandResult: this.imapCommandResult,
           audit: this.audit,
           hostname: this.opts.hostname,
           backend: imapBackend,

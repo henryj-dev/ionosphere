@@ -14,6 +14,7 @@ import {
   MAX_LISTENER_CONNECTIONS,
   PREAUTH_DEADLINE_MS,
   PeerConnectionLimiter,
+  SESSION_PROGRESS_INTERVAL_MS,
   SessionMeter,
   noopAuditSink,
   noopSessionReporter,
@@ -25,7 +26,11 @@ import {
   type SessionReporter,
 } from "@ionosphere/core";
 import { ImapEngine, type ImapAction, type ImapBackendRequest, type ImapBackendResponse } from "./engine.ts";
+import type { ImapCommandLabel } from "./command-label.ts";
 import * as zlib from "node:zlib";
+
+/** 명령 결과 — 태그 달린 응답의 상태(RFC 9051 §7.1). */
+export type ImapCommandResult = "ok" | "no" | "bad";
 
 export interface ImapBackend {
   /**
@@ -94,7 +99,27 @@ export interface ImapServerOptions {
   sessions?: SessionReporter;
   /** 인증 전 마감(ms) — 테스트용 재정의. 기본 `PREAUTH_DEADLINE_MS`. */
   preauthDeadlineMs?: number;
+  /**
+   * 명령이 끝날 때마다(태그 달린 OK/NO/BAD) 알린다 — 메트릭 배선용(`ionosphere_imap_commands_total`).
+   * `unparsed`는 파싱조차 못 해 태그 없이 `* BAD`로 답한 줄이다.
+   * ★감사 이벤트는 백엔드 요청에만 남아 IDLE·NOOP·BAD 루프가 지표에 보이지 않았다(command-label.ts).
+   */
+  onCommandResult?: (command: ImapCommandLabel | "unparsed", result: ImapCommandResult) => void;
+  /** 진행 중 세션 요약 주기(ms) — 테스트용 재정의. 기본 `SESSION_PROGRESS_INTERVAL_MS`, 0이면 끈다. */
+  sessionProgressIntervalMs?: number;
 }
+
+/**
+ * 결과를 기다리는 명령 수 상한 — 메모리 방어용 안전판이다.
+ *
+ * 엔진은 한 청크의 줄을 동기로 모두 처리하므로 대량 파이프라인이면 결과가 나가기 전에 명령이
+ * 한꺼번에 쌓인다. 처음 256으로 잡았더니 NOOP 300개를 한 번에 보내면 44개 결과가 빠졌다(검수 재현).
+ * 실제 상한은 입력 청크 크기·`MAX_QUEUED_LINE_BYTES`가 먼저 묶으므로 넉넉히 잡고, 넘치면 **가장
+ * 오래된** 대기 항목을 밀어낸다(새 명령을 버리면 지금 도는 루프가 안 보인다).
+ */
+const MAX_PENDING_COMMANDS = 4096;
+/** 태그 달린 완료 응답 — `tag OK|NO|BAD ...`. */
+const TAGGED_RESULT = /^(\S+) (OK|NO|BAD)(?: |$)/;
 
 /** RFC 9051 §5.4 — 최소 30분 유휴 타임아웃. */
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
@@ -275,7 +300,46 @@ export class ImapServer {
     }
     rawSocket.once("close", () => this.peerLimit.release(rawSocket.remoteAddress));
 
+    /**
+     * 결과를 아직 못 본 명령 — 태그별 **FIFO**. 같은 태그를 다시 쓰는 클라이언트가 있다(RFC는
+     * SHOULD NOT일 뿐). 태그당 하나만 들면, 앞 명령의 응답이 나가기 전에 큐에 있던 같은 태그 명령이
+     * 들어와 덮어써 결과가 엉뚱한 명령에 붙었다(검수 재현: LIST 결과가 NOOP으로 집계).
+     */
+    const pendingTags = new Map<string, ImapCommandLabel[]>();
+    let pendingCount = 0;
+    const onCommandResult = this.opts.onCommandResult;
+    const rememberPending = (tag: string, label: ImapCommandLabel): void => {
+      if (pendingCount >= MAX_PENDING_COMMANDS) {
+        // 가장 먼저 들어온 **태그**의 첫 항목을 민다(Map은 태그 삽입 순서를 지킨다). 전체에서 가장 오래된
+        // 명령과 다를 수 있어, 상한을 넘긴 채 태그를 재사용하면 결과가 어긋날 수 있다 — 정상 트래픽은
+        // 4096에 닿지 않으므로 정확한 전역 순서를 위해 구조를 키우지 않았다.
+        const oldest = pendingTags.keys().next();
+        if (!oldest.done) {
+          const q = pendingTags.get(oldest.value)!;
+          q.shift();
+          pendingCount--;
+          if (q.length === 0) pendingTags.delete(oldest.value);
+        }
+      }
+      const q = pendingTags.get(tag);
+      if (q) q.push(label);
+      else pendingTags.set(tag, [label]);
+      pendingCount++;
+    };
+
     const engine = new ImapEngine({
+      // 명령마다 센다 — meter는 아래에서 만들지만 이 콜백은 데이터가 들어온 뒤에만 불린다.
+      onCommand: (tag, label, rawName) => {
+        meter.command(label);
+        if (label === "unknown") meter.unknownCommand(rawName);
+        /**
+         * 태그에 `*`·`%`는 RFC상 올 수 없지만 **거부하지 않고 센다**(SessionSummary.wildcardTags 주석).
+         * `*` 태그의 완료 응답은 untagged 줄(`* OK ...`)과 구별되지 않으므로 결과를 추적하지 않는다 —
+         * 그 명령이 BAD를 받으면 `* BAD`가 unparsed로 한 번 더 세어지는 한계가 있다.
+         */
+        if (/[*%]/.test(tag)) meter.wildcardTag();
+        if (!tag.includes("*")) rememberPending(tag, label);
+      },
       hostname: this.opts.hostname,
       secure,
       allowInsecureAuth: this.opts.allowInsecureAuth ?? false,
@@ -314,10 +378,35 @@ export class ImapServer {
     };
     const writeText = (text: string): void => write(new TextEncoder().encode(`${text}\r\n`));
 
+    /** 나가는 줄에서 명령 완료를 읽는다 — 결과(ok/no/bad)는 태그 달린 응답에만 있다. */
+    const observeReply = (text: string): void => {
+      // untagged·continuation 줄은 결과가 아니다('+'는 파서가 태그로 받지 않는다. '*' 태그는 위 한계 참조).
+      const first = text.charCodeAt(0);
+      if (first === 42 /* * */) {
+        // `* BAD`는 파싱 전에 거절된 줄 — 파싱 실패 또는 리더 한도 초과(줄·리터럴이 너무 큼).
+        if (text.startsWith("* BAD ")) {
+          meter.command("unparsed");
+          onCommandResult?.("unparsed", "bad");
+        }
+        return;
+      }
+      if (first === 43 /* + */) return;
+      const m = TAGGED_RESULT.exec(text);
+      if (!m) return;
+      const q = pendingTags.get(m[1]!);
+      const label = q?.shift();
+      if (label === undefined) return;
+      pendingCount--;
+      if (q!.length === 0) pendingTags.delete(m[1]!);
+      onCommandResult?.(label, m[2]!.toLowerCase() as ImapCommandResult);
+    };
+
     const meter = new SessionMeter({
       surface: AUDIT_SURFACE.imap,
       socket: rawSocket,
       reporter: this.opts.sessions ?? noopSessionReporter,
+      countCommands: true,
+      progressIntervalMs: this.opts.sessionProgressIntervalMs ?? SESSION_PROGRESS_INTERVAL_MS,
       preauthDeadlineMs: this.opts.preauthDeadlineMs ?? PREAUTH_DEADLINE_MS,
       onPreauthDeadline: () => {
         writeText("* BYE login timeout");
@@ -329,6 +418,7 @@ export class ImapServer {
       for (const action of actions) {
         switch (action.kind) {
           case "reply":
+            observeReply(action.text);
             writeText(action.text);
             break;
           case "replyBinary":
@@ -582,6 +672,7 @@ export class ImapServer {
 
     const attachData = (s: net.Socket | tls.TLSSocket): void => {
       s.on("data", (chunk: Buffer) => {
+        meter.read();
         // 압축이 켜졌으면 **푼 뒤에** 엔진으로 간다.
         if (inflate !== null) inflate.write(chunk);
         else safeRun(engine.feed(chunk));
