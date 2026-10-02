@@ -227,16 +227,24 @@ describe("IMAP 명령 계측", () => {
     expect(results.length).toBe(300);
   });
 
-  test("★태그 `*`는 파싱 단계에서 거부돼 unparsed 한 번으로만 센다", async () => {
+  /**
+   * 태그 `*`·`%`는 RFC상 불가지만 **거부하지 않고 센다**. 거부는 새 BAD 경로라 "BAD를 받으면 재시도하는
+   * 루프" 가설과 같은 방향으로 작동할 수 있어, 쓰는 클라이언트가 있는지 먼저 본다(stardust 지적).
+   */
+  test("★`*`·`%` 태그는 거부하지 않고 wildcardTags로 센다", async () => {
     const { results, summaries, c } = await loggedIn();
-    c.send("* XYZZY\r\n");
-    await c.waitFor("* BAD invalid tag");
+    c.send("* NOOP\r\n");
+    await c.waitFor("* OK NOOP completed");
+    c.send("%1 NOOP\r\n");
+    await c.waitFor("%1 OK");
     c.send("z LOGOUT\r\n");
     await c.closed;
-    expect(results).toEqual(["unparsed:bad", "LOGOUT:ok"]);
+    // `*` 태그의 완료는 untagged 줄과 구별되지 않아 결과를 추적하지 않는다. `%`는 추적한다.
+    expect(results).toEqual(["NOOP:ok", "LOGOUT:ok"]);
     const s = await waitSummary(summaries);
-    expect(s.commandCounts?.unparsed).toBe(1);
-    expect(s.commandCounts?.unknown).toBeUndefined();
+    expect(s.wildcardTags).toBe(2);
+    expect(s.commandCounts?.NOOP).toBe(2);
+    expect(s.reads).toBeGreaterThan(0);
   });
 
   test("모르는 UID 하위 명령은 표본에 하위 이름까지 남는다", async () => {

@@ -89,6 +89,7 @@ export {
   SESSION_PROGRESS_INTERVAL_MS,
   SESSION_PROGRESS_MIN_BYTES,
   SESSION_PROGRESS_MIN_COMMANDS,
+  SESSION_PROGRESS_MIN_READS,
   SessionMeter,
   createLogSessionReporter,
   noopSessionReporter,

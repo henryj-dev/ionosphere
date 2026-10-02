@@ -187,4 +187,37 @@ describe("SessionMeter — 진행 중 요약·명령 분포", () => {
     expect(s.unknownCommands?.[0]).toBe("XLIST???SCRIPT?");
     expect(s.unknownCommands?.[1]!.length).toBe(32);
   });
+
+  /**
+   * ★읽기 갈래만으로도 진행 줄이 남는가 — 2026-10-01 루프 소켓 하나는 10분에 0.93 MiB(바이트 문턱
+   * 미달)였고 작은 세그먼트가 명령인지조차 불분명했다(stardust 실측). 횟수만 큰 모양이 사각이었다.
+   */
+  test("★명령·바이트가 작아도 읽기 횟수가 문턱을 넘으면 보고한다", async () => {
+    const progress: import("@ionosphere/core").SessionProgress[] = [];
+    let meter: SessionMeter | null = null;
+    server = createServer((sock) => {
+      meter = new SessionMeter({
+        surface: "imap",
+        socket: sock,
+        reporter: { report: () => {}, progress: (p) => void progress.push(p) },
+        preauthDeadlineMs: 0,
+        onPreauthDeadline: () => {},
+        countCommands: true,
+        progressIntervalMs: 60,
+        progressMinCommands: 1000,
+        progressMinBytes: 1024 * 1024,
+        progressMinReads: 5,
+      });
+    });
+    await new Promise<void>((r) => server!.listen(0, "127.0.0.1", () => r()));
+    const addr = server.address();
+    const c = connect(typeof addr === "object" && addr ? addr.port : 0, "127.0.0.1");
+    c.on("error", () => {});
+    clients.push(c);
+    await waitFor(() => meter ?? undefined);
+    for (let i = 0; i < 6; i++) meter!.read();
+    const p = await waitFor(() => progress[0]);
+    expect(p.readsDelta).toBe(6);
+    expect(p.commandsDelta).toBe(0);
+  });
 });

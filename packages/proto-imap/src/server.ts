@@ -332,7 +332,13 @@ export class ImapServer {
       onCommand: (tag, label, rawName) => {
         meter.command(label);
         if (label === "unknown") meter.unknownCommand(rawName);
-        rememberPending(tag, label);
+        /**
+         * 태그에 `*`·`%`는 RFC상 올 수 없지만 **거부하지 않고 센다**(SessionSummary.wildcardTags 주석).
+         * `*` 태그의 완료 응답은 untagged 줄(`* OK ...`)과 구별되지 않으므로 결과를 추적하지 않는다 —
+         * 그 명령이 BAD를 받으면 `* BAD`가 unparsed로 한 번 더 세어지는 한계가 있다.
+         */
+        if (/[*%]/.test(tag)) meter.wildcardTag();
+        if (!tag.includes("*")) rememberPending(tag, label);
       },
       hostname: this.opts.hostname,
       secure,
@@ -374,7 +380,7 @@ export class ImapServer {
 
     /** 나가는 줄에서 명령 완료를 읽는다 — 결과(ok/no/bad)는 태그 달린 응답에만 있다. */
     const observeReply = (text: string): void => {
-      // untagged·continuation 줄은 결과가 아니다. 태그에 '*'·'+'는 파서가 거부하므로 헷갈리지 않는다.
+      // untagged·continuation 줄은 결과가 아니다('+'는 파서가 태그로 받지 않는다. '*' 태그는 위 한계 참조).
       const first = text.charCodeAt(0);
       if (first === 42 /* * */) {
         // `* BAD`는 파싱 전에 거절된 줄 — 파싱 실패 또는 리더 한도 초과(줄·리터럴이 너무 큼).
@@ -666,6 +672,7 @@ export class ImapServer {
 
     const attachData = (s: net.Socket | tls.TLSSocket): void => {
       s.on("data", (chunk: Buffer) => {
+        meter.read();
         // 압축이 켜졌으면 **푼 뒤에** 엔진으로 간다.
         if (inflate !== null) inflate.write(chunk);
         else safeRun(engine.feed(chunk));

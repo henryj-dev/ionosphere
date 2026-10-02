@@ -53,6 +53,17 @@ export interface SessionSummary {
    * 메트릭 라벨로 쓰면 상대가 아무 문자열로 라벨을 무한히 늘린다. "어떤 명령이 BAD로 도는가"의 답.
    */
   unknownCommands?: string[];
+  /**
+   * 소켓에서 데이터를 읽은 횟수(명령을 세는 표면에서만). 2026-10-01 루프 소켓은 바이트도 명령도
+   * 작은데 **왕복 횟수만** 컸다 — 명령으로 세어지지 않는 작은 쓰기까지 이 값이 잡는다.
+   */
+  reads?: number;
+  /**
+   * 태그에 `*`·`%`를 쓴 명령 수(RFC 9051상 태그에 올 수 없는 문자). 지금은 **거부하지 않고 센다** —
+   * 거부는 새 BAD 경로라 "BAD를 받으면 재시도하는 루프" 가설과 같은 방향으로 작동할 수 있다.
+   * 실제로 쓰는 클라이언트가 있는지 이 값으로 본 뒤 정한다(관측기와 관측 대상을 한 배포에 섞지 않는다).
+   */
+  wildcardTags?: number;
   authFailures: number;
   /**
    * 연결 시점 소켓이 읽고 쓴 바이트 — **리스너마다 단위가 다르다**:
@@ -76,8 +87,10 @@ export interface SessionSummary {
  */
 export interface SessionProgress extends Omit<SessionSummary, "reason"> {
   intervalMs: number;
-  /** 이번 주기에 받은 명령 수(명령을 세는 표면에서만). */
+  /** 이번 주기에 받은 명령 수(명령을 세는 표면에서만). IDLE은 들어갈 때 하나, DONE은 명령이 아니다. */
   commandsDelta?: number;
+  /** 이번 주기의 읽기 횟수(명령을 세는 표면에서만). */
+  readsDelta?: number;
   bytesInDelta: number;
   bytesOutDelta: number;
 }
@@ -103,7 +116,14 @@ export const SESSION_PROGRESS_INTERVAL_MS = 10 * 60 * 1000;
  * (주기당 수만 명령)와 주기마다 MB 단위로 옮기는 세션이라, 두 문턱 중 하나만 넘어도 남긴다.
  */
 export const SESSION_PROGRESS_MIN_COMMANDS = 30;
+/** 바이트 갈래는 **in+out 합**으로 본다. */
 export const SESSION_PROGRESS_MIN_BYTES = 1024 * 1024;
+/**
+ * 읽기 횟수 갈래 — 주기당 600회(평균 초당 1회). 바이트·명령 갈래만으로는 2026-10-01 루프 소켓
+ * 하나(10분에 0.93 MiB, 명령인지 불분명한 11바이트 세그먼트를 초당 수십 회)를 놓쳤다(stardust 실측).
+ * 정상 IDLE 세션의 읽기는 주기당 몇 회다.
+ */
+export const SESSION_PROGRESS_MIN_READS = 600;
 
 /** 세션당 남길 모르는 명령 이름 표본 수와 이름 길이 — 로그 한 줄이 상대 입력으로 부풀지 않게. */
 const MAX_UNKNOWN_SAMPLES = 5;
@@ -159,6 +179,7 @@ export interface SessionMeterOptions {
   /** 진행 줄 문턱 — 테스트용 재정의. 기본 `SESSION_PROGRESS_MIN_COMMANDS`·`SESSION_PROGRESS_MIN_BYTES`. */
   progressMinCommands?: number;
   progressMinBytes?: number;
+  progressMinReads?: number;
 }
 
 export class SessionMeter {
@@ -177,9 +198,11 @@ export class SessionMeter {
   private commands = 0;
   private readonly commandCounts = new Map<string, number>();
   private readonly unknownSamples = new Set<string>();
+  private reads = 0;
+  private wildcardTags = 0;
   private progressTimer: ReturnType<typeof setInterval> | null = null;
   /** 지난 진행 요약 시점의 누계 — 증분 계산용. */
-  private lastProgress = { commands: 0, bytesIn: 0, bytesOut: 0 };
+  private lastProgress = { commands: 0, reads: 0, bytesIn: 0, bytesOut: 0 };
 
   constructor(opts: SessionMeterOptions) {
     this.opts = opts;
@@ -214,6 +237,16 @@ export class SessionMeter {
     this.commandCounts.set(label, (this.commandCounts.get(label) ?? 0) + 1);
   }
 
+  /** 소켓에서 데이터를 한 번 읽었다(명령 경계와 무관 — 작은 왕복 횟수를 잡는다). */
+  read(): void {
+    this.reads++;
+  }
+
+  /** 태그에 `*`·`%`가 든 명령을 받았다(RFC 위반이지만 거부하지 않고 센다 — 필드 주석 참조). */
+  wildcardTag(): void {
+    this.wildcardTags++;
+  }
+
   /** 엔진이 모르는 명령 이름을 표본으로 남긴다 — 정제(대문자·영숫자와 `-_.`만)·절단하고 개수를 묶는다. */
   unknownCommand(raw: string): void {
     if (this.unknownSamples.size >= MAX_UNKNOWN_SAMPLES) return;
@@ -234,6 +267,8 @@ export class SessionMeter {
         ? { commands: this.commands, commandCounts: Object.fromEntries([...this.commandCounts].sort(([a], [b]) => a.localeCompare(b))) }
         : {}),
       ...(this.unknownSamples.size > 0 ? { unknownCommands: [...this.unknownSamples] } : {}),
+      ...(this.opts.countCommands ? { reads: this.reads } : {}),
+      ...(this.wildcardTags > 0 ? { wildcardTags: this.wildcardTags } : {}),
       authFailures: this.authFailures,
       bytesIn: s.bytesRead,
       bytesOut: s.bytesWritten,
@@ -245,19 +280,21 @@ export class SessionMeter {
     if (this.reported) return;
     const t = this.totals();
     const commandsDelta = this.commands - this.lastProgress.commands;
+    const readsDelta = this.reads - this.lastProgress.reads;
     const bytesInDelta = t.bytesIn - this.lastProgress.bytesIn;
     const bytesOutDelta = t.bytesOut - this.lastProgress.bytesOut;
-    this.lastProgress = { commands: this.commands, bytesIn: t.bytesIn, bytesOut: t.bytesOut };
+    this.lastProgress = { commands: this.commands, reads: this.reads, bytesIn: t.bytesIn, bytesOut: t.bytesOut };
     // 문턱 아래 주기는 건너뛴다(위 SESSION_PROGRESS_MIN_* 주석) — 정상 세션이 주기마다 줄을 쏟지 않게.
     const minCommands = this.opts.progressMinCommands ?? SESSION_PROGRESS_MIN_COMMANDS;
     const minBytes = this.opts.progressMinBytes ?? SESSION_PROGRESS_MIN_BYTES;
     const busyCommands = this.opts.countCommands === true && commandsDelta >= minCommands;
     const busyBytes = bytesInDelta + bytesOutDelta >= minBytes;
-    if (!busyCommands && !busyBytes) return;
+    const busyReads = this.opts.countCommands === true && readsDelta >= (this.opts.progressMinReads ?? SESSION_PROGRESS_MIN_READS);
+    if (!busyCommands && !busyBytes && !busyReads) return;
     this.opts.reporter.progress?.({
       ...t,
       intervalMs,
-      ...(this.opts.countCommands ? { commandsDelta } : {}),
+      ...(this.opts.countCommands ? { commandsDelta, readsDelta } : {}),
       bytesInDelta,
       bytesOutDelta,
     });
