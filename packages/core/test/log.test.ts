@@ -103,6 +103,21 @@ describe("logger 마스킹", () => {
     }
   });
 
+  /**
+   * ★값 자체가 비밀인 이름은 **숫자여도** 가린다(보안 리뷰 L-1·L-2). 숫자 예외는 카운터를 위한 것이라,
+   * 나중에 숫자형 OTP·PIN이 들어와도 그 예외로 새지 않게 이름으로 막는다.
+   */
+  test("★password·secret·otp·pin·code 이름은 숫자여도 가린다", () => {
+    const parsed = capture((log) =>
+      log.info("x", { password: 1234, clientSecret: 7, otpToken: 123456, authPin: 4321, authCode: 42, authFailures: 3 }),
+    );
+    for (const k of ["password", "clientSecret", "otpToken", "authPin", "authCode"]) {
+      expect(parsed[k]).toBe("<redacted>");
+    }
+    // 카운터는 여전히 보인다.
+    expect(parsed.authFailures).toBe(3);
+  });
+
   test("대소문자를 가리지 않는다", () => {
     const parsed = capture((log) => log.info("x", { PASSWORD: "a", Api_Token: "b", DKIM_KEY: "c" }));
     expect(parsed.PASSWORD).toBe("<redacted>");

@@ -64,8 +64,22 @@ function isUnmaskedPrimitive(value: unknown): boolean {
   return typeof value === "number" || typeof value === "boolean";
 }
 
+/**
+ * 숫자여도 **계속 가리는** 이름 조각 — 값 자체가 비밀일 수 있는 이름이다(보안 리뷰 L-1·L-2).
+ *
+ * 숫자 예외는 "지금 이 저장소의 자격증명은 전부 문자열이다"라는 사실에 기대므로, 나중에 숫자형
+ * OTP·PIN이 들어오면 그 예외가 그대로 값을 연다. `password: 1234`도 마찬가지다. 그래서 카운터에
+ * 흔한 조각(`auth`·`token`·`key`)만 숫자를 열고, 값이 곧 비밀인 이름은 숫자여도 가린다(fail closed).
+ * 민감 이름 판정(isSensitiveKey)을 먼저 통과한 키에만 적용하므로 `pin`이 `spinner` 같은 일반 필드를
+ * 가리지는 않는다.
+ */
+const ALWAYS_REDACT_PARTS = ["password", "passwd", "secret", "otp", "pin", "code"] as const;
+
 function shouldRedact(key: string, value: unknown): boolean {
-  return isSensitiveKey(key) && !isUnmaskedPrimitive(value);
+  if (!isSensitiveKey(key)) return false;
+  const lower = key.toLowerCase();
+  if (ALWAYS_REDACT_PARTS.some((part) => lower.includes(part))) return true;
+  return !isUnmaskedPrimitive(value);
 }
 
 /**
