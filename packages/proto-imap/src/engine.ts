@@ -377,6 +377,13 @@ const QUOTA_ROOT = "";
  */
 const ENABLABLE = ["CONDSTORE", "QRESYNC", "IMAP4rev2"] as const;
 
+/**
+ * LIST 선택 옵션(RFC 5258 §3.1 기본 셋 + RFC 6154 SPECIAL-USE). 모르는 옵션은 BAD다 — 조용히
+ * 무시하면 클라이언트가 기대한 필터 없이 전체 목록을 받고, 그걸 필터된 결과로 오해한다.
+ * REMOTE는 원격(프록시) 메일함이 없으므로 받기만 한다.
+ */
+const LIST_SELECT_OPTIONS: ReadonlySet<string> = new Set(["SUBSCRIBED", "REMOTE", "RECURSIVEMATCH", "SPECIAL-USE"]);
+
 export class ImapEngine {
   private readonly hostname: string;
   private readonly scramOffered: boolean;
@@ -891,25 +898,66 @@ export class ImapEngine {
 
   // ── 메일함 명령 ────────────────────────────────────────────────────────────
 
+  /**
+   * LIST / LSUB. LIST는 LIST-EXTENDED(RFC 5258) 문법을 받는다:
+   *   `LIST [(선택옵션…)] 참조 (패턴 | (패턴…)) [RETURN (반환옵션…)]`
+   *
+   * ★왜 확장 문법 전부인가(2026-10-02): 우리는 IMAP4rev2·SPECIAL-USE를 광고하고, rev2의 LIST
+   * 문법(RFC 9051 §6.3.9)은 LIST-EXTENDED를 포함한다. 예전엔 `RETURN (SUBSCRIBED|STATUS)`만 받아
+   * `LIST (SPECIAL-USE) "" "*"`·`RETURN (SPECIAL-USE)` 같은 형태를 BAD로 거절했고, 광고를 믿은
+   * 클라이언트가 특수 메일함을 찾다 거절당해 NAMESPACE→LIST를 초당 수 회씩 끝없이 반복했다
+   * (명령 계측이 두 카운터가 함께 오르는 것으로 보여 줬다). LSUB는 확장하지 않는다(RFC 5258).
+   */
   private cmdList(cmd: ParsedCommand, verb: "LIST" | "LSUB"): ImapAction[] {
-    const ref = cmd.args[0] ? valueText(cmd.args[0]) : null;
-    const pattern = cmd.args[1] ? valueText(cmd.args[1]) : null;
-    if (ref === null || pattern === null) {
-      return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} expects reference and pattern` }];
+    const bad = (why: string): ImapAction[] => [{ kind: "reply", text: `${cmd.tag} BAD ${verb} ${why}` }];
+    const args = cmd.args;
+    let at = 0;
+
+    // 선택 옵션 — 참조 이름보다 앞의 괄호 목록(RFC 5258 §3.1).
+    const select = new Set<string>();
+    if (verb === "LIST" && args[0]?.kind === "list") {
+      for (const it of args[0].items) {
+        const o = valueText(it)?.toUpperCase();
+        if (!o || !LIST_SELECT_OPTIONS.has(o)) return bad("unknown selection option");
+        select.add(o);
+      }
+      // RECURSIVEMATCH는 다른 선택 옵션의 수식어라 단독으로 쓸 수 없다(RFC 5258 §3.1 — BAD).
+      if (select.has("RECURSIVEMATCH") && !select.has("SUBSCRIBED") && !select.has("SPECIAL-USE")) {
+        return bad("RECURSIVEMATCH requires another selection option");
+      }
+      at = 1;
     }
-    // LIST RETURN 옵션(LIST-EXTENDED 부분집합): STATUS(RFC 5819) + SUBSCRIBED
+
+    // 참조 + 패턴(하나, 또는 LIST에서만 괄호 목록 — RFC 5258 §3).
+    const ref = args[at] ? valueText(args[at]!) : null;
+    const patArg = args[at + 1];
+    let patterns: string[] | null = null;
+    if (patArg && patArg.kind === "list" && verb === "LIST") {
+      const ps = patArg.items.map((it) => valueText(it));
+      patterns = ps.length > 0 && ps.every((p): p is string => p !== null) ? ps : null;
+    } else if (patArg) {
+      const p = valueText(patArg);
+      patterns = p === null ? null : [p];
+    }
+    if (ref === null || patterns === null) return bad("expects reference and pattern");
+
+    // 반환 옵션(RFC 5258 §3.2). SPECIAL-USE·CHILDREN은 **이미 항상** 내보내는 속성이라 받기만 한다
+    // (RFC 6154 §… 서버는 요청이 없어도 특수 용도 속성을 낼 수 있고, \HasChildren도 같다).
     let statusItems: string[] | null = null;
     let returnSubscribed = false;
-    if (cmd.args.length > 2) {
-      const kw = valueText(cmd.args[2] ?? { kind: "atom", value: "" })?.toUpperCase();
-      const opts = cmd.args[3];
-      if (verb !== "LIST" || kw !== "RETURN" || !opts || opts.kind !== "list" || cmd.args.length !== 4) {
-        return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} invalid arguments` }];
+    const rest = args.slice(at + 2);
+    if (rest.length > 0) {
+      const kw = valueText(rest[0]!)?.toUpperCase();
+      const opts = rest[1];
+      if (verb !== "LIST" || kw !== "RETURN" || !opts || opts.kind !== "list" || rest.length !== 2) {
+        return bad("invalid arguments");
       }
       for (let i = 0; i < opts.items.length; i++) {
         const opt = valueText(opts.items[i]!)?.toUpperCase();
         if (opt === "SUBSCRIBED") {
           returnSubscribed = true;
+        } else if (opt === "CHILDREN" || opt === "SPECIAL-USE") {
+          // 항상 내보낸다 — 받기만 한다.
         } else if (opt === "STATUS") {
           const list = opts.items[i + 1];
           i += 1;
@@ -925,16 +973,22 @@ export class ImapEngine {
         }
       }
     }
-    // 빈 패턴 — 계층 구분자 공지(RFC 9051 §6.3.9)
-    if (pattern.length === 0) {
+    // 선택 옵션 SUBSCRIBED는 반환 옵션 SUBSCRIBED를 함께 뜻한다(RFC 5258 §3.1).
+    if (select.has("SUBSCRIBED")) returnSubscribed = true;
+
+    // 빈 패턴 하나 — 계층 구분자 공지(RFC 9051 §6.3.9)
+    if (patterns.length === 1 && patterns[0]!.length === 0) {
       return [
         { kind: "reply", text: `* ${verb} (\\Noselect) "${HIERARCHY_DELIMITER}" ""` },
         { kind: "reply", text: `${cmd.tag} OK ${verb} completed` },
       ];
     }
-    const full = normalizeMailboxName(joinListPattern(ref, pattern));
-    // 패턴 파싱은 메일함 수와 무관하다 — 루프 밖에서 한 번만 컴파일한다.
-    const matches = compileListPattern(full);
+    // 패턴 파싱은 메일함 수와 무관하다 — 루프 밖에서 한 번만 컴파일한다. 빈 패턴은 목록 안에선 뜻이 없다.
+    const matchers = patterns
+      .filter((p) => p.length > 0)
+      .map((p) => compileListPattern(normalizeMailboxName(joinListPattern(ref, p))));
+    const matches = (name: string): boolean => matchers.some((m) => m(name));
+
     return this.callBackend({ kind: "listMailboxes" }, (res) => {
       if (res.kind === "no") return [ImapEngine.noReply(cmd.tag, verb, res)];
       if (res.kind !== "mailboxes") return [{ kind: "reply", text: `${cmd.tag} NO ${verb} failed` }];
@@ -951,9 +1005,36 @@ export class ImapEngine {
         const segs = m.name.split(HIERARCHY_DELIMITER);
         for (let i = 1; i < segs.length; i++) parents.add(segs.slice(0, i).join(HIERARCHY_DELIMITER));
       }
+      // 선택 옵션을 통과하는가 — 선택 옵션이 없으면 전부 통과.
+      const passesSelection = (m: ImapMailbox): boolean =>
+        (!select.has("SUBSCRIBED") || m.subscribed !== false) &&
+        (!select.has("SPECIAL-USE") || roleToAttribute(m.role) !== null);
+      /**
+       * RECURSIVEMATCH + SUBSCRIBED: 자기는 선택되지 않아도 **선택된 자손이 있으면** CHILDINFO로 낸다
+       * (RFC 5258 §3.5). 선택된 메일함의 조상을 한 번만 모아 둔다. SPECIAL-USE용 CHILDINFO 값은
+       * 정의돼 있지 않아 SUBSCRIBED일 때만 한다.
+       */
+      const childInfo = select.has("RECURSIVEMATCH") && select.has("SUBSCRIBED");
+      const hasSelectedChild = new Set<string>();
+      if (childInfo) {
+        for (const m of res.mailboxes) {
+          if (!passesSelection(m)) continue;
+          const segs = m.name.split(HIERARCHY_DELIMITER);
+          for (let i = 1; i < segs.length; i++) hasSelectedChild.add(segs.slice(0, i).join(HIERARCHY_DELIMITER));
+        }
+      }
+      const childInfoSuffix = ' ("CHILDINFO" ("SUBSCRIBED"))';
       for (const m of res.mailboxes) {
         if (!matches(m.name)) continue;
         if (verb === "LSUB" && m.subscribed === false) continue; // 구독 필터(영속화됨)
+        const selected = passesSelection(m);
+        const withChildInfo = childInfo && hasSelectedChild.has(m.name);
+        if (!selected) {
+          if (withChildInfo) {
+            actions.push({ kind: "reply", text: `* ${verb} () "${HIERARCHY_DELIMITER}" ${quoteMailboxName(m.name)}${childInfoSuffix}` });
+          }
+          continue;
+        }
         const attrs: string[] = [];
         const special = roleToAttribute(m.role);
         if (special) attrs.push(special);
@@ -962,7 +1043,7 @@ export class ImapEngine {
         if (returnSubscribed && m.subscribed !== false) attrs.push("\\Subscribed");
         actions.push({
           kind: "reply",
-          text: `* ${verb} (${attrs.join(" ")}) "${HIERARCHY_DELIMITER}" ${quoteMailboxName(m.name)}`,
+          text: `* ${verb} (${attrs.join(" ")}) "${HIERARCHY_DELIMITER}" ${quoteMailboxName(m.name)}${withChildInfo ? childInfoSuffix : ""}`,
         });
         // LIST-STATUS — 각 LIST 라인 뒤에 STATUS 인라인(RFC 5819)
         if (statusItems) {
