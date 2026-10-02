@@ -91,11 +91,19 @@ export interface SessionReporter {
 
 export const noopSessionReporter: SessionReporter = { report: () => {} };
 
-/**
- * 진행 중 요약 주기 기본값. 정상 IDLE 세션은 이 사이 활동이 거의 없어 줄이 생략되고(아래),
- * 비정상적으로 수다스러운 세션만 주기마다 한 줄을 남긴다 — 볼륨은 "문제 세션 수 × 주기"다.
- */
+/** 진행 중 요약 주기 기본값. 2026-10-01에 본 반복 주기(약 11.5분)보다 짧아야 그 모양이 줄마다 보인다. */
 export const SESSION_PROGRESS_INTERVAL_MS = 10 * 60 * 1000;
+
+/**
+ * 진행 줄을 남길 최소 증분 — 이 아래면 그 주기는 건너뛴다.
+ *
+ * ★문턱이 없으면 정상 세션도 줄을 남긴다(검수 지적): IDLE 클라이언트는 서버 유휴 타임아웃(30분)
+ * 전에 DONE/IDLE을 다시 보내고, 몇 분마다 NOOP으로 폴링하는 클라이언트도 있고, 새 메일 푸시도
+ * 바이트를 움직인다. 그 정도는 주기당 명령 몇 개·수십 KB다. 보려는 것은 초당 수십 번 도는 루프
+ * (주기당 수만 명령)와 주기마다 MB 단위로 옮기는 세션이라, 두 문턱 중 하나만 넘어도 남긴다.
+ */
+export const SESSION_PROGRESS_MIN_COMMANDS = 30;
+export const SESSION_PROGRESS_MIN_BYTES = 1024 * 1024;
 
 /** 세션당 남길 모르는 명령 이름 표본 수와 이름 길이 — 로그 한 줄이 상대 입력으로 부풀지 않게. */
 const MAX_UNKNOWN_SAMPLES = 5;
@@ -148,6 +156,9 @@ export interface SessionMeterOptions {
   countCommands?: boolean;
   /** 진행 중 요약 주기(ms). 0이거나 없으면 보내지 않는다. */
   progressIntervalMs?: number;
+  /** 진행 줄 문턱 — 테스트용 재정의. 기본 `SESSION_PROGRESS_MIN_COMMANDS`·`SESSION_PROGRESS_MIN_BYTES`. */
+  progressMinCommands?: number;
+  progressMinBytes?: number;
 }
 
 export class SessionMeter {
@@ -237,8 +248,12 @@ export class SessionMeter {
     const bytesInDelta = t.bytesIn - this.lastProgress.bytesIn;
     const bytesOutDelta = t.bytesOut - this.lastProgress.bytesOut;
     this.lastProgress = { commands: this.commands, bytesIn: t.bytesIn, bytesOut: t.bytesOut };
-    // 조용한 세션(정상 IDLE)은 줄을 남기지 않는다 — 수천 개 IDLE 세션이 주기마다 줄을 쏟지 않게.
-    if (commandsDelta === 0 && bytesInDelta === 0 && bytesOutDelta === 0) return;
+    // 문턱 아래 주기는 건너뛴다(위 SESSION_PROGRESS_MIN_* 주석) — 정상 세션이 주기마다 줄을 쏟지 않게.
+    const minCommands = this.opts.progressMinCommands ?? SESSION_PROGRESS_MIN_COMMANDS;
+    const minBytes = this.opts.progressMinBytes ?? SESSION_PROGRESS_MIN_BYTES;
+    const busyCommands = this.opts.countCommands === true && commandsDelta >= minCommands;
+    const busyBytes = bytesInDelta + bytesOutDelta >= minBytes;
+    if (!busyCommands && !busyBytes) return;
     this.opts.reporter.progress?.({
       ...t,
       intervalMs,

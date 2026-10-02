@@ -643,7 +643,12 @@ export class ImapEngine {
       const msg = err instanceof ImapParseError ? err.message : "parse error";
       return [{ kind: "reply", text: `* BAD ${msg}` }];
     }
-    this.onCommand?.(cmd.tag, imapCommandLabel(cmd), cmd.name);
+    if (this.onCommand) {
+      const label = imapCommandLabel(cmd);
+      // 모르는 UID 하위 명령은 표본에 하위 이름까지 남긴다 — "UID"만으로는 무엇이 BAD로 도는지 모른다.
+      const sub = cmd.name === "UID" && cmd.args[0] ? valueText(cmd.args[0]) : null;
+      this.onCommand(cmd.tag, label, sub ? `UID ${sub}` : cmd.name);
+    }
 
     switch (cmd.name) {
       case "CAPABILITY":

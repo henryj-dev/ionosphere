@@ -182,7 +182,9 @@ export function parseCommand(parts: readonly LinePart[]): ParsedCommand {
   const values = parseValues(parts);
   const tagVal = values[0];
   if (!tagVal || tagVal.kind !== "atom") throw new ImapParseError("missing command tag");
-  if (tagVal.value.includes("+")) throw new ImapParseError("invalid tag"); // tag는 '+' 금지(RFC 9051)
+  // tag는 ASTRING-CHAR에서 '+'를 뺀 것이다(RFC 9051 §9 tag). list-wildcards('*'·'%')는 atom-specials라
+  // 태그에 올 수 없다 — 특히 '*'를 받으면 응답 `* BAD`가 untagged 줄과 구별되지 않는다(2026-10-01 검수).
+  if (/[+*%]/.test(tagVal.value)) throw new ImapParseError("invalid tag");
   const nameVal = values[1];
   if (!nameVal || nameVal.kind !== "atom") throw new ImapParseError("missing command name");
   return { tag: tagVal.value, name: nameVal.value.toUpperCase(), args: values.slice(2) };

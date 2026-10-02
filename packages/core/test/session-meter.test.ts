@@ -117,6 +117,8 @@ describe("SessionMeter — 진행 중 요약·명령 분포", () => {
         onPreauthDeadline: () => {},
         countCommands: true,
         progressIntervalMs: 60,
+        progressMinCommands: 1,
+        progressMinBytes: 1,
       });
       sock.on("data", () => {});
     });
@@ -136,7 +138,7 @@ describe("SessionMeter — 진행 중 요약·명령 분포", () => {
     expect(progress[0]!.bytesInDelta).toBe(10);
     expect(progress[0]!.commandCounts).toEqual({ IDLE: 1, NOOP: 2 });
 
-    // 조용한 주기 두어 번 — 줄이 늘지 않아야 한다(정상 IDLE 세션이 줄을 쏟지 않게).
+    // 조용한 주기 두어 번 — 문턱 아래라 줄이 늘지 않아야 한다(정상 세션이 줄을 쏟지 않게).
     await new Promise((r) => setTimeout(r, 200));
     expect(progress.length).toBe(1);
 

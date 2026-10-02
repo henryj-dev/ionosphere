@@ -180,10 +180,72 @@ describe("IMAP 명령 계측", () => {
     const port = await server.listen(0, "127.0.0.1");
     const c = client(port);
     await c.waitFor("* OK");
-    for (let i = 0; i < 5; i++) c.send(`n${i} NOOP\r\n`);
-    await c.waitFor("n4 OK");
+    // 기본 문턱(주기당 명령 30개)을 넘겨야 줄이 남는다 — 정상 세션은 여기 못 미친다.
+    for (let i = 0; i < 40; i++) c.send(`n${i} NOOP\r\n`);
+    await c.waitFor("n39 OK");
     const until = Date.now() + 2000;
     while (progress.length === 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 10));
-    expect(progress[0]).toBe(5);
+    expect(progress[0]).toBe(40);
+  });
+
+  /** 결과를 모으는 서버 하나를 띄우고 로그인까지 한 클라이언트를 돌려준다. */
+  async function loggedIn(): Promise<{ results: string[]; summaries: SessionSummary[]; c: ReturnType<typeof client> }> {
+    const results: string[] = [];
+    const summaries: SessionSummary[] = [];
+    const server = new ImapServer({
+      hostname: "imap.test",
+      backend,
+      allowInsecureAuth: true,
+      sessions: { report: (s) => void summaries.push(s) },
+      onCommandResult: (command, result) => void results.push(`${command}:${result}`),
+    });
+    servers.push(server);
+    const c = client(await server.listen(0, "127.0.0.1"));
+    await c.waitFor("* OK");
+    c.send("a0 LOGIN u@imap.test pw\r\n");
+    await c.waitFor("a0 OK");
+    results.length = 0;
+    return { results, summaries, c };
+  }
+
+  /**
+   * ★같은 태그를 재사용한 파이프라인(RFC는 SHOULD NOT일 뿐, 실제로 나온다). 태그당 하나만 들던
+   * 첫 판은 앞 명령의 응답이 나가기 전에 뒤 명령이 덮어써 LIST 결과가 NOOP으로 집계됐다(검수 재현).
+   */
+  test("★같은 태그를 재사용해도 결과가 명령 순서대로 붙는다", async () => {
+    const { results, c } = await loggedIn();
+    c.send('t LIST "" "*"\r\nt NOOP\r\n');
+    const until = Date.now() + 2000;
+    while (results.length < 2 && Date.now() < until) await new Promise((r) => setTimeout(r, 10));
+    expect(results).toEqual(["LIST:no", "NOOP:ok"]);
+  });
+
+  test("★대량 파이프라인에서도 결과가 빠지지 않는다(300개)", async () => {
+    const { results, c } = await loggedIn();
+    c.send(Array.from({ length: 300 }, (_, i) => `n${i} NOOP\r\n`).join(""));
+    await c.waitFor("n299 OK");
+    expect(results.length).toBe(300);
+  });
+
+  test("★태그 `*`는 파싱 단계에서 거부돼 unparsed 한 번으로만 센다", async () => {
+    const { results, summaries, c } = await loggedIn();
+    c.send("* XYZZY\r\n");
+    await c.waitFor("* BAD invalid tag");
+    c.send("z LOGOUT\r\n");
+    await c.closed;
+    expect(results).toEqual(["unparsed:bad", "LOGOUT:ok"]);
+    const s = await waitSummary(summaries);
+    expect(s.commandCounts?.unparsed).toBe(1);
+    expect(s.commandCounts?.unknown).toBeUndefined();
+  });
+
+  test("모르는 UID 하위 명령은 표본에 하위 이름까지 남는다", async () => {
+    const { summaries, c } = await loggedIn();
+    c.send("u1 UID BOGUS 1\r\n");
+    await c.waitFor("u1 BAD");
+    c.send("z LOGOUT\r\n");
+    await c.closed;
+    const s = await waitSummary(summaries);
+    expect(s.unknownCommands).toEqual(["UID?BOGUS"]);
   });
 });

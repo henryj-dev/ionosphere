@@ -87,6 +87,8 @@ export { PeerConnectionLimiter, DEFAULT_MAX_CONNECTIONS_PER_PEER, type PeerLimit
 export {
   SESSION_CLOSE_REASON,
   SESSION_PROGRESS_INTERVAL_MS,
+  SESSION_PROGRESS_MIN_BYTES,
+  SESSION_PROGRESS_MIN_COMMANDS,
   SessionMeter,
   createLogSessionReporter,
   noopSessionReporter,
