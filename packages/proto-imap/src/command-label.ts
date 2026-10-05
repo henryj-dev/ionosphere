@@ -64,6 +64,15 @@ const KNOWN_UNIMPLEMENTED_COMMANDS: ReadonlySet<string> = new Set([
   "XAPPLEPUSHSERVICE", // Apple 메일 푸시(Dovecot XAPS 플러그인)
 ]);
 
+/**
+ * UID 하위로 **정의된** 미구현 명령 — 위 목록과 따로 둔다. `UID NOTIFY`처럼 존재하지 않는 조합까지
+ * 이름으로 남기면 "출처가 확인된 이름만"이라는 원칙이 조합 단위에서 깨진다(2차 리뷰). RFC 7377의
+ * `UID ESEARCH` 예제는 정오표 8364에서 오류로 확인됐다.
+ */
+const KNOWN_UNIMPLEMENTED_UID_COMMANDS: ReadonlySet<string> = new Set([
+  "CONVERT", // RFC 5259 §6
+]);
+
 /** 허용 목록 밖의 모르는 명령 이름 — 무엇이 왔는지 남기지 않는다. */
 export const UNLISTED_COMMAND_NAME = "OTHER";
 
@@ -75,7 +84,7 @@ export function imapUnknownCommandName(cmd: ParsedCommand): string {
   if (cmd.name === "UID") {
     const first = cmd.args[0];
     const sub = first?.kind === "atom" ? first.value.toUpperCase() : null;
-    return sub !== null && KNOWN_UNIMPLEMENTED_COMMANDS.has(sub) ? `UID ${sub}` : `UID ${UNLISTED_COMMAND_NAME}`;
+    return sub !== null && KNOWN_UNIMPLEMENTED_UID_COMMANDS.has(sub) ? `UID ${sub}` : `UID ${UNLISTED_COMMAND_NAME}`;
   }
   return KNOWN_UNIMPLEMENTED_COMMANDS.has(cmd.name) ? cmd.name : UNLISTED_COMMAND_NAME;
 }
