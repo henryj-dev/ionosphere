@@ -1898,6 +1898,12 @@ export class ImapEngine {
       const fresh = new Set(res.uids);
       const removed = current.uids.filter((u) => !fresh.has(u));
       actions.push(...this.removalActions(removed));
+      /**
+       * ★스냅샷의 UIDNEXT를 그대로 받는다. 두 동기화 사이에 들어왔다가 지워진 uid는 뷰에 한 번도
+       * 들어오지 않으므로, "뷰에 들어올 때 올리기"만으로는 놓친다 — 빈 뷰의 `*`가 낡은 값에 묶여
+       * VANISHED에서 그 uid가 빠졌다(독립 리뷰 3차). 줄이지는 않는다(UIDNEXT는 감소하지 않는다).
+       */
+      current.uidnext = Math.max(current.uidnext, res.mailbox.uidnext);
       const known = new Set(current.uids);
       const added = res.uids.filter((u) => !known.has(u));
       if (added.length > 0) {

@@ -106,6 +106,25 @@ describe("UID FETCH (CHANGEDSINCE n VANISHED)", () => {
     }
   });
 
+  /**
+   * ★두 동기화 사이에 들어왔다가 지워진 uid는 뷰에 한 번도 들어오지 않는다. NOOP 스냅샷의 UIDNEXT를
+   * 받지 않으면 빈 뷰의 `*`가 SELECT 때 값(10)에 묶여 11을 놓쳤다(독립 리뷰 3차 재현).
+   */
+  test("NOOP 스냅샷의 UIDNEXT를 받는다 — 사이에 들어왔다 지워진 uid도 `*`에 든다", () => {
+    const e = new ImapEngine({ hostname: "imap.test", allowInsecureAuth: true });
+    e.feed(enc.encode("a0 LOGIN u p\r\n"));
+    e.authResult({ accountId: "acc" });
+    e.feed(enc.encode("e0 ENABLE QRESYNC\r\n"));
+    e.feed(enc.encode("s SELECT INBOX\r\n"));
+    e.backendResult({ kind: "selected", mailbox: { ...BOX, uidnext: 10, totalCount: 0, highestmodseq: 50 }, uids: [], firstUnseenSeq: null });
+    e.feed(enc.encode("n NOOP\r\n"));
+    // 다른 세션이 10·11을 넣고 지웠다 — 스냅샷은 여전히 비었고 UIDNEXT만 12다.
+    e.backendResult({ kind: "selected", mailbox: { ...BOX, uidnext: 12, totalCount: 0, highestmodseq: 50 }, uids: [], firstUnseenSeq: null });
+    const req = backendReq(e.feed(enc.encode("f1 UID FETCH 1:* (FLAGS) (CHANGEDSINCE 50 VANISHED)\r\n")));
+    expect(req).toEqual({ kind: "syncSince", name: "INBOX", sinceModseq: 50, knownUids: [{ from: 1, to: 12 }], vanishedOnly: true });
+    expect(text(e.backendResult({ kind: "sync", vanished: [10, 11], changed: [] }))).toEqual(["* VANISHED (EARLIER) 10:11", "f1 OK UID FETCH completed"]);
+  });
+
   test("수정자 순서는 자유다 — (VANISHED CHANGEDSINCE n)도 받는다(RFC 4466 §2.4)", () => {
     const e = selected({ qresync: true });
     const first = e.feed(enc.encode("f1 UID FETCH 1:* (FLAGS) (VANISHED CHANGEDSINCE 40)\r\n"));
