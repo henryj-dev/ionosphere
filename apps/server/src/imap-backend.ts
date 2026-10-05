@@ -264,18 +264,18 @@ export class IonosphereImapBackend implements ImapBackend {
    *
    * ★읽기 권한: 목록 권한(`l`)만 있는 공유 메일함도 LIST에는 나온다. 그런데 STATUS는 `r`가 필요하다
    * (RFC 4314 §4) — 예전엔 확인하지 않아 메시지 수가 그대로 보였고, DELETED를 더하면서 그 범위가
-   * 넓어졌다(코드 리뷰). 자기 메일함은 항상 읽을 수 있으므로 **남의 메일함만** 권한을 묻는다.
+   * 넓어졌다(코드 리뷰). 판정은 **정본 관문(`authorizeMailbox`)에 전부 맡긴다** — "자기 계정 메일함은
+   * 통과"라는 지름길을 두었더니 공유 계정(kind=1)으로 로그인한 경우 ACL 없이 열렸다(2차 리뷰). 관문은
+   * 개인 계정에만 전권을 주고, 그 판정은 쿼리 한 번이다. 메일함 수만큼 병렬로 묻는다.
    * 삭제 집계도 읽을 수 있는 메일함만 센다 — 못 보여 줄 값을 셀 이유가 없다.
    */
   private async listForImap(accountId: string, req: { statusRights?: true; deletedCounts?: true }): Promise<ImapMailbox[]> {
     const pathed = await this.pathedMailboxes(accountId);
     let readable: Set<string> | null = null;
     if (req.statusRights) {
-      readable = new Set<string>();
       const ctx = await this.principalContext(accountId);
-      for (const p of pathed) {
-        if (p.row.accountId === accountId || (await this.store.authorizeMailbox(ctx, p.row.id, "read")).allowed) readable.add(p.row.id);
-      }
+      const decisions = await Promise.all(pathed.map((p) => this.store.authorizeMailbox(ctx, p.row.id, "read")));
+      readable = new Set(decisions.filter((d) => d.allowed).map((d) => d.mailboxId));
     }
     const countable = readable ? pathed.filter((p) => readable.has(p.row.id)) : pathed;
     const deleted = req.deletedCounts ? await this.store.deletedCountsByMailbox(countable.map((p) => p.row.id)) : null;

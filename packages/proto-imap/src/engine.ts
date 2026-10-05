@@ -1081,6 +1081,9 @@ export class ImapEngine {
         const special = roleToAttribute(m.role);
         if (special) attrs.push(special);
         attrs.push(parents.has(m.name) ? "\\HasChildren" : "\\HasNoChildren");
+        // 읽을 수 없는 메일함(백엔드가 STATUS용 목록에서만 알려 준다) — LIST-STATUS는 STATUS를 빼고
+        // \NoSelect를 붙여야 한다(RFC 5819 §2). 빼기만 하면 선택 가능한 메일함처럼 보인다.
+        if (m.readable === false) attrs.push("\\NoSelect");
         if (subscribedFlag) attrs.push("\\Subscribed");
         return attrs.join(" ");
       };

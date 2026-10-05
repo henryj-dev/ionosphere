@@ -90,12 +90,12 @@ describe("STATUS 읽기 권한(RFC 4314 §4)", () => {
     expect(out).toEqual(["s NO [NOPERM] STATUS no read access"]);
   });
 
-  test("★LIST-STATUS는 읽을 수 없는 메일함의 STATUS 줄만 뺀다(RFC 5819 §2)", () => {
+  test("★LIST-STATUS는 읽을 수 없는 메일함의 STATUS 줄을 빼고 \\NoSelect를 붙인다(RFC 5819 §2)", () => {
     const { out } = run('l LIST "" "*" RETURN (STATUS (MESSAGES DELETED))', boxes);
     expect(out).toEqual([
       '* LIST (\\HasNoChildren) "/" "INBOX"',
       '* STATUS "INBOX" (MESSAGES 4 DELETED 1)',
-      '* LIST (\\HasNoChildren) "/" "Shared"',
+      '* LIST (\\HasNoChildren \\NoSelect) "/" "Shared"',
       "l OK LIST completed",
     ]);
   });

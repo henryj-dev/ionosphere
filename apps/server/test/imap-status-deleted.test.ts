@@ -77,10 +77,11 @@ describe("STATUS DELETED — 실제 스토어", () => {
     await db.close();
   });
 
-  test("★DELETED-STORAGE는 표시된 메시지 크기 합을 KiB로 올림한다", async () => {
+  test("★DELETED-STORAGE는 표시된 메시지 크기 합만 KiB로 올림한다", async () => {
     const { db, backend, accountId } = await setup();
+    // 표시 안 된 큰 메시지를 섞는다 — 잘못 합산하면 결과가 1을 크게 넘는다.
+    await append(backend, accountId, "\\Seen", "big " + "x".repeat(3000));
     await append(backend, accountId, "\\Deleted", "one");
-    await append(backend, accountId, "\\Seen", "two");
     // 메시지 하나는 1KiB보다 작다 — 0이 아니라 1로 올려야 "회수할 것이 있다"가 전해진다.
     expect(await run(backend, accountId, "s STATUS INBOX (DELETED DELETED-STORAGE)\r\n")).toEqual([
       '* STATUS "INBOX" (DELETED 1 DELETED-STORAGE 1)',
@@ -113,6 +114,22 @@ describe("STATUS DELETED — 실제 스토어", () => {
       '* STATUS "Shared" (MESSAGES 1 DELETED 1)',
       "s OK STATUS completed",
     ]);
+    await db.close();
+  });
+
+  test("★공유 계정으로 직접 로그인해도 자기 메일함 STATUS에 ACL의 r이 필요하다", async () => {
+    const { db, store, tenantId, backend } = await setup();
+    const shared = await store.createAccount({ tenantId, email: "team@x.test", kind: 1 });
+    const principal = await db.query({ sql: "SELECT id FROM principals WHERE account_id = ?", params: [shared.accountId] });
+    const principalId = String(principal.rows[0]!.id);
+    await store.setMailboxAcl(tenantId, shared.mailboxId, principalId, "lrit");
+    await append(backend, shared.accountId, "\\Deleted", "secret");
+    await store.setMailboxAcl(tenantId, shared.mailboxId, principalId, "l");
+
+    expect(await run(backend, shared.accountId, "s STATUS INBOX (MESSAGES DELETED)\r\n")).toEqual(["s NO [NOPERM] STATUS no read access"]);
+    const list = await run(backend, shared.accountId, 'l LIST "" "*" RETURN (STATUS (DELETED))\r\n');
+    expect(list.some((l) => l.startsWith('* STATUS "INBOX"'))).toBe(false);
+    expect(list.some((l) => l.startsWith("* LIST") && l.includes("\\NoSelect") && l.endsWith('"INBOX"'))).toBe(true);
     await db.close();
   });
 });
