@@ -250,6 +250,12 @@ interface SelectedView {
   readWrite: boolean;
   uidvalidity: number;
   uids: number[];
+  /**
+   * 이 세션이 아는 UIDNEXT — 빈 메일함에서 UID `*`의 값이다(RFC 3501 §9: 비었으면 현재 UIDNEXT).
+   * SELECT 시점 값에서 시작해 뷰에 uid가 들어올 때마다 올린다 — 세션 중 들어왔다 지워져 뷰가
+   * 다시 비어도 `*`가 SELECT 때의 낡은 값으로 돌아가지 않게.
+   */
+  uidnext: number;
   /** `* FLAGS`로 공지된 키워드 집합(시스템 플래그 제외) — 미공지 키워드 사용 전 재공지. */
   announcedKeywords: Set<string>;
   /** NOOP/CHECK 플래그 재동기화 워터마크 — 이 modseq 이후 변경만 델타 방출. */
@@ -1239,6 +1245,7 @@ export class ImapEngine {
         readWrite,
         uidvalidity: m.uidvalidity,
         uids: [...res.uids],
+        uidnext: Math.max(m.uidnext, (res.uids[res.uids.length - 1] ?? 0) + 1),
         announcedKeywords: new Set(keywords),
         lastSyncModseq: m.highestmodseq,
       };
@@ -1496,8 +1503,10 @@ export class ImapEngine {
      * ★`*`는 FETCH 대상(resolveTargets)과 **같은 값** — 세션 뷰의 최대 UID — 으로 정해 숫자로 넘긴다
      * (RFC 3501 §9). 한 명령 안에서 VANISHED와 FETCH가 서로 다른 집합을 보면 안 된다(독립 리뷰 1차:
      * 무한대로 보았더니 `8:*`이 범위 밖 uid를 싣고, `12:*`(=9:12)는 안의 uid를 빠뜨렸다).
+     * 빈 뷰면 `*`는 UIDNEXT다(같은 절) — 0으로 두면 `1:*`이 1만 보고 `12:*`이 1:9를 싣는다(2차 리뷰).
+     * FETCH 대상은 빈 뷰에서 어차피 없으므로 resolveTargets와 어긋나지 않는다.
      */
-    const maxUid = view.uids.length > 0 ? view.uids[view.uids.length - 1]! : 0;
+    const maxUid = view.uids.length > 0 ? view.uids[view.uids.length - 1]! : view.uidnext;
     const requested: SeqRange[] = ranges.map((r) => ({ from: r.from === "*" ? maxUid : r.from, to: r.to === "*" ? maxUid : r.to }));
     return this.callBackend(
       { kind: "syncSince", name: view.name, sinceModseq: changedSince, knownUids: requested, vanishedOnly: true },
@@ -1582,6 +1591,7 @@ export class ImapEngine {
             for (const u of uids) {
               if (view.uids.includes(u)) continue;
               view.uids.push(u);
+              view.uidnext = Math.max(view.uidnext, u + 1);
               added = true;
             }
             if (added) {
@@ -1671,6 +1681,7 @@ export class ImapEngine {
         // 새 메시지가 선택 중 메일함에 들어갔으면 EXISTS를 먼저 알린다(§5의 예시 순서).
         if (view.name === dest && !view.uids.includes(res.uid)) {
           view.uids.push(res.uid);
+          view.uidnext = Math.max(view.uidnext, res.uid + 1);
           view.uids.sort((a, b) => a - b);
           actions.push({ kind: "reply", text: `* ${view.uids.length} EXISTS` });
         }
@@ -1891,6 +1902,7 @@ export class ImapEngine {
       const added = res.uids.filter((u) => !known.has(u));
       if (added.length > 0) {
         current.uids.push(...added);
+        current.uidnext = Math.max(current.uidnext, ...added.map((u) => u + 1));
         current.uids.sort((a, b) => a - b);
         actions.push({ kind: "reply", text: `* ${current.uids.length} EXISTS` });
       }

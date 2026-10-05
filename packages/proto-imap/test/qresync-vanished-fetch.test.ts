@@ -81,6 +81,31 @@ describe("UID FETCH (CHANGEDSINCE n VANISHED)", () => {
     expect(text(b.backendResult({ kind: "sync", vanished: [8, 10, 12, 13], changed: [] }))[0]).toBe("* VANISHED (EARLIER) 10,12");
   });
 
+  /** ★빈 메일함에서 UID `*`는 UIDNEXT다(RFC 3501 §9). 0으로 두면 `1:*`이 1만 보고 `12:*`이 1:9를 실었다(2차 리뷰). */
+  test("빈 뷰에서 `*`는 UIDNEXT다", () => {
+    const empty = (): ImapEngine => {
+      const e = new ImapEngine({ hostname: "imap.test", allowInsecureAuth: true });
+      e.feed(enc.encode("a0 LOGIN u p\r\n"));
+      e.authResult({ accountId: "acc" });
+      e.feed(enc.encode("e0 ENABLE QRESYNC\r\n"));
+      e.feed(enc.encode("s SELECT INBOX\r\n"));
+      e.backendResult({ kind: "selected", mailbox: { ...BOX, uidnext: 10, totalCount: 0 }, uids: [], firstUnseenSeq: null });
+      return e;
+    };
+    const gone = { kind: "sync" as const, vanished: [1, 2, 3, 4, 5, 6, 7, 8, 9], changed: [] };
+    const cases: [string, { from: number; to: number }, string[]][] = [
+      ["1:*", { from: 1, to: 10 }, ["* VANISHED (EARLIER) 1:9", "f1 OK UID FETCH completed"]],
+      ["8:*", { from: 8, to: 10 }, ["* VANISHED (EARLIER) 8:9", "f1 OK UID FETCH completed"]],
+      ["12:*", { from: 12, to: 10 }, ["f1 OK UID FETCH completed"]],
+    ];
+    for (const [set, known, expected] of cases) {
+      const e = empty();
+      const req = backendReq(e.feed(enc.encode(`f1 UID FETCH ${set} (FLAGS) (CHANGEDSINCE 40 VANISHED)\r\n`)));
+      expect(req).toEqual({ kind: "syncSince", name: "INBOX", sinceModseq: 40, knownUids: [known], vanishedOnly: true });
+      expect(text(e.backendResult(gone))).toEqual(expected);
+    }
+  });
+
   test("수정자 순서는 자유다 — (VANISHED CHANGEDSINCE n)도 받는다(RFC 4466 §2.4)", () => {
     const e = selected({ qresync: true });
     const first = e.feed(enc.encode("f1 UID FETCH 1:* (FLAGS) (VANISHED CHANGEDSINCE 40)\r\n"));
