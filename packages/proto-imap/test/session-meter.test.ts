@@ -162,7 +162,8 @@ describe("IMAP 명령 계측", () => {
     const s = await waitSummary(summaries);
     expect(s.commands).toBe(6);
     expect(s.commandCounts).toEqual({ LOGIN: 1, LOGOUT: 1, NOOP: 2, unknown: 1, unparsed: 1 });
-    expect(s.unknownCommands).toEqual(["XYZZY"]);
+    // XYZZY는 출처가 확인된 확장 이름이 아니다 — 무엇이 왔는지 남기지 않는다(command-label.ts).
+    expect(s.unknownCommands).toEqual(["OTHER"]);
     // 백엔드를 부르지 않은 명령은 requests에 안 들어간다 — 둘의 차이가 곧 이번 사고의 신호였다.
     expect(s.requests).toBe(0);
   });
@@ -257,6 +258,24 @@ describe("IMAP 명령 계측", () => {
     await c.closed;
     const s = await waitSummary(summaries);
     expect(s.unknownCommands).toEqual(["UID?OTHER", "XLIST"]);
+  });
+
+  /**
+   * 허용 목록 안의 이름이어도 quoted·literal로 오면 남기지 않는다 — 검사가 atom만 보는지 고정한다.
+   * (목록 밖 값으로만 시험하면 atom 검사를 valueText로 되돌리는 회귀를 잡지 못한다 — 1차 리뷰.)
+   */
+  test("UID 하위 이름은 atom일 때만 목록과 대조한다", async () => {
+    const { summaries, c } = await loggedIn();
+    c.send("u1 UID CONVERT 1\r\n");
+    await c.waitFor("u1 BAD");
+    c.send('u2 UID "CONVERT" 1\r\n');
+    await c.waitFor("u2 BAD");
+    c.send("u3 UID {7+}\r\nCONVERT 1\r\n");
+    await c.waitFor("u3 BAD");
+    c.send("z LOGOUT\r\n");
+    await c.closed;
+    const s = await waitSummary(summaries);
+    expect(s.unknownCommands).toEqual(["UID?CONVERT", "UID?OTHER"]);
   });
 
   /**

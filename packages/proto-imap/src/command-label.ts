@@ -42,9 +42,10 @@ export function imapCommandLabel(cmd: ParsedCommand): ImapCommandLabel {
  *
  * ★왜 허용 목록인가(2026-10-05 BAD 표본 PR의 3차 리뷰): 표본은 클라이언트가 보낸 이름을 대문자로
  * 정제해 남겼는데, 태그 없이 친 `user private-password`는 둘째 단어가 명령 이름 자리에 와서
- * `PRIVATE-PASSWORD`로 남았다. 이름만으로는 오타 명령과 비밀을 구별할 수 없다. 표준·주요 구현의
- * 확장 이름은 비밀일 수 없으므로 그것만 남긴다 — "어떤 확장을 기대하는 클라이언트인가"를 아는 데는
- * 이것으로 충분하다. 클라이언트가 새 확장을 쓰기 시작하면 OTHER가 늘고, 그때 원문은 BAD 표본
+ * `PRIVATE-PASSWORD`로 남았다. 이름만으로는 오타 명령과 비밀을 구별할 수 없다. 그래서 남는 이름을
+ * **출처가 확인된 유한한 어휘**로 제한한다 — 임의 문자열은 남지 않는다(비밀번호가 우연히 `notify`라면
+ * 그 단어는 남는다. 보장은 "어휘 밖은 안 남는다"까지다). "어떤 확장을 기대하는 클라이언트인가"를 아는
+ * 데는 이것으로 충분하다. 클라이언트가 새 확장을 쓰기 시작하면 OTHER가 늘고, 그때 원문은 BAD 표본
  * (command-sample.ts)이 아니라 클라이언트 쪽에서 확인해 여기 추가한다.
  */
 const KNOWN_UNIMPLEMENTED_COMMANDS: ReadonlySet<string> = new Set([
@@ -60,9 +61,7 @@ const KNOWN_UNIMPLEMENTED_COMMANDS: ReadonlySet<string> = new Set([
   "GETANNOTATION", "SETANNOTATION", // ANNOTATEMORE 초안
   // 주요 구현의 비표준 명령
   "XLIST", // Gmail 구형 특수 폴더 목록
-  "XAPPLEPUSHSERVICE", // Apple 메일 푸시
-  "XYZZY", // Dovecot 진단
-  "XCLIENT", // 프록시 전달
+  "XAPPLEPUSHSERVICE", // Apple 메일 푸시(Dovecot XAPS 플러그인)
 ]);
 
 /** 허용 목록 밖의 모르는 명령 이름 — 무엇이 왔는지 남기지 않는다. */
