@@ -162,7 +162,8 @@ describe("IMAP 명령 계측", () => {
     const s = await waitSummary(summaries);
     expect(s.commands).toBe(6);
     expect(s.commandCounts).toEqual({ LOGIN: 1, LOGOUT: 1, NOOP: 2, unknown: 1, unparsed: 1 });
-    expect(s.unknownCommands).toEqual(["XYZZY"]);
+    // XYZZY는 출처가 확인된 확장 이름이 아니다 — 무엇이 왔는지 남기지 않는다(command-label.ts).
+    expect(s.unknownCommands).toEqual(["OTHER"]);
     // 백엔드를 부르지 않은 명령은 requests에 안 들어간다 — 둘의 차이가 곧 이번 사고의 신호였다.
     expect(s.requests).toBe(0);
   });
@@ -247,13 +248,54 @@ describe("IMAP 명령 계측", () => {
     expect(s.reads).toBeGreaterThan(0);
   });
 
-  test("모르는 UID 하위 명령은 표본에 하위 이름까지 남는다", async () => {
+  test("모르는 UID 하위 명령은 UID로 묶고, 알려진 확장 이름만 그대로 남긴다", async () => {
     const { summaries, c } = await loggedIn();
     c.send("u1 UID BOGUS 1\r\n");
     await c.waitFor("u1 BAD");
+    c.send("u2 XLIST \"\" *\r\n");
+    await c.waitFor("u2 BAD");
     c.send("z LOGOUT\r\n");
     await c.closed;
     const s = await waitSummary(summaries);
-    expect(s.unknownCommands).toEqual(["UID?BOGUS"]);
+    expect(s.unknownCommands).toEqual(["UID?OTHER", "XLIST"]);
+  });
+
+  /**
+   * 허용 목록 안의 이름이어도 quoted·literal로 오면 남기지 않는다 — 검사가 atom만 보는지 고정한다.
+   * (목록 밖 값으로만 시험하면 atom 검사를 valueText로 되돌리는 회귀를 잡지 못한다 — 1차 리뷰.)
+   */
+  test("UID 하위 이름은 atom일 때만 목록과 대조한다", async () => {
+    const { summaries, c } = await loggedIn();
+    c.send("u1 UID CONVERT 1\r\n");
+    await c.waitFor("u1 BAD");
+    c.send('u2 UID "CONVERT" 1\r\n');
+    await c.waitFor("u2 BAD");
+    c.send("u3 UID {7+}\r\nCONVERT 1\r\n");
+    await c.waitFor("u3 BAD");
+    c.send("z LOGOUT\r\n");
+    await c.closed;
+    const s = await waitSummary(summaries);
+    expect(s.unknownCommands).toEqual(["UID?CONVERT", "UID?OTHER"]);
+  });
+
+  /**
+   * ★2026-10-05 BAD 표본 PR 3차 리뷰: 태그 없이 친 `user private-password`는 둘째 단어가 명령 이름
+   * 자리에 와서 `PRIVATE-PASSWORD`로 요약에 남았다. `UID "secret"`은 quoted 내용이 하위 이름으로
+   * 되살아났다. 이제 알려진 확장 이름이 아니면 OTHER뿐이다.
+   */
+  test("★모르는 명령 이름 자리의 비밀은 요약에 남지 않는다", async () => {
+    const { summaries, c } = await loggedIn();
+    c.send("user private-password\r\n");
+    await c.waitFor("user BAD");
+    c.send('u1 UID "quoted-secret"\r\n');
+    await c.waitFor("u1 BAD");
+    c.send("u2 UID atom-secret 1\r\n");
+    await c.waitFor("u2 BAD");
+    c.send("z LOGOUT\r\n");
+    await c.closed;
+    const s = await waitSummary(summaries);
+    expect(s.unknownCommands).toEqual(["OTHER", "UID?OTHER"]);
+    const text = JSON.stringify(s).toUpperCase();
+    for (const secret of ["PRIVATE-PASSWORD", "QUOTED-SECRET", "ATOM-SECRET"]) expect(text).not.toContain(secret);
   });
 });

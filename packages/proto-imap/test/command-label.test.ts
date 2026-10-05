@@ -7,7 +7,7 @@
  */
 import { describe, expect, test } from "@ionosphere/testkit";
 import { readFileSync } from "node:fs";
-import { IMAP_COMMAND_LABELS, imapCommandLabel } from "../src/command-label.ts";
+import { IMAP_COMMAND_LABELS, imapCommandLabel, imapUnknownCommandName } from "../src/command-label.ts";
 
 const engineSrc = readFileSync(new URL("../src/engine.ts", import.meta.url), "utf8");
 
@@ -50,5 +50,24 @@ describe("IMAP 명령 라벨", () => {
     expect(imapCommandLabel({ tag: "a", name: "UID", args: [{ kind: "atom", value: "BOGUS" }] })).toBe("unknown");
     expect(imapCommandLabel({ tag: "a", name: "UID", args: [{ kind: "atom", value: "fetch" }] })).toBe("UID FETCH");
     expect(imapCommandLabel({ tag: "a", name: "NOOP", args: [] })).toBe("NOOP");
+  });
+
+  /**
+   * 세션 요약의 모르는 명령 이름 — 경우마다 따로 본다. 요약은 같은 이름을 합치므로 소켓 테스트만으로는
+   * quoted·literal 중 한쪽만 새는 회귀를 놓친다(2차 리뷰).
+   */
+  test("★모르는 명령 이름은 출처가 확인된 어휘만, UID 하위는 atom이고 정의된 조합만 남긴다", () => {
+    const name = (cmdName: string, args: Parameters<typeof imapUnknownCommandName>[0]["args"] = []) => imapUnknownCommandName({ tag: "a", name: cmdName, args });
+    expect(name("XLIST")).toBe("XLIST");
+    expect(name("GETMETADATA")).toBe("GETMETADATA");
+    expect(name("PRIVATE-PASSWORD")).toBe("OTHER");
+    expect(name("XYZZY")).toBe("OTHER");
+    expect(name("UID", [{ kind: "atom", value: "convert" }])).toBe("UID CONVERT");
+    expect(name("UID", [{ kind: "quoted", value: "CONVERT" }])).toBe("UID OTHER");
+    expect(name("UID", [{ kind: "literal", bytes: new TextEncoder().encode("CONVERT") }])).toBe("UID OTHER");
+    // 최상위 확장 이름이어도 UID 하위로 정의되지 않은 조합은 남기지 않는다.
+    expect(name("UID", [{ kind: "atom", value: "NOTIFY" }])).toBe("UID OTHER");
+    expect(name("UID", [{ kind: "atom", value: "atom-secret" }])).toBe("UID OTHER");
+    expect(name("UID")).toBe("UID OTHER");
   });
 });
