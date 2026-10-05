@@ -81,6 +81,11 @@ export interface ImapServerOptions {
   allowInsecureAuth?: boolean;
   /** IDLE 중 새 메일/변경 폴링 주기(ms). 기본 15초. 0이면 비활성. */
   idlePollMs?: number;
+  /**
+   * 경고 로그 — 백엔드 예외와 BAD 원문 표본(`imap BAD 표본`)이 여기로 간다.
+   * ★조립층이 넘기지 않으면 둘 다 조용히 사라진다. 2026-10-05까지 실제로 넘기지 않아, 백엔드 예외
+   * 경고가 운영 journal에 한 번도 찍히지 않았다(app.ts).
+   */
   logger?: { warn: (msg: string, fields?: Record<string, unknown>) => void };
   /**
    * 접근 감사 싱크 — `authThrottle`과 같은 이유로 **조립층이 하나를 만들어 주입한다**.
@@ -107,6 +112,8 @@ export interface ImapServerOptions {
   onCommandResult?: (command: ImapCommandLabel | "unparsed", result: ImapCommandResult) => void;
   /** 진행 중 세션 요약 주기(ms) — 테스트용 재정의. 기본 `SESSION_PROGRESS_INTERVAL_MS`, 0이면 끈다. */
   sessionProgressIntervalMs?: number;
+  /** BAD 표본의 리스너당 상한(창당 줄 수) — 테스트용 재정의. 기본 `MAX_BAD_SAMPLES_PER_WINDOW`. */
+  badSamplesPerWindow?: number;
 }
 
 /**
@@ -120,6 +127,62 @@ export interface ImapServerOptions {
 const MAX_PENDING_COMMANDS = 4096;
 /** 태그 달린 완료 응답 — `tag OK|NO|BAD ...`. */
 const TAGGED_RESULT = /^(\S+) (OK|NO|BAD)(?: |$)/;
+
+/**
+ * BAD 원문 표본(command-sample.ts)의 속도 상한 — journal을 BAD 루프의 증폭기로 만들지 않기 위해서다.
+ *
+ * 리스너당 상한이라 143·993을 함께 열면 합계는 두 배다.
+ * ★두 겹인 이유: 세션당 상한만 두면 연결을 계속 새로 여는 상대가 줄 수를 무한히 늘린다. 리스너
+ * 상한만 두면 BAD를 쏟는 세션 하나가 창을 다 써서 다른 클라이언트의 표본이 안 보인다.
+ * 세션당 몇 줄이면 "무엇이 BAD인가"에 답하기 충분하다 — 같은 클라이언트는 같은 명령을 반복한다.
+ */
+const MAX_BAD_SAMPLES_PER_SESSION = 3;
+const MAX_BAD_SAMPLES_PER_WINDOW = 30;
+const BAD_SAMPLE_WINDOW_MS = 10 * 60 * 1000;
+/** BAD 응답 문구의 최대 길이 — 엔진 문구는 짧지만 클라이언트 값을 되풀이하는 문구가 있을 수 있다. */
+const MAX_BAD_REPLY_CHARS = 160;
+/**
+ * 백엔드 예외 경고("imap backend error")의 상한. 조립층이 logger를 넘기기 시작하면서(2026-10-05) 처음
+ * 켜지는 경로다 — 장애 중 인증된 세션이 요청을 반복하면 BAD 예산과 무관하게 줄이 쏟아진다(독립 리뷰).
+ * 예외 문구에는 외부 응답 본문(S3 오류 앞부분 등)이 섞일 수 있어 길이도 자른다.
+ */
+const MAX_BACKEND_ERRORS_PER_WINDOW = 30;
+const MAX_BACKEND_ERROR_CHARS = 200;
+
+/**
+ * 리스너당 BAD 표본 예산 — 고정 창. 창 안에서 상한을 넘긴 줄은 버리고 수만 센다.
+ * 버린 수는 다음 창의 첫 줄에 `suppressed`로 싣는다 — 조용히 사라지면 "BAD가 멎었다"로 읽힌다.
+ */
+export class BadSampleBudget {
+  private windowStart = 0;
+  private used = 0;
+  private suppressed = 0;
+  private readonly limit: number;
+  constructor(limit: number) {
+    this.limit = limit;
+  }
+
+  /** 쓸 수 있으면 직전 창에서 버린 수(없으면 0)를, 없으면 null을 돌려준다. */
+  take(now: number): number | null {
+    if (now - this.windowStart >= BAD_SAMPLE_WINDOW_MS) {
+      this.windowStart = now;
+      this.used = 0;
+    }
+    if (this.used >= this.limit) {
+      this.suppressed++;
+      return null;
+    }
+    this.used++;
+    const dropped = this.suppressed;
+    this.suppressed = 0;
+    return dropped;
+  }
+}
+
+/** 출력 가능한 ASCII만 남기고 자른다 — 남의 문자열이 섞여도 journal 줄을 깨거나 키우지 못하게. */
+function cleanText(text: string, max: number): string {
+  return text.slice(0, max).replace(/[^\x20-\x7e]/g, "?");
+}
 
 /** RFC 9051 §5.4 — 최소 30분 유휴 타임아웃. */
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
@@ -206,6 +269,10 @@ export class ImapServer {
   private readonly peerLimit: PeerConnectionLimiter;
   /** 접근 감사 싱크 — 미주입 시 no-op(호출부가 `?.`를 쓰지 않게). */
   private readonly audit: AuditSink;
+  /** BAD 표본 리스너당 예산 — 리스너(143·993)마다 하나다. */
+  private readonly badSamples: BadSampleBudget;
+  /** 백엔드 예외 경고 예산 — 같은 고정 창 방식, BAD 표본과 따로 센다. */
+  private readonly backendErrors = new BadSampleBudget(MAX_BACKEND_ERRORS_PER_WINDOW);
 
   constructor(opts: ImapServerOptions) {
     this.opts = opts;
@@ -213,6 +280,7 @@ export class ImapServer {
     this.authThrottle = opts.authThrottle ?? new AuthFailureThrottle();
     this.peerLimit = opts.peerLimit ?? new PeerConnectionLimiter();
     this.audit = opts.audit ?? noopAuditSink;
+    this.badSamples = new BadSampleBudget(opts.badSamplesPerWindow ?? MAX_BAD_SAMPLES_PER_WINDOW);
     this.isTls = opts.tls !== undefined;
     // 암시적 TLS면 그 자재를, 평문이면 STARTTLS용 자재를 든다. 둘 다 핫리로드 대상이다.
     if (opts.tls) this.currentTls = opts.tls;
@@ -305,10 +373,11 @@ export class ImapServer {
      * SHOULD NOT일 뿐). 태그당 하나만 들면, 앞 명령의 응답이 나가기 전에 큐에 있던 같은 태그 명령이
      * 들어와 덮어써 결과가 엉뚱한 명령에 붙었다(검수 재현: LIST 결과가 NOOP으로 집계).
      */
-    const pendingTags = new Map<string, ImapCommandLabel[]>();
+    type PendingCommand = { label: ImapCommandLabel; sample: string };
+    const pendingTags = new Map<string, PendingCommand[]>();
     let pendingCount = 0;
     const onCommandResult = this.opts.onCommandResult;
-    const rememberPending = (tag: string, label: ImapCommandLabel): void => {
+    const rememberPending = (tag: string, entry: PendingCommand): void => {
       if (pendingCount >= MAX_PENDING_COMMANDS) {
         // 가장 먼저 들어온 **태그**의 첫 항목을 민다(Map은 태그 삽입 순서를 지킨다). 전체에서 가장 오래된
         // 명령과 다를 수 있어, 상한을 넘긴 채 태그를 재사용하면 결과가 어긋날 수 있다 — 정상 트래픽은
@@ -322,14 +391,14 @@ export class ImapServer {
         }
       }
       const q = pendingTags.get(tag);
-      if (q) q.push(label);
-      else pendingTags.set(tag, [label]);
+      if (q) q.push(entry);
+      else pendingTags.set(tag, [entry]);
       pendingCount++;
     };
 
     const engine = new ImapEngine({
       // 명령마다 센다 — meter는 아래에서 만들지만 이 콜백은 데이터가 들어온 뒤에만 불린다.
-      onCommand: (tag, label, rawName) => {
+      onCommand: (tag, label, rawName, sample) => {
         meter.command(label);
         if (label === "unknown") meter.unknownCommand(rawName);
         /**
@@ -338,7 +407,7 @@ export class ImapServer {
          * 그 명령이 BAD를 받으면 `* BAD`가 unparsed로 한 번 더 세어지는 한계가 있다.
          */
         if (/[*%]/.test(tag)) meter.wildcardTag();
-        if (!tag.includes("*")) rememberPending(tag, label);
+        if (!tag.includes("*")) rememberPending(tag, { label, sample });
       },
       hostname: this.opts.hostname,
       secure,
@@ -378,6 +447,31 @@ export class ImapServer {
     };
     const writeText = (text: string): void => write(new TextEncoder().encode(`${text}\r\n`));
 
+    /**
+     * BAD 원문 표본 한 줄(command-sample.ts). 세션당·리스너당 상한 안에서만 남긴다.
+     * 계정과 주소를 함께 싣는다 — "어느 클라이언트가"를 세션 요약 줄과 맞춰 볼 수 있게.
+     * `suppressed`는 **리스너 예산**에 막혀 버린 수만 센다 — 세션당 상한을 넘긴 반복은 같은 클라이언트의
+     * 같은 BAD라 세지 않는다(그 양은 imap_commands_total에 있다).
+     * 한계: 대기 명령이 MAX_PENDING_COMMANDS를 넘겨 밀려나면 그 태그의 다음 응답이 다음 표본과 짝지어질
+     * 수 있다(결과 집계와 같은 한계). 같은 세션의 명령끼리라 누출은 아니고, 정상 트래픽은 닿지 않는다.
+     */
+    let badSamplesLeft = MAX_BAD_SAMPLES_PER_SESSION;
+    const logBadSample = (command: ImapCommandLabel | "unparsed", sample: string | null, reply: string): void => {
+      const logger = this.opts.logger;
+      if (!logger || badSamplesLeft <= 0) return;
+      const dropped = this.badSamples.take(Date.now());
+      if (dropped === null) return;
+      badSamplesLeft--;
+      logger.warn("imap BAD 표본", {
+        command,
+        ...(sample !== null ? { sample } : {}),
+        reply: cleanText(reply, MAX_BAD_REPLY_CHARS),
+        ip: normalizeIp(rawSocket.remoteAddress),
+        ...(accountId !== null ? { accountId } : {}),
+        ...(dropped > 0 ? { suppressed: dropped } : {}),
+      });
+    };
+
     /** 나가는 줄에서 명령 완료를 읽는다 — 결과(ok/no/bad)는 태그 달린 응답에만 있다. */
     const observeReply = (text: string): void => {
       // untagged·continuation 줄은 결과가 아니다('+'는 파서가 태그로 받지 않는다. '*' 태그는 위 한계 참조).
@@ -387,6 +481,8 @@ export class ImapServer {
         if (text.startsWith("* BAD ")) {
           meter.command("unparsed");
           onCommandResult?.("unparsed", "bad");
+          // 파싱 전에 거절돼 원문 모양이 없다 — 응답 문구(무엇이 깨졌는지)만 남긴다.
+          logBadSample("unparsed", null, text.slice("* BAD ".length));
         }
         return;
       }
@@ -394,11 +490,13 @@ export class ImapServer {
       const m = TAGGED_RESULT.exec(text);
       if (!m) return;
       const q = pendingTags.get(m[1]!);
-      const label = q?.shift();
-      if (label === undefined) return;
+      const entry = q?.shift();
+      if (entry === undefined) return;
       pendingCount--;
       if (q!.length === 0) pendingTags.delete(m[1]!);
-      onCommandResult?.(label, m[2]!.toLowerCase() as ImapCommandResult);
+      const result = m[2]!.toLowerCase() as ImapCommandResult;
+      onCommandResult?.(entry.label, result);
+      if (result === "bad") logBadSample(entry.label, entry.sample, text.slice(m[0].length));
     };
 
     const meter = new SessionMeter({
@@ -557,7 +655,13 @@ export class ImapServer {
             try {
               res = await backend.request(accountId, action.req);
             } catch (err) {
-              this.opts.logger?.warn("imap backend error", { error: err instanceof Error ? err.message : String(err) });
+              const dropped = this.opts.logger ? this.backendErrors.take(Date.now()) : null;
+              if (dropped !== null) {
+                this.opts.logger?.warn("imap backend error", {
+                  error: cleanText(err instanceof Error ? err.message : String(err), MAX_BACKEND_ERROR_CHARS),
+                  ...(dropped > 0 ? { suppressed: dropped } : {}),
+                });
+              }
               res = { kind: "no", message: "internal error" };
             }
             /**

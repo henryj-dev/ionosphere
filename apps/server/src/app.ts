@@ -1161,6 +1161,8 @@ export class IonosphereApp {
         sessions: this.sessions,
         onCommandResult: this.imapCommandResult,
         audit: this.audit,
+        // 백엔드 예외·BAD 원문 표본 경고 — 넘기지 않으면 둘 다 조용히 사라진다(2026-10-05까지 그랬다).
+        logger: ctx.log,
         hostname: this.opts.hostname,
         backend: imapBackend,
         // 143 평문 AUTH: TLS를 **구성했으면** 차단(LOGINDISABLED 광고 + NO [PRIVACYREQUIRED]).
@@ -1184,6 +1186,7 @@ export class IonosphereApp {
           sessions: this.sessions,
           onCommandResult: this.imapCommandResult,
           audit: this.audit,
+          logger: ctx.log,
           hostname: this.opts.hostname,
           backend: imapBackend,
           tls: imapsTls,
