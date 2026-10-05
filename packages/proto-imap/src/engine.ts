@@ -22,7 +22,7 @@ import {
 } from "@ionosphere/core";
 import { ImapLineReader, type LinePart, type ReaderEvent } from "./reader.ts";
 import { ImapParseError, parseCommand, valueText, type ImapValue, type ParsedCommand } from "./parser.ts";
-import { imapCommandLabel, type ImapCommandLabel } from "./command-label.ts";
+import { imapCommandLabel, imapUnknownCommandName, type ImapCommandLabel } from "./command-label.ts";
 import { imapCommandSample } from "./command-sample.ts";
 import { formatUidSet, matchSequenceSet, parseSequenceSet, type SeqRange } from "./sequence-set.ts";
 import { evaluateSearch, parseSearchProgram, searchNeedsRaw } from "./search-criteria.ts";
@@ -351,8 +351,10 @@ export interface ImapEngineOptions {
    * `sample`은 원문 표본(command-sample.ts) — 길이가 잘린 **문자열**이다. 지연 계산 클로저로 넘기면
    * 명령 전체(literal 바이트 포함)를 결과가 나올 때까지 붙잡는다(독립 리뷰: 큰 literal을 단 IDLE이
    * DONE까지 그 바이트를 쥔다). 렌더는 허용된 명령만, 길이 상한까지만 하므로 싸다.
+   * `summaryName`은 세션 요약용 이름 — 모르는 명령이면 알려진 확장 이름이나 `OTHER`다
+   * (`imapUnknownCommandName`). 클라이언트가 보낸 이름을 그대로 넘기지 않는다.
    */
-  onCommand?: (tag: string, label: ImapCommandLabel, rawName: string, sample: string) => void;
+  onCommand?: (tag: string, label: ImapCommandLabel, summaryName: string, sample: string) => void;
 }
 
 /** AUTHENTICATE 진행 상태 — continuation으로 SASL 데이터 라인을 기다리는 중. */
@@ -474,7 +476,7 @@ export class ImapEngine {
   /** 인증 후 복원할 리터럴 상한(APPEND 기준). 인증 전에는 훨씬 작은 값으로 리더를 조인다. */
   private readonly authedMaxLiteralBytes: number;
 
-  private readonly onCommand: ((tag: string, label: ImapCommandLabel, rawName: string, sample: string) => void) | undefined;
+  private readonly onCommand: ((tag: string, label: ImapCommandLabel, summaryName: string, sample: string) => void) | undefined;
 
   constructor(opts: ImapEngineOptions) {
     this.onCommand = opts.onCommand;
@@ -704,13 +706,10 @@ export class ImapEngine {
     }
     if (this.onCommand) {
       const label = imapCommandLabel(cmd);
-      // 모르는 UID 하위 명령은 표본에 하위 이름까지 남긴다 — "UID"만으로는 무엇이 BAD로 도는지 모른다.
-      // ★atom일 때만 — valueText는 quoted·literal도 원문으로 되살려, `UID "secret"`의 내용이 세션 요약의
-      // 모르는 명령 표본으로 새어 나갔다(BAD 표본 2차 리뷰).
-      const first = cmd.name === "UID" ? cmd.args[0] : undefined;
-      const sub = first?.kind === "atom" ? first.value : null;
-      const rawName = sub ? `UID ${sub}` : cmd.name;
-      this.onCommand(cmd.tag, label, rawName, imapCommandSample(cmd, label));
+      // 모르는 명령은 세션 요약에 이름을 남기되, 알려진 확장 이름만 그대로 둔다(command-label.ts) —
+      // 클라이언트가 보낸 이름은 비밀일 수 있다(태그 없이 친 비밀번호가 명령 이름 자리에 온다).
+      const summaryName = label === "unknown" ? imapUnknownCommandName(cmd) : label;
+      this.onCommand(cmd.tag, label, summaryName, imapCommandSample(cmd, label));
     }
 
     switch (cmd.name) {

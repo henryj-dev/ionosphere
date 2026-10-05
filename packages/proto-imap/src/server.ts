@@ -398,9 +398,9 @@ export class ImapServer {
 
     const engine = new ImapEngine({
       // 명령마다 센다 — meter는 아래에서 만들지만 이 콜백은 데이터가 들어온 뒤에만 불린다.
-      onCommand: (tag, label, rawName, sample) => {
+      onCommand: (tag, label, summaryName, sample) => {
         meter.command(label);
-        if (label === "unknown") meter.unknownCommand(rawName);
+        if (label === "unknown") meter.unknownCommand(summaryName);
         /**
          * 태그에 `*`·`%`는 RFC상 올 수 없지만 **거부하지 않고 센다**(SessionSummary.wildcardTags 주석).
          * `*` 태그의 완료 응답은 untagged 줄(`* OK ...`)과 구별되지 않으므로 결과를 추적하지 않는다 —

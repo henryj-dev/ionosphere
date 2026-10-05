@@ -247,13 +247,36 @@ describe("IMAP 명령 계측", () => {
     expect(s.reads).toBeGreaterThan(0);
   });
 
-  test("모르는 UID 하위 명령은 표본에 하위 이름까지 남는다", async () => {
+  test("모르는 UID 하위 명령은 UID로 묶고, 알려진 확장 이름만 그대로 남긴다", async () => {
     const { summaries, c } = await loggedIn();
     c.send("u1 UID BOGUS 1\r\n");
     await c.waitFor("u1 BAD");
+    c.send("u2 XLIST \"\" *\r\n");
+    await c.waitFor("u2 BAD");
     c.send("z LOGOUT\r\n");
     await c.closed;
     const s = await waitSummary(summaries);
-    expect(s.unknownCommands).toEqual(["UID?BOGUS"]);
+    expect(s.unknownCommands).toEqual(["UID?OTHER", "XLIST"]);
+  });
+
+  /**
+   * ★2026-10-05 BAD 표본 PR 3차 리뷰: 태그 없이 친 `user private-password`는 둘째 단어가 명령 이름
+   * 자리에 와서 `PRIVATE-PASSWORD`로 요약에 남았다. `UID "secret"`은 quoted 내용이 하위 이름으로
+   * 되살아났다. 이제 알려진 확장 이름이 아니면 OTHER뿐이다.
+   */
+  test("★모르는 명령 이름 자리의 비밀은 요약에 남지 않는다", async () => {
+    const { summaries, c } = await loggedIn();
+    c.send("user private-password\r\n");
+    await c.waitFor("user BAD");
+    c.send('u1 UID "quoted-secret"\r\n');
+    await c.waitFor("u1 BAD");
+    c.send("u2 UID atom-secret 1\r\n");
+    await c.waitFor("u2 BAD");
+    c.send("z LOGOUT\r\n");
+    await c.closed;
+    const s = await waitSummary(summaries);
+    expect(s.unknownCommands).toEqual(["OTHER", "UID?OTHER"]);
+    const text = JSON.stringify(s).toUpperCase();
+    for (const secret of ["PRIVATE-PASSWORD", "QUOTED-SECRET", "ATOM-SECRET"]) expect(text).not.toContain(secret);
   });
 });
