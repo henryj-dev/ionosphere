@@ -625,6 +625,8 @@ export class IonosphereImapBackend implements ImapBackend {
       req.sinceModseq >= found.row.expungedFloor
         ? await this.vanishedFromTombstones(found.row.id, req.sinceModseq)
         : await this.vanishedByDifference(found.row, req.knownUids ?? null);
+    // UID FETCH VANISHED는 사라진 uid만 쓴다 — 변경분은 FETCH가 CHANGEDSINCE로 직접 거른다.
+    if (req.vanishedOnly) return { kind: "sync", vanished, changed: [] };
     const { rows: changedRows } = await this.db.query({
       sql: `SELECT mm.uid AS uid FROM message_mailbox mm JOIN messages m ON m.id = mm.message_id
             WHERE mm.mailbox_id = ? AND m.modseq > ? ORDER BY mm.uid`,

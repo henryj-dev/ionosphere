@@ -129,6 +129,12 @@ export type ImapBackendRequest =
        * 백엔드가 `1:uidnext-1`로 간주한다 — RFC가 정한 기본값이다.
        */
       knownUids?: readonly SeqRange[];
+      /**
+       * 사라진 uid만 필요하다 — 변경 델타(`changed`)는 비워 둔다. UID FETCH의 VANISHED 수정자
+       * (RFC 7162 §3.2.6)는 변경분을 FETCH 자신이 CHANGEDSINCE로 거르므로, 델타를 또 가져오면
+       * 같은 메시지를 두 번 읽는다.
+       */
+      vanishedOnly?: true;
     }
   /** EXPUNGE — \Deleted 영구 삭제. uids 지정 시 그 UID들만(UIDPLUS UID EXPUNGE). */
   | { kind: "expunge"; name: string; uids: readonly number[] | null }
@@ -1359,14 +1365,29 @@ export class ImapEngine {
     if (!view) return [{ kind: "reply", text: `${cmd.tag} BAD command requires a selected mailbox` }];
     const setText = cmd.args[0] ? valueText(cmd.args[0]) : null;
     const ranges = setText !== null ? this.resolveSetArg(setText, uidMode) : null;
-    // CONDSTORE 수정자(RFC 7162): 마지막 인자가 (CHANGEDSINCE n) 리스트
+    // CONDSTORE 수정자(RFC 7162): 마지막 인자가 (CHANGEDSINCE n [VANISHED]) 리스트
     let itemArgs = cmd.args.slice(1);
     let changedSince: number | null = null;
+    /**
+     * ★QRESYNC의 VANISHED 수정자(RFC 7162 §3.2.6). 우리는 QRESYNC를 광고하는데 이 수정자를 몰라
+     * `(CHANGEDSINCE n VANISHED)`를 BAD로 거절했다 — 2026-10-05 실측에서 UID FETCH BAD가 5분에
+     * 2건씩 쌓였고 ok는 거의 없었다(QRESYNC 클라이언트가 동기화마다 같은 요청을 되풀이한다).
+     * 광고와 구현이 어긋난 BAD는 10-02 LIST 루프와 같은 유형이다.
+     */
+    let vanishedWanted = false;
     const lastArg = itemArgs[itemArgs.length - 1];
     if (itemArgs.length >= 2 && lastArg?.kind === "list" && valueText(lastArg.items[0] ?? { kind: "atom", value: "" })?.toUpperCase() === "CHANGEDSINCE") {
       const n = valueText(lastArg.items[1] ?? { kind: "atom", value: "" });
-      if (!n || !/^\d+$/.test(n) || lastArg.items.length !== 2) {
+      const third = lastArg.items[2];
+      const vanishedMod = third !== undefined && third.kind === "atom" && third.value.toUpperCase() === "VANISHED";
+      if (!n || !/^\d+$/.test(n) || lastArg.items.length !== (vanishedMod ? 3 : 2)) {
         return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} invalid CHANGEDSINCE` }];
+      }
+      if (vanishedMod) {
+        // §3.2.6: UID FETCH 전용이고, QRESYNC를 켠 세션만 쓸 수 있다 — 둘 다 아니면 BAD.
+        if (!uidMode) return [{ kind: "reply", text: `${cmd.tag} BAD VANISHED requires UID FETCH` }];
+        if (!this.enabled.has("QRESYNC")) return [{ kind: "reply", text: `${cmd.tag} BAD QRESYNC not enabled` }];
+        vanishedWanted = true;
       }
       changedSince = Number(n);
       this.enabled.add("CONDSTORE"); // 사용 자체가 활성화(RFC 7162)
@@ -1381,9 +1402,6 @@ export class ImapEngine {
     if (changedSince !== null && !items.some((it) => it.kind === "modseq")) items.push({ kind: "modseq" });
 
     const targets = this.resolveTargets(ranges, uidMode);
-    if (targets.length === 0) {
-      return [{ kind: "reply", text: `${cmd.tag} OK ${verb} completed` }];
-    }
 
     const needRaw = items.some(
       (it) =>
@@ -1453,7 +1471,34 @@ export class ImapEngine {
         },
       );
     };
-    return fetchFrom(0);
+    const fetchAll = (): ImapAction[] =>
+      targets.length === 0 ? [{ kind: "reply", text: `${cmd.tag} OK ${verb} completed` }] : fetchFrom(0);
+    if (!vanishedWanted || changedSince === null) return fetchAll();
+
+    /**
+     * VANISHED (EARLIER)를 FETCH 응답보다 **먼저** 보낸다(RFC 7162 §3.2.6 예시 순서). 사라진 uid는
+     * QRESYNC SELECT와 같은 백엔드 계산(syncSince — 툼스톤, 보존창 밖이면 known-uids 차집합)을 쓰고,
+     * 요청한 UID 집합을 known-uids로 넘긴다. 툼스톤 경로는 메일함 전체를 돌려주므로 요청 집합으로
+     * 다시 거른다. `*`는 상한 없이 본다 — 마지막 메시지가 지워졌으면 그 uid는 현재 최대 uid보다 크다.
+     */
+    const inRequested = (uid: number): boolean =>
+      ranges.some((r) => {
+        const a = r.from === "*" ? Infinity : r.from;
+        const b = r.to === "*" ? Infinity : r.to;
+        return uid >= Math.min(a, b) && uid <= Math.max(a, b);
+      });
+    return this.callBackend(
+      { kind: "syncSince", name: view.name, sinceModseq: changedSince, knownUids: ranges, vanishedOnly: true },
+      (sync) => {
+        if (sync.kind === "no") return [ImapEngine.noReply(cmd.tag, verb, sync)];
+        if (sync.kind !== "sync") return [{ kind: "reply", text: `${cmd.tag} NO ${verb} failed` }];
+        const vanished = sync.vanished.filter(inRequested);
+        return [
+          ...(vanished.length > 0 ? [{ kind: "reply" as const, text: `* VANISHED (EARLIER) ${formatUidSet(vanished)}` }] : []),
+          ...fetchAll(),
+        ];
+      },
+    );
   }
 
   /** APPEND (RFC 9051 §6.3.12) — [flags] [date-time] literal. UIDPLUS APPENDUID 방출. */
