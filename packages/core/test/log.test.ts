@@ -67,6 +67,57 @@ describe("logger 마스킹", () => {
     }
   });
 
+  /**
+   * ★민감한 이름이어도 숫자·불리언 카운터는 보인다(2026-10-02). 이름 기반 가림이 세션 요약의
+   * `authFailures`·`commandCounts.AUTHENTICATE`까지 `<redacted>`로 바꿔 인증 관련 수를 볼 수 없었다.
+   */
+  test("★민감한 이름의 숫자·불리언은 보인다 — 세션 요약의 인증 카운터", () => {
+    const parsed = capture((log) =>
+      log.info("세션 종료", {
+        authFailures: 2,
+        commandCounts: { AUTHENTICATE: 3, LIST: 5 },
+        nested: { authOk: true, tokenCount: 0 },
+      }),
+    );
+    expect(parsed.authFailures).toBe(2);
+    expect((parsed.commandCounts as Record<string, unknown>).AUTHENTICATE).toBe(3);
+    expect((parsed.commandCounts as Record<string, unknown>).LIST).toBe(5);
+    expect((parsed.nested as Record<string, unknown>).authOk).toBe(true);
+    expect((parsed.nested as Record<string, unknown>).tokenCount).toBe(0);
+  });
+
+  /** 반대쪽 경계 — 문자열 자격증명은 숫자처럼 생겨도, 객체로 감싸도 계속 가린다. */
+  test("★문자열 자격증명은 계속 가린다 — 숫자처럼 생긴 문자열·객체·Buffer 포함", () => {
+    const parsed = capture((log) =>
+      log.info("x", {
+        password: "hunter2",
+        authCode: "123456",
+        apiToken: "cf-abc",
+        auth: { user: "u", pass: "p" },
+        dkimKey: Buffer.from("private"),
+        secretBig: 10n,
+      }),
+    );
+    for (const k of ["password", "authCode", "apiToken", "auth", "dkimKey", "secretBig"]) {
+      expect(parsed[k]).toBe("<redacted>");
+    }
+  });
+
+  /**
+   * ★값 자체가 비밀인 이름은 **숫자여도** 가린다(보안 리뷰 L-1·L-2). 숫자 예외는 카운터를 위한 것이라,
+   * 나중에 숫자형 OTP·PIN이 들어와도 그 예외로 새지 않게 이름으로 막는다.
+   */
+  test("★password·secret·otp·pin·code 이름은 숫자여도 가린다", () => {
+    const parsed = capture((log) =>
+      log.info("x", { password: 1234, clientSecret: 7, otpToken: 123456, authPin: 4321, authCode: 42, authFailures: 3 }),
+    );
+    for (const k of ["password", "clientSecret", "otpToken", "authPin", "authCode"]) {
+      expect(parsed[k]).toBe("<redacted>");
+    }
+    // 카운터는 여전히 보인다.
+    expect(parsed.authFailures).toBe(3);
+  });
+
   test("대소문자를 가리지 않는다", () => {
     const parsed = capture((log) => log.info("x", { PASSWORD: "a", Api_Token: "b", DKIM_KEY: "c" }));
     expect(parsed.PASSWORD).toBe("<redacted>");

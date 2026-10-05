@@ -51,6 +51,38 @@ function isSensitiveKey(key: string): boolean {
 }
 
 /**
+ * 민감한 이름이어도 **숫자·불리언 원시값은 가리지 않는다.**
+ *
+ * ★왜(2026-10-02): 이름 기반 가림이 `authFailures`(인증 실패 횟수)와 `commandCounts.AUTHENTICATE`
+ * (AUTHENTICATE 명령 수) 같은 **카운터**까지 `<redacted>`로 바꿔, 세션 요약의 인증 관련 수를 journal로
+ * 볼 수 없었다. 이 저장소의 자격증명은 전부 문자열·Buffer다(비밀번호·토큰·키). 숫자로 된 비밀(PIN·OTP·
+ * TOTP)을 다루는 코드는 없다 — 유일하게 "코드"라는 이름의 값(JMAP PushSubscription `verificationCode`)도
+ * ULID **문자열**이다. 그래서 숫자·불리언을 열어도 새는 것이 없고, 문자열은 숫자처럼 생겨도("123456")
+ * 계속 가린다. bigint는 드물고 판단할 근거가 없어 가리는 쪽에 둔다.
+ */
+function isUnmaskedPrimitive(value: unknown): boolean {
+  return typeof value === "number" || typeof value === "boolean";
+}
+
+/**
+ * 숫자여도 **계속 가리는** 이름 조각 — 값 자체가 비밀일 수 있는 이름이다(보안 리뷰 L-1·L-2).
+ *
+ * 숫자 예외는 "지금 이 저장소의 자격증명은 전부 문자열이다"라는 사실에 기대므로, 나중에 숫자형
+ * OTP·PIN이 들어오면 그 예외가 그대로 값을 연다. `password: 1234`도 마찬가지다. 그래서 카운터에
+ * 흔한 조각(`auth`·`token`·`key`)만 숫자를 열고, 값이 곧 비밀인 이름은 숫자여도 가린다(fail closed).
+ * 민감 이름 판정(isSensitiveKey)을 먼저 통과한 키에만 적용하므로 `pin`이 `spinner` 같은 일반 필드를
+ * 가리지는 않는다.
+ */
+const ALWAYS_REDACT_PARTS = ["password", "passwd", "secret", "otp", "pin", "code"] as const;
+
+function shouldRedact(key: string, value: unknown): boolean {
+  if (!isSensitiveKey(key)) return false;
+  const lower = key.toLowerCase();
+  if (ALWAYS_REDACT_PARTS.some((part) => lower.includes(part))) return true;
+  return !isUnmaskedPrimitive(value);
+}
+
+/**
  * 중첩까지 내려가야 하는 이유가 곧 M-9의 위협이다 — 위험한 것은 `{ password }`가 아니라
  * `{ opts: { smarthost: { password } } }`처럼 **한 겹 감싼 객체를 통째로 넘기는 실수**다.
  *
@@ -78,7 +110,7 @@ function redactValue(value: unknown, path: Set<object>): unknown {
   path.add(value);
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(value)) {
-    out[k] = isSensitiveKey(k) ? REDACTED : redactValue(v, path);
+    out[k] = shouldRedact(k, v) ? REDACTED : redactValue(v, path);
   }
   path.delete(value);
   return out;
@@ -88,7 +120,7 @@ function redactFields(fields: LogFields): LogFields {
   const out: LogFields = {};
   const path = new Set<object>();
   for (const [k, v] of Object.entries(fields)) {
-    out[k] = isSensitiveKey(k) ? REDACTED : redactValue(v, path);
+    out[k] = shouldRedact(k, v) ? REDACTED : redactValue(v, path);
   }
   return out;
 }
