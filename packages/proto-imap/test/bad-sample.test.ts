@@ -5,7 +5,8 @@
  * 쌓였는데 지표는 "UID FETCH가 BAD"까지만 말했다. 무엇을 물었기에 BAD인지 알려면 원문이 필요하다.
  * 여기서 보는 것:
  *  1. BAD를 받으면 명령의 모양(atom 그대로, 섹션 괄호 원문대로)이 journal 경고로 남는다.
- *  2. 자격증명은 남지 않는다 — LOGIN·AUTHENTICATE는 인자를 통째로 빼고, quoted·literal은 내용을 지운다.
+ *  2. 자격증명·개인정보는 남지 않는다 — 인자는 허용 목록의 명령만 남기고(모르는 명령·LOGIN·ACL·SEARCH는
+ *     이름만), 그 안에서도 quoted·literal은 내용을 지운다.
  *  3. 세션당·서버 전체 상한이 걸린다 — BAD 루프가 journal 증폭기가 되지 않는다.
  */
 import { afterEach, describe, expect, test } from "@ionosphere/testkit";
@@ -28,11 +29,11 @@ const backend: ImapBackend = {
 
 type Warn = { msg: string; fields: Record<string, unknown> };
 
-async function start(opts: { badSamplesPerWindow?: number; logger?: boolean } = {}): Promise<{ port: number; warns: Warn[] }> {
+async function start(opts: { badSamplesPerWindow?: number; logger?: boolean; backend?: ImapBackend } = {}): Promise<{ port: number; warns: Warn[] }> {
   const warns: Warn[] = [];
   const server = new ImapServer({
     hostname: "imap.test",
-    backend,
+    backend: opts.backend ?? backend,
     allowInsecureAuth: true,
     ...(opts.logger === false ? {} : { logger: { warn: (msg: string, fields?: Record<string, unknown>) => void warns.push({ msg, fields: fields ?? {} }) } }),
     ...(opts.badSamplesPerWindow !== undefined ? { badSamplesPerWindow: opts.badSamplesPerWindow } : {}),
@@ -98,10 +99,39 @@ describe("IMAP BAD 원문 표본", () => {
 
   test("★quoted·literal은 내용을 지우고 모양만 남긴다", async () => {
     const { port, warns } = await start();
-    await session(port, ["a1 LOGIN u@imap.test pw", 'a2 FROB "private words" {5+}\r\nworld']);
-    expect(samples(warns).map((w) => w.fields.sample)).toEqual(['FROB "…" {5}']);
+    await session(port, ["a1 LOGIN u@imap.test pw", 'a2 STATUS "private words" (BOGUS)', "a3 STATUS {5+}\r\nworld (BOGUS)"]);
+    expect(samples(warns).map((w) => w.fields.sample)).toEqual(['STATUS "…" (BOGUS)', "STATUS {5} (BOGUS)"]);
     expect(JSON.stringify(warns)).not.toContain("private");
     expect(JSON.stringify(warns)).not.toContain("world");
+  });
+
+  /**
+   * ★1차 리뷰가 재현한 누출: 제외 목록(LOGIN·AUTHENTICATE)이었을 때 `UID LOGIN user secret`은 모르는 UID
+   * 하위 명령으로 BAD를 받으며 비밀번호를 그대로 남겼다. 이제 허용 목록 밖은 이름만 남는다.
+   */
+  test("★모르는 명령·UID 하위 명령은 이름만 남긴다 — 무엇이 실렸는지 모르기 때문이다", async () => {
+    const { port, warns } = await start();
+    await session(port, ["a1 LOGIN u@imap.test pw", "a2 UID LOGIN someone hunter2", "a3 URLFETCH imap://x;URLAUTH=tok3n", 'a4 FROB "q" {5+}\r\nworld']);
+    expect(samples(warns).map((w) => w.fields.sample)).toEqual(["UID LOGIN [인자 생략]", "URLFETCH [인자 생략]", "FROB [인자 생략]"]);
+    const text = JSON.stringify(warns);
+    for (const secret of ["hunter2", "someone", "tok3n", "world"]) expect(text).not.toContain(secret);
+  });
+
+  test("★계정 식별자(ACL)·검색어(SEARCH)를 싣는 명령도 이름만 남긴다", async () => {
+    const { port, warns } = await start();
+    await session(port, ["a1 LOGIN u@imap.test pw", "a2 SETACL INBOX friend@imap.test", "a3 SEARCH FROM boss@imap.test SUBJECT payroll"]);
+    expect(samples(warns).map((w) => w.fields.sample)).toEqual(["SETACL [인자 생략]", "SEARCH [인자 생략]"]);
+    const text = JSON.stringify(warns);
+    for (const pii of ["friend@", "boss@", "payroll"]) expect(text).not.toContain(pii);
+  });
+
+  test("긴 인자는 자른다 — 거대한 시퀀스 집합이 journal 줄을 키우지 못한다", async () => {
+    const { port, warns } = await start();
+    const seq = Array.from({ length: 2000 }, (_, i) => i + 1).join(",");
+    await session(port, ["a1 LOGIN u@imap.test pw", `a2 UID FETCH ${seq} (FLAGS)`]);
+    const sample = String(samples(warns)[0]?.fields.sample);
+    expect(sample.startsWith("UID FETCH 1,2,3,")).toBe(true);
+    expect(sample.length).toBeLessThanOrEqual(201);
   });
 
   test("파싱도 못 한 줄은 응답 문구만 남긴다", async () => {
@@ -112,16 +142,16 @@ describe("IMAP BAD 원문 표본", () => {
 
   test("★세션당 3줄까지만 — 같은 클라이언트가 BAD를 반복해도 journal이 불지 않는다", async () => {
     const { port, warns } = await start();
-    await session(port, ["a1 LOGIN u@imap.test pw", ...[2, 3, 4, 5, 6].map((n) => `a${n} FROB ${n}`)]);
-    expect(samples(warns).map((w) => w.fields.sample)).toEqual(["FROB 2", "FROB 3", "FROB 4"]);
+    await session(port, ["a1 LOGIN u@imap.test pw", ...[2, 3, 4, 5, 6].map((n) => `a${n} STATUS INBOX (BOGUS${n})`)]);
+    expect(samples(warns).map((w) => w.fields.sample)).toEqual(["STATUS INBOX (BOGUS2)", "STATUS INBOX (BOGUS3)", "STATUS INBOX (BOGUS4)"]);
   });
 
   test("★서버 전체 상한 — 버린 수는 다음 창의 첫 줄에 suppressed로 싣는다", async () => {
     const { port, warns } = await start({ badSamplesPerWindow: 2 });
-    await session(port, ["a1 FROB 1", "a2 FROB 2"]);
-    await session(port, ["b1 FROB 1", "b2 FROB 2"]);
+    await session(port, ["a1 STATUS INBOX (X1)", "a2 STATUS INBOX (X2)"]);
+    await session(port, ["b1 STATUS INBOX (Y1)", "b2 STATUS INBOX (Y2)"]);
     // 창 안에서는 2줄만 — 두 번째 세션의 BAD 2건은 버려진다.
-    expect(samples(warns).map((w) => w.fields.sample)).toEqual(["FROB 1", "FROB 2"]);
+    expect(samples(warns).map((w) => w.fields.sample)).toEqual(["STATUS INBOX (X1)", "STATUS INBOX (X2)"]);
     expect(samples(warns).some((w) => "suppressed" in w.fields)).toBe(false);
   });
 
@@ -130,6 +160,19 @@ describe("IMAP BAD 원문 표본", () => {
     const out = await session(port, ["a1 LOGIN u@imap.test pw", "a2 NOOP", "a3 SELECT INBOX"]);
     expect(out).toContain("a3 NO");
     expect(samples(warns)).toEqual([]);
+  });
+
+  /**
+   * logger를 넘기면서 백엔드 예외 경고도 처음 켜진다. 장애 중 요청을 반복하는 세션이 줄을 쏟지 않게
+   * 상한을 두고, 외부 응답 본문이 섞일 수 있는 예외 문구는 자른다(1차 리뷰).
+   */
+  test("백엔드 예외 경고도 상한과 길이 제한이 걸린다", async () => {
+    const failing: ImapBackend = { ...backend, request: async () => Promise.reject(new Error(`boom ${"x".repeat(500)}`)) };
+    const { port, warns } = await start({ backend: failing });
+    await session(port, ["a1 LOGIN u@imap.test pw", ...Array.from({ length: 35 }, (_, i) => `s${i} SELECT INBOX`)]);
+    const errors = warns.filter((w) => w.msg === "imap backend error");
+    expect(errors).toHaveLength(30);
+    expect(String(errors[0]!.fields.error).length).toBe(200);
   });
 
   test("로거가 없어도 BAD 응답은 그대로 나간다", async () => {

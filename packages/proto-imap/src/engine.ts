@@ -348,10 +348,11 @@ export interface ImapEngineOptions {
    * 명령을 받았을 때 알림 — 어댑터가 명령 수·결과를 세는 데 쓴다(command-label.ts).
    * 액션이 아니라 콜백인 이유: 관측일 뿐 프로토콜 흐름에 끼지 않는다. 액션으로 내면 모든
    * 명령의 반환 배열이 바뀌어 엔진 테스트 전부가 관측 때문에 다시 써야 한다. I/O는 없다.
-   * `sample`은 원문 표본(command-sample.ts)을 **지연** 계산한다 — BAD를 받은 명령만 표본이 필요하므로
-   * 모든 명령마다 문자열을 만들지 않는다.
+   * `sample`은 원문 표본(command-sample.ts) — 길이가 잘린 **문자열**이다. 지연 계산 클로저로 넘기면
+   * 명령 전체(literal 바이트 포함)를 결과가 나올 때까지 붙잡는다(독립 리뷰: 큰 literal을 단 IDLE이
+   * DONE까지 그 바이트를 쥔다). 렌더는 허용된 명령만, 길이 상한까지만 하므로 싸다.
    */
-  onCommand?: (tag: string, label: ImapCommandLabel, rawName: string, sample: () => string) => void;
+  onCommand?: (tag: string, label: ImapCommandLabel, rawName: string, sample: string) => void;
 }
 
 /** AUTHENTICATE 진행 상태 — continuation으로 SASL 데이터 라인을 기다리는 중. */
@@ -473,7 +474,7 @@ export class ImapEngine {
   /** 인증 후 복원할 리터럴 상한(APPEND 기준). 인증 전에는 훨씬 작은 값으로 리더를 조인다. */
   private readonly authedMaxLiteralBytes: number;
 
-  private readonly onCommand: ((tag: string, label: ImapCommandLabel, rawName: string, sample: () => string) => void) | undefined;
+  private readonly onCommand: ((tag: string, label: ImapCommandLabel, rawName: string, sample: string) => void) | undefined;
 
   constructor(opts: ImapEngineOptions) {
     this.onCommand = opts.onCommand;
@@ -705,8 +706,8 @@ export class ImapEngine {
       const label = imapCommandLabel(cmd);
       // 모르는 UID 하위 명령은 표본에 하위 이름까지 남긴다 — "UID"만으로는 무엇이 BAD로 도는지 모른다.
       const sub = cmd.name === "UID" && cmd.args[0] ? valueText(cmd.args[0]) : null;
-      const parsed = cmd;
-      this.onCommand(cmd.tag, label, sub ? `UID ${sub}` : cmd.name, () => imapCommandSample(parsed));
+      const rawName = sub ? `UID ${sub}` : cmd.name;
+      this.onCommand(cmd.tag, label, rawName, imapCommandSample(cmd, label, rawName));
     }
 
     switch (cmd.name) {

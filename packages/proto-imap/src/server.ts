@@ -140,6 +140,13 @@ const MAX_BAD_SAMPLES_PER_WINDOW = 30;
 const BAD_SAMPLE_WINDOW_MS = 10 * 60 * 1000;
 /** BAD 응답 문구의 최대 길이 — 엔진 문구는 짧지만 클라이언트 값을 되풀이하는 문구가 있을 수 있다. */
 const MAX_BAD_REPLY_CHARS = 160;
+/**
+ * 백엔드 예외 경고("imap backend error")의 상한. 조립층이 logger를 넘기기 시작하면서(2026-10-05) 처음
+ * 켜지는 경로다 — 장애 중 인증된 세션이 요청을 반복하면 BAD 예산과 무관하게 줄이 쏟아진다(독립 리뷰).
+ * 예외 문구에는 외부 응답 본문(S3 오류 앞부분 등)이 섞일 수 있어 길이도 자른다.
+ */
+const MAX_BACKEND_ERRORS_PER_WINDOW = 30;
+const MAX_BACKEND_ERROR_CHARS = 200;
 
 /**
  * 서버 전체 BAD 표본 예산 — 고정 창. 창 안에서 상한을 넘긴 줄은 버리고 수만 센다.
@@ -171,9 +178,9 @@ export class BadSampleBudget {
   }
 }
 
-/** 출력 가능한 ASCII만 남기고 자른다 — 응답 문구에 클라이언트 값이 섞여도 journal 줄을 깨지 못하게. */
-function cleanReply(text: string): string {
-  return text.replace(/[^\x20-\x7e]/g, "?").slice(0, MAX_BAD_REPLY_CHARS);
+/** 출력 가능한 ASCII만 남기고 자른다 — 남의 문자열이 섞여도 journal 줄을 깨거나 키우지 못하게. */
+function cleanText(text: string, max: number): string {
+  return text.slice(0, max).replace(/[^\x20-\x7e]/g, "?");
 }
 
 /** RFC 9051 §5.4 — 최소 30분 유휴 타임아웃. */
@@ -263,6 +270,8 @@ export class ImapServer {
   private readonly audit: AuditSink;
   /** BAD 표본 서버 전체 예산 — 리스너(143·993)마다 하나다. */
   private readonly badSamples: BadSampleBudget;
+  /** 백엔드 예외 경고 예산 — 같은 고정 창 방식, BAD 표본과 따로 센다. */
+  private readonly backendErrors = new BadSampleBudget(MAX_BACKEND_ERRORS_PER_WINDOW);
 
   constructor(opts: ImapServerOptions) {
     this.opts = opts;
@@ -363,7 +372,7 @@ export class ImapServer {
      * SHOULD NOT일 뿐). 태그당 하나만 들면, 앞 명령의 응답이 나가기 전에 큐에 있던 같은 태그 명령이
      * 들어와 덮어써 결과가 엉뚱한 명령에 붙었다(검수 재현: LIST 결과가 NOOP으로 집계).
      */
-    type PendingCommand = { label: ImapCommandLabel; sample: () => string };
+    type PendingCommand = { label: ImapCommandLabel; sample: string };
     const pendingTags = new Map<string, PendingCommand[]>();
     let pendingCount = 0;
     const onCommandResult = this.opts.onCommandResult;
@@ -440,6 +449,10 @@ export class ImapServer {
     /**
      * BAD 원문 표본 한 줄(command-sample.ts). 세션당·서버 전체 상한 안에서만 남긴다.
      * 계정과 주소를 함께 싣는다 — "어느 클라이언트가"를 세션 요약 줄과 맞춰 볼 수 있게.
+     * `suppressed`는 **서버 전체 예산**에 막혀 버린 수만 센다 — 세션당 상한을 넘긴 반복은 같은 클라이언트의
+     * 같은 BAD라 세지 않는다(그 양은 imap_commands_total에 있다).
+     * 한계: 대기 명령이 MAX_PENDING_COMMANDS를 넘겨 밀려나면 그 태그의 다음 응답이 다음 표본과 짝지어질
+     * 수 있다(결과 집계와 같은 한계). 같은 세션의 명령끼리라 누출은 아니고, 정상 트래픽은 닿지 않는다.
      */
     let badSamplesLeft = MAX_BAD_SAMPLES_PER_SESSION;
     const logBadSample = (command: ImapCommandLabel | "unparsed", sample: string | null, reply: string): void => {
@@ -451,7 +464,7 @@ export class ImapServer {
       logger.warn("imap BAD 표본", {
         command,
         ...(sample !== null ? { sample } : {}),
-        reply: cleanReply(reply),
+        reply: cleanText(reply, MAX_BAD_REPLY_CHARS),
         ip: normalizeIp(rawSocket.remoteAddress),
         ...(accountId !== null ? { accountId } : {}),
         ...(dropped > 0 ? { suppressed: dropped } : {}),
@@ -482,7 +495,7 @@ export class ImapServer {
       if (q!.length === 0) pendingTags.delete(m[1]!);
       const result = m[2]!.toLowerCase() as ImapCommandResult;
       onCommandResult?.(entry.label, result);
-      if (result === "bad") logBadSample(entry.label, entry.sample(), text.slice(m[0].length));
+      if (result === "bad") logBadSample(entry.label, entry.sample, text.slice(m[0].length));
     };
 
     const meter = new SessionMeter({
@@ -641,7 +654,13 @@ export class ImapServer {
             try {
               res = await backend.request(accountId, action.req);
             } catch (err) {
-              this.opts.logger?.warn("imap backend error", { error: err instanceof Error ? err.message : String(err) });
+              const dropped = this.opts.logger ? this.backendErrors.take(Date.now()) : null;
+              if (dropped !== null) {
+                this.opts.logger?.warn("imap backend error", {
+                  error: cleanText(err instanceof Error ? err.message : String(err), MAX_BACKEND_ERROR_CHARS),
+                  ...(dropped > 0 ? { suppressed: dropped } : {}),
+                });
+              }
               res = { kind: "no", message: "internal error" };
             }
             /**
