@@ -125,8 +125,18 @@ export class IonosphereImapBackend implements ImapBackend {
           const q = await this.store.getQuota(accountId);
           return { kind: "quota", usedBytes: q.usedBytes, limitBytes: q.quotaBytes, messageCount: q.messageCount };
         }
-        case "listMailboxes":
-          return { kind: "mailboxes", mailboxes: (await this.pathedMailboxes(accountId)).map((p) => this.toImapMailbox(p)) };
+        case "listMailboxes": {
+          const pathed = await this.pathedMailboxes(accountId);
+          // DELETED를 물을 때만 센다(engine.ts ImapMailbox.deletedCount 주석).
+          const deleted = req.deletedCounts ? await this.store.deletedCountsByMailbox(pathed.map((p) => p.row.id)) : null;
+          return {
+            kind: "mailboxes",
+            mailboxes: pathed.map((p) => ({
+              ...this.toImapMailbox(p),
+              ...(deleted ? { deletedCount: deleted.get(p.row.id) ?? 0 } : {}),
+            })),
+          };
+        }
         case "createMailbox":
           return await this.createMailbox(accountId, req.name);
         case "deleteMailbox":

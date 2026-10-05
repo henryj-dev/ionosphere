@@ -67,11 +67,17 @@ export interface ImapMailbox {
    * 구분할 수 있다(그 구분이 없으면 캐시를 통째로 버린다).
    */
   mailboxId?: string;
+  /**
+   * `\Deleted` 표시된 메시지 수 — STATUS·LIST-STATUS의 DELETED(RFC 9051 §6.3.11).
+   * 백엔드는 요청에 `deletedCounts`가 있을 때만 센다(평소 LIST에 집계 비용을 얹지 않으려고).
+   */
+  deletedCount?: number;
 }
 
 /** 엔진 → 어댑터 백엔드 요청. 이름은 정규화(INBOX 케이스) 완료 상태로 전달된다. */
 export type ImapBackendRequest =
-  | { kind: "listMailboxes" }
+  /** `deletedCounts`: STATUS DELETED를 위해 메일함별 `\Deleted` 수를 함께 센다. */
+  | { kind: "listMailboxes"; deletedCounts?: true }
   /** QUOTA (RFC 9208) — 계정 단위 사용량·한도. */
   | { kind: "getQuota" }
   | { kind: "createMailbox"; name: string }
@@ -383,6 +389,29 @@ const ENABLABLE = ["CONDSTORE", "QRESYNC", "IMAP4rev2"] as const;
  * REMOTE는 원격(프록시) 메일함이 없으므로 받기만 한다.
  */
 const LIST_SELECT_OPTIONS: ReadonlySet<string> = new Set(["SUBSCRIBED", "REMOTE", "RECURSIVEMATCH", "SPECIAL-USE"]);
+
+/**
+ * STATUS 항목 — STATUS 명령과 LIST-STATUS(RFC 5819)가 **같은 집합**을 쓴다(statusFields가 정본).
+ * rev2 필수 항목(RFC 9051 §6.3.11: MESSAGES·UIDNEXT·UIDVALIDITY·UNSEEN·DELETED·SIZE) + rev1 RECENT +
+ * CONDSTORE HIGHESTMODSEQ + OBJECTID MAILBOXID. 모르는 항목은 **백엔드를 부르기 전에** BAD다 —
+ * 예전엔 STATUS는 백엔드 뒤에 BAD, LIST-STATUS는 STATUS 줄을 조용히 빼먹었다.
+ */
+const STATUS_ITEMS: ReadonlySet<string> = new Set([
+  "MESSAGES", "RECENT", "UIDNEXT", "UIDVALIDITY", "UNSEEN", "DELETED", "SIZE", "HIGHESTMODSEQ", "MAILBOXID",
+]);
+
+/** STATUS 항목 목록을 읽는다 — 모르거나 읽을 수 없는 항목이면 그 이유 문자열. */
+function parseStatusItems(list: ImapValue): string[] | string {
+  if (list.kind !== "list") return "STATUS expects item list";
+  const items: string[] = [];
+  for (const it of list.items) {
+    const t = valueText(it)?.toUpperCase();
+    if (!t) return "invalid STATUS item";
+    if (!STATUS_ITEMS.has(t)) return "unknown STATUS item";
+    items.push(t);
+  }
+  return items;
+}
 
 export class ImapEngine {
   private readonly hostname: string;
@@ -962,13 +991,10 @@ export class ImapEngine {
         } else if (opt === "STATUS") {
           const list = opts.items[i + 1];
           i += 1;
-          if (!list || list.kind !== "list") return bad("RETURN STATUS expects item list");
-          statusItems = [];
-          for (const it of list.items) {
-            const t = valueText(it)?.toUpperCase();
-            if (!t) return bad("invalid STATUS item");
-            statusItems.push(t);
-          }
+          if (!list) return bad("RETURN STATUS expects item list");
+          const parsed = parseStatusItems(list);
+          if (typeof parsed === "string") return bad(parsed);
+          statusItems = parsed;
         } else {
           return bad("unknown RETURN option");
         }
@@ -990,7 +1016,8 @@ export class ImapEngine {
       .map((p) => compileListPattern(normalizeMailboxName(joinListPattern(ref, p))));
     const matches = (name: string): boolean => matchers.some((m) => m(name));
 
-    return this.callBackend({ kind: "listMailboxes" }, (res) => {
+    const listReq: ImapBackendRequest = statusItems?.includes("DELETED") ? { kind: "listMailboxes", deletedCounts: true } : { kind: "listMailboxes" };
+    return this.callBackend(listReq, (res) => {
       if (res.kind === "no") return [ImapEngine.noReply(cmd.tag, verb, res)];
       if (res.kind !== "mailboxes") return [{ kind: "reply", text: `${cmd.tag} NO ${verb} failed` }];
       const actions: ImapAction[] = [];
@@ -1058,10 +1085,9 @@ export class ImapEngine {
         });
         // LIST-STATUS — 각 LIST 라인 뒤에 STATUS 인라인(RFC 5819)
         if (statusItems) {
+          // 항목은 파싱 때 검사했다 — 여기서 빠지는 줄은 없다.
           const fields = ImapEngine.statusFields(m, statusItems);
-          if (fields !== null) {
-            actions.push({ kind: "reply", text: `* STATUS ${quoteMailboxName(m.name)} (${fields.join(" ")})` });
-          }
+          actions.push({ kind: "reply", text: `* STATUS ${quoteMailboxName(m.name)} (${fields.join(" ")})` });
         }
       }
       actions.push({ kind: "reply", text: `${cmd.tag} OK ${verb} completed` });
@@ -2179,16 +2205,14 @@ export class ImapEngine {
     if (name === null || !items || items.kind !== "list" || cmd.args.length !== 2) {
       return [{ kind: "reply", text: `${cmd.tag} BAD STATUS expects mailbox name and item list` }];
     }
-    const wanted: string[] = [];
-    for (const it of items.items) {
-      const t = valueText(it)?.toUpperCase();
-      if (!t) return [{ kind: "reply", text: `${cmd.tag} BAD invalid STATUS item` }];
-      wanted.push(t);
-    }
+    const parsed = parseStatusItems(items);
+    if (typeof parsed === "string") return [{ kind: "reply", text: `${cmd.tag} BAD ${parsed}` }];
+    const wanted = parsed;
     if (wanted.length === 0) {
       return [{ kind: "reply", text: `${cmd.tag} BAD empty STATUS item list` }];
     }
-    return this.callBackend({ kind: "listMailboxes" }, (res) => {
+    const listReq: ImapBackendRequest = wanted.includes("DELETED") ? { kind: "listMailboxes", deletedCounts: true } : { kind: "listMailboxes" };
+    return this.callBackend(listReq, (res) => {
       if (res.kind === "no") return [ImapEngine.noReply(cmd.tag, "STATUS", res)];
       if (res.kind !== "mailboxes") return [{ kind: "reply", text: `${cmd.tag} NO STATUS failed` }];
       const m = res.mailboxes.find((x) => x.name === name);
@@ -2196,7 +2220,6 @@ export class ImapEngine {
         return [{ kind: "reply", text: `${cmd.tag} NO [NONEXISTENT] STATUS no such mailbox` }];
       }
       const fields = ImapEngine.statusFields(m, wanted);
-      if (fields === null) return [{ kind: "reply", text: `${cmd.tag} BAD unknown STATUS item` }];
       return [
         { kind: "reply", text: `* STATUS ${quoteMailboxName(m.name)} (${fields.join(" ")})` },
         { kind: "reply", text: `${cmd.tag} OK STATUS completed` },
@@ -2205,7 +2228,8 @@ export class ImapEngine {
   }
 
   /** STATUS 항목 포매팅 — STATUS 명령과 LIST-STATUS(RFC 5819)가 공유. 미지 항목이면 null. */
-  private static statusFields(m: ImapMailbox, wanted: readonly string[]): string[] | null {
+  /** 항목은 호출 전에 parseStatusItems로 검사돼 있다 — 여기서 모르는 항목은 오지 않는다. */
+  private static statusFields(m: ImapMailbox, wanted: readonly string[]): string[] {
     const fields: string[] = [];
     for (const item of wanted) {
       switch (item) {
@@ -2233,8 +2257,10 @@ export class ImapEngine {
         case "HIGHESTMODSEQ":
           fields.push(`HIGHESTMODSEQ ${m.highestmodseq}`);
           break;
-        default:
-          return null;
+        case "DELETED":
+          // 백엔드가 세지 않았으면(구버전 백엔드·테스트 스텁) 0 — 없는 것을 있다고 하지 않는다.
+          fields.push(`DELETED ${m.deletedCount ?? 0}`);
+          break;
       }
     }
     return fields;

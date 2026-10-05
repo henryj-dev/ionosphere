@@ -215,6 +215,23 @@ export class Store {
   }
 
   /** LIST/namespace가 사용할 메일함 집합. ACL 없는 mailboxId는 결과에서 제거한다. */
+  /**
+   * 메일함별 `\Deleted` 표시 메시지 수 — IMAP STATUS·LIST-STATUS의 DELETED(RFC 9051 §6.3.11).
+   *
+   * 왜 컬럼이 아니라 요청 때 세는가: `unread_count`처럼 메일함 행에 카운터를 두면 \Deleted를 바꾸는
+   * 모든 경로(STORE·MOVE·EXPUNGE·APPEND)가 함께 갱신해야 하고 마이그레이션도 필요하다. DELETED는
+   * 클라이언트가 가끔 묻는 값이라, 물을 때만 `message_mailbox`(PK가 mailbox_id로 시작)에서 센다.
+   * 공유 메일함도 있으므로 계정이 아니라 **id 목록**으로 센다. 표시가 없는 메일함은 결과에 없다(=0).
+   */
+  async deletedCountsByMailbox(mailboxIds: readonly string[]): Promise<Map<string, number>> {
+    const rows = await queryInChunks(
+      this.db,
+      mailboxIds,
+      (ph) => `SELECT mailbox_id, COUNT(*) AS n FROM message_mailbox WHERE deleted = 1 AND mailbox_id IN (${ph}) GROUP BY mailbox_id`,
+    );
+    return new Map(rows.map((r) => [String(r.mailbox_id), Number(r.n)]));
+  }
+
   async listAccessibleMailboxes(context: PrincipalContext): Promise<MailboxRow[]> {
     const { rows } = await this.db.query({
       sql: `SELECT m.* FROM mailboxes m JOIN accounts a ON a.id = m.account_id
