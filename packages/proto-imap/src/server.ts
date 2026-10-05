@@ -112,7 +112,7 @@ export interface ImapServerOptions {
   onCommandResult?: (command: ImapCommandLabel | "unparsed", result: ImapCommandResult) => void;
   /** 진행 중 세션 요약 주기(ms) — 테스트용 재정의. 기본 `SESSION_PROGRESS_INTERVAL_MS`, 0이면 끈다. */
   sessionProgressIntervalMs?: number;
-  /** BAD 표본의 서버 전체 상한(창당 줄 수) — 테스트용 재정의. 기본 `MAX_BAD_SAMPLES_PER_WINDOW`. */
+  /** BAD 표본의 리스너당 상한(창당 줄 수) — 테스트용 재정의. 기본 `MAX_BAD_SAMPLES_PER_WINDOW`. */
   badSamplesPerWindow?: number;
 }
 
@@ -131,7 +131,8 @@ const TAGGED_RESULT = /^(\S+) (OK|NO|BAD)(?: |$)/;
 /**
  * BAD 원문 표본(command-sample.ts)의 속도 상한 — journal을 BAD 루프의 증폭기로 만들지 않기 위해서다.
  *
- * ★두 겹인 이유: 세션당 상한만 두면 연결을 계속 새로 여는 상대가 줄 수를 무한히 늘린다. 서버 전체
+ * 리스너당 상한이라 143·993을 함께 열면 합계는 두 배다.
+ * ★두 겹인 이유: 세션당 상한만 두면 연결을 계속 새로 여는 상대가 줄 수를 무한히 늘린다. 리스너
  * 상한만 두면 BAD를 쏟는 세션 하나가 창을 다 써서 다른 클라이언트의 표본이 안 보인다.
  * 세션당 몇 줄이면 "무엇이 BAD인가"에 답하기 충분하다 — 같은 클라이언트는 같은 명령을 반복한다.
  */
@@ -149,7 +150,7 @@ const MAX_BACKEND_ERRORS_PER_WINDOW = 30;
 const MAX_BACKEND_ERROR_CHARS = 200;
 
 /**
- * 서버 전체 BAD 표본 예산 — 고정 창. 창 안에서 상한을 넘긴 줄은 버리고 수만 센다.
+ * 리스너당 BAD 표본 예산 — 고정 창. 창 안에서 상한을 넘긴 줄은 버리고 수만 센다.
  * 버린 수는 다음 창의 첫 줄에 `suppressed`로 싣는다 — 조용히 사라지면 "BAD가 멎었다"로 읽힌다.
  */
 export class BadSampleBudget {
@@ -268,7 +269,7 @@ export class ImapServer {
   private readonly peerLimit: PeerConnectionLimiter;
   /** 접근 감사 싱크 — 미주입 시 no-op(호출부가 `?.`를 쓰지 않게). */
   private readonly audit: AuditSink;
-  /** BAD 표본 서버 전체 예산 — 리스너(143·993)마다 하나다. */
+  /** BAD 표본 리스너당 예산 — 리스너(143·993)마다 하나다. */
   private readonly badSamples: BadSampleBudget;
   /** 백엔드 예외 경고 예산 — 같은 고정 창 방식, BAD 표본과 따로 센다. */
   private readonly backendErrors = new BadSampleBudget(MAX_BACKEND_ERRORS_PER_WINDOW);
@@ -447,9 +448,9 @@ export class ImapServer {
     const writeText = (text: string): void => write(new TextEncoder().encode(`${text}\r\n`));
 
     /**
-     * BAD 원문 표본 한 줄(command-sample.ts). 세션당·서버 전체 상한 안에서만 남긴다.
+     * BAD 원문 표본 한 줄(command-sample.ts). 세션당·리스너당 상한 안에서만 남긴다.
      * 계정과 주소를 함께 싣는다 — "어느 클라이언트가"를 세션 요약 줄과 맞춰 볼 수 있게.
-     * `suppressed`는 **서버 전체 예산**에 막혀 버린 수만 센다 — 세션당 상한을 넘긴 반복은 같은 클라이언트의
+     * `suppressed`는 **리스너 예산**에 막혀 버린 수만 센다 — 세션당 상한을 넘긴 반복은 같은 클라이언트의
      * 같은 BAD라 세지 않는다(그 양은 imap_commands_total에 있다).
      * 한계: 대기 명령이 MAX_PENDING_COMMANDS를 넘겨 밀려나면 그 태그의 다음 응답이 다음 표본과 짝지어질
      * 수 있다(결과 집계와 같은 한계). 같은 세션의 명령끼리라 누출은 아니고, 정상 트래픽은 닿지 않는다.

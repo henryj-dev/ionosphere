@@ -7,7 +7,7 @@
  *  1. BAD를 받으면 명령의 모양(atom 그대로, 섹션 괄호 원문대로)이 journal 경고로 남는다.
  *  2. 자격증명·개인정보는 남지 않는다 — 인자는 허용 목록의 명령만 남기고(모르는 명령·LOGIN·ACL·SEARCH는
  *     이름만), 그 안에서도 quoted·literal은 내용을 지운다.
- *  3. 세션당·서버 전체 상한이 걸린다 — BAD 루프가 journal 증폭기가 되지 않는다.
+ *  3. 세션당·리스너당 상한이 걸린다 — BAD 루프가 journal 증폭기가 되지 않는다.
  */
 import { afterEach, describe, expect, test } from "@ionosphere/testkit";
 import { connect, type Socket } from "node:net";
@@ -208,7 +208,7 @@ describe("IMAP BAD 원문 표본", () => {
     expect(samples(warns).map((w) => w.fields.sample)).toEqual(["STATUS INBOX (BOGUS2)", "STATUS INBOX (BOGUS3)", "STATUS INBOX (BOGUS4)"]);
   });
 
-  test("★서버 전체 상한 — 버린 수는 다음 창의 첫 줄에 suppressed로 싣는다", async () => {
+  test("★리스너당 상한 — 버린 수는 다음 창의 첫 줄에 suppressed로 싣는다", async () => {
     const { port, warns } = await start({ badSamplesPerWindow: 2 });
     await session(port, ["a1 STATUS INBOX (X1)", "a2 STATUS INBOX (X2)"]);
     await session(port, ["b1 STATUS INBOX (Y1)", "b2 STATUS INBOX (Y2)"]);
@@ -243,7 +243,7 @@ describe("IMAP BAD 원문 표본", () => {
   });
 });
 
-describe("BAD 표본 서버 전체 예산", () => {
+describe("BAD 표본 리스너당 예산", () => {
   test("★창 안에서 상한을 넘긴 줄은 버리고, 다음 창의 첫 줄이 버린 수를 알린다", () => {
     const budget = new BadSampleBudget(2);
     const t0 = 1_000_000;
