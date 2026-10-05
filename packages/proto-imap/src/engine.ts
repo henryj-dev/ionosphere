@@ -1376,20 +1376,33 @@ export class ImapEngine {
      */
     let vanishedWanted = false;
     const lastArg = itemArgs[itemArgs.length - 1];
-    if (itemArgs.length >= 2 && lastArg?.kind === "list" && valueText(lastArg.items[0] ?? { kind: "atom", value: "" })?.toUpperCase() === "CHANGEDSINCE") {
-      const n = valueText(lastArg.items[1] ?? { kind: "atom", value: "" });
-      const third = lastArg.items[2];
-      const vanishedMod = third !== undefined && third.kind === "atom" && third.value.toUpperCase() === "VANISHED";
-      if (!n || !/^\d+$/.test(n) || lastArg.items.length !== (vanishedMod ? 3 : 2)) {
-        return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} invalid CHANGEDSINCE` }];
+    const firstModifier = lastArg?.kind === "list" ? valueText(lastArg.items[0] ?? { kind: "atom", value: "" })?.toUpperCase() : undefined;
+    if (itemArgs.length >= 2 && lastArg?.kind === "list" && (firstModifier === "CHANGEDSINCE" || firstModifier === "VANISHED")) {
+      /**
+       * 수정자 목록은 **순서가 자유**다 — `fetch-modifier *(SP fetch-modifier)`(RFC 4466 §2.4, RFC 7162 §7).
+       * VANISHED는 CHANGEDSINCE의 꼬리 인자가 아니라 독립 수정자라 `(VANISHED CHANGEDSINCE n)`도 유효하다
+       * (독립 리뷰 1차). 중복·모르는 수정자는 BAD.
+       */
+      const mods = lastArg.items;
+      for (let i = 0; i < mods.length; i++) {
+        const name = mods[i]?.kind === "atom" ? (mods[i] as { value: string }).value.toUpperCase() : null;
+        if (name === "CHANGEDSINCE" && changedSince === null) {
+          const n = valueText(mods[i + 1] ?? { kind: "atom", value: "" });
+          if (!n || !/^\d+$/.test(n)) return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} invalid CHANGEDSINCE` }];
+          changedSince = Number(n);
+          i += 1;
+        } else if (name === "VANISHED" && !vanishedWanted) {
+          vanishedWanted = true;
+        } else {
+          return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} invalid CHANGEDSINCE` }];
+        }
       }
-      if (vanishedMod) {
-        // §3.2.6: UID FETCH 전용이고, QRESYNC를 켠 세션만 쓸 수 있다 — 둘 다 아니면 BAD.
+      if (vanishedWanted) {
+        // §3.2.6: CHANGEDSINCE와 함께, UID FETCH에서만, QRESYNC를 켠 세션에서만 — 아니면 BAD.
+        if (changedSince === null) return [{ kind: "reply", text: `${cmd.tag} BAD VANISHED requires CHANGEDSINCE` }];
         if (!uidMode) return [{ kind: "reply", text: `${cmd.tag} BAD VANISHED requires UID FETCH` }];
         if (!this.enabled.has("QRESYNC")) return [{ kind: "reply", text: `${cmd.tag} BAD QRESYNC not enabled` }];
-        vanishedWanted = true;
       }
-      changedSince = Number(n);
       this.enabled.add("CONDSTORE"); // 사용 자체가 활성화(RFC 7162)
       itemArgs = itemArgs.slice(0, -1);
     }
@@ -1479,20 +1492,19 @@ export class ImapEngine {
      * VANISHED (EARLIER)를 FETCH 응답보다 **먼저** 보낸다(RFC 7162 §3.2.6 예시 순서). 사라진 uid는
      * QRESYNC SELECT와 같은 백엔드 계산(syncSince — 툼스톤, 보존창 밖이면 known-uids 차집합)을 쓰고,
      * 요청한 UID 집합을 known-uids로 넘긴다. 툼스톤 경로는 메일함 전체를 돌려주므로 요청 집합으로
-     * 다시 거른다. `*`는 상한 없이 본다 — 마지막 메시지가 지워졌으면 그 uid는 현재 최대 uid보다 크다.
+     * 다시 거른다.
+     * ★`*`는 FETCH 대상(resolveTargets)과 **같은 값** — 세션 뷰의 최대 UID — 으로 정해 숫자로 넘긴다
+     * (RFC 3501 §9). 한 명령 안에서 VANISHED와 FETCH가 서로 다른 집합을 보면 안 된다(독립 리뷰 1차:
+     * 무한대로 보았더니 `8:*`이 범위 밖 uid를 싣고, `12:*`(=9:12)는 안의 uid를 빠뜨렸다).
      */
-    const inRequested = (uid: number): boolean =>
-      ranges.some((r) => {
-        const a = r.from === "*" ? Infinity : r.from;
-        const b = r.to === "*" ? Infinity : r.to;
-        return uid >= Math.min(a, b) && uid <= Math.max(a, b);
-      });
+    const maxUid = view.uids.length > 0 ? view.uids[view.uids.length - 1]! : 0;
+    const requested: SeqRange[] = ranges.map((r) => ({ from: r.from === "*" ? maxUid : r.from, to: r.to === "*" ? maxUid : r.to }));
     return this.callBackend(
-      { kind: "syncSince", name: view.name, sinceModseq: changedSince, knownUids: ranges, vanishedOnly: true },
+      { kind: "syncSince", name: view.name, sinceModseq: changedSince, knownUids: requested, vanishedOnly: true },
       (sync) => {
         if (sync.kind === "no") return [ImapEngine.noReply(cmd.tag, verb, sync)];
         if (sync.kind !== "sync") return [{ kind: "reply", text: `${cmd.tag} NO ${verb} failed` }];
-        const vanished = sync.vanished.filter(inRequested);
+        const vanished = sync.vanished.filter((uid) => matchSequenceSet(requested, uid, maxUid));
         return [
           ...(vanished.length > 0 ? [{ kind: "reply" as const, text: `* VANISHED (EARLIER) ${formatUidSet(vanished)}` }] : []),
           ...fetchAll(),

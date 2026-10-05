@@ -45,7 +45,8 @@ describe("UID FETCH (CHANGEDSINCE n VANISHED)", () => {
     const e = selected({ qresync: true });
     const first = e.feed(enc.encode("f1 UID FETCH 1:* (FLAGS) (CHANGEDSINCE 40 VANISHED)\r\n"));
     expect(text(first)).toEqual([]);
-    expect(backendReq(first)).toEqual({ kind: "syncSince", name: "INBOX", sinceModseq: 40, knownUids: [{ from: 1, to: "*" }], vanishedOnly: true });
+    // `*`는 세션 뷰의 최대 UID(9)로 정해 숫자로 넘긴다 — FETCH 대상과 같은 집합이어야 한다.
+    expect(backendReq(first)).toEqual({ kind: "syncSince", name: "INBOX", sinceModseq: 40, knownUids: [{ from: 1, to: 9 }], vanishedOnly: true });
 
     const second = e.backendResult({ kind: "sync", vanished: [4, 5, 8], changed: [] });
     expect(text(second)).toEqual(["* VANISHED (EARLIER) 4:5,8"]);
@@ -66,11 +67,24 @@ describe("UID FETCH (CHANGEDSINCE n VANISHED)", () => {
     expect(text(out)[0]).toBe("* VANISHED (EARLIER) 4:5");
   });
 
-  test("`*`는 상한 없이 본다 — 마지막 메시지가 지워졌으면 그 uid는 현재 최대 uid보다 크다", () => {
+  /**
+   * ★`*`는 세션 뷰의 최대 UID(여기서 9)다(RFC 3501 §9) — FETCH 대상과 같은 값. 1차 리뷰가 무한대 해석을
+   * 잡았다: `8:*`(=8:9)이 범위 밖 12를 싣고, `12:*`(=9:12)는 안의 10을 빠뜨렸다.
+   */
+  test("`*`는 FETCH 대상과 같은 값(뷰의 최대 UID)으로 본다", () => {
+    const a = selected({ qresync: true });
+    a.feed(enc.encode("f1 UID FETCH 8:* (FLAGS) (CHANGEDSINCE 40 VANISHED)\r\n"));
+    expect(text(a.backendResult({ kind: "sync", vanished: [4, 8, 12], changed: [] }))[0]).toBe("* VANISHED (EARLIER) 8");
+    const b = selected({ qresync: true });
+    const req = backendReq(b.feed(enc.encode("f1 UID FETCH 12:* (FLAGS) (CHANGEDSINCE 40 VANISHED)\r\n")));
+    expect(req).toEqual({ kind: "syncSince", name: "INBOX", sinceModseq: 40, knownUids: [{ from: 12, to: 9 }], vanishedOnly: true });
+    expect(text(b.backendResult({ kind: "sync", vanished: [8, 10, 12, 13], changed: [] }))[0]).toBe("* VANISHED (EARLIER) 10,12");
+  });
+
+  test("수정자 순서는 자유다 — (VANISHED CHANGEDSINCE n)도 받는다(RFC 4466 §2.4)", () => {
     const e = selected({ qresync: true });
-    e.feed(enc.encode("f1 UID FETCH 8:* (FLAGS) (CHANGEDSINCE 40 VANISHED)\r\n"));
-    const out = e.backendResult({ kind: "sync", vanished: [4, 8, 12], changed: [] });
-    expect(text(out)[0]).toBe("* VANISHED (EARLIER) 8,12");
+    const first = e.feed(enc.encode("f1 UID FETCH 1:* (FLAGS) (VANISHED CHANGEDSINCE 40)\r\n"));
+    expect(backendReq(first)).toEqual({ kind: "syncSince", name: "INBOX", sinceModseq: 40, knownUids: [{ from: 1, to: 9 }], vanishedOnly: true });
   });
 
   test("사라진 것이 없으면 VANISHED 줄을 내지 않는다", () => {
@@ -106,9 +120,11 @@ describe("UID FETCH (CHANGEDSINCE n VANISHED)", () => {
     expect(text(e.feed(enc.encode("f1 FETCH 1:* (FLAGS) (CHANGEDSINCE 40 VANISHED)\r\n")))).toEqual(["f1 BAD VANISHED requires UID FETCH"]);
   });
 
-  test("CHANGEDSINCE 없이 VANISHED만, 또는 모르는 수정자는 BAD", () => {
+  test("CHANGEDSINCE 없이 VANISHED만, 중복, 또는 모르는 수정자는 BAD", () => {
     const e = selected({ qresync: true });
-    expect(text(e.feed(enc.encode("f1 UID FETCH 1:* (FLAGS) (VANISHED)\r\n"))).at(-1)).toMatch(/^f1 BAD /);
+    expect(text(e.feed(enc.encode("f1 UID FETCH 1:* (FLAGS) (VANISHED)\r\n")))).toEqual(["f1 BAD VANISHED requires CHANGEDSINCE"]);
+    expect(text(e.feed(enc.encode("f4 UID FETCH 1:* (FLAGS) (CHANGEDSINCE 40 VANISHED VANISHED)\r\n")))).toEqual(["f4 BAD UID FETCH invalid CHANGEDSINCE"]);
+    expect(text(e.feed(enc.encode("f5 UID FETCH 1:* (FLAGS) (CHANGEDSINCE 40 CHANGEDSINCE 41)\r\n")))).toEqual(["f5 BAD UID FETCH invalid CHANGEDSINCE"]);
     expect(text(e.feed(enc.encode("f2 UID FETCH 1:* (FLAGS) (CHANGEDSINCE 40 BOGUS)\r\n")))).toEqual(["f2 BAD UID FETCH invalid CHANGEDSINCE"]);
     expect(text(e.feed(enc.encode("f3 UID FETCH 1:* (FLAGS) (CHANGEDSINCE 40 VANISHED X)\r\n")))).toEqual(["f3 BAD UID FETCH invalid CHANGEDSINCE"]);
   });
