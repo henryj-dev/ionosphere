@@ -5,6 +5,7 @@
  * 몰랐다. 그래서 `STATUS INBOX (DELETED)`는 **BAD**를 받았고 — 광고와 구현이 어긋난 BAD는 10-02에
  * NAMESPACE→LIST 루프를 만든 바로 그 모양이다 — LIST-STATUS(`RETURN (STATUS (... DELETED))`)는
  * 백엔드까지 갔다가 STATUS 줄을 **조용히 통째로** 빼먹었다. 클라이언트는 카운트를 못 받고 이유도 모른다.
+ * 같은 이유로 QUOTA=RES-STORAGE 광고가 요구하는 DELETED-STORAGE(RFC 9208 §4.1.4)도 함께 받는다.
  */
 import { describe, expect, test } from "@ionosphere/testkit";
 import { ImapEngine, type ImapAction, type ImapMailbox } from "../src/engine.ts";
@@ -40,7 +41,7 @@ const BOXES = [mailbox({ name: "INBOX", role: "inbox", deletedCount: 3 }), mailb
 describe("STATUS DELETED", () => {
   test("★STATUS (DELETED)는 BAD가 아니라 삭제 표시 수를 돌려준다", () => {
     const { request, out } = run("s STATUS INBOX (MESSAGES DELETED)", BOXES);
-    expect(request).toEqual({ kind: "listMailboxes", deletedCounts: true });
+    expect(request).toEqual({ kind: "listMailboxes", statusRights: true, deletedCounts: true });
     expect(out).toEqual(['* STATUS "INBOX" (MESSAGES 4 DELETED 3)', "s OK STATUS completed"]);
   });
 
@@ -65,8 +66,37 @@ describe("STATUS DELETED", () => {
   });
 
   test("DELETED를 요청하지 않으면 백엔드에 세 달라고 하지 않는다(평소 LIST·STATUS 비용 그대로)", () => {
-    expect(run("s STATUS INBOX (MESSAGES UNSEEN)", BOXES).request).toEqual({ kind: "listMailboxes" });
-    expect(run('l LIST "" "*" RETURN (STATUS (MESSAGES))', BOXES).request).toEqual({ kind: "listMailboxes" });
+    expect(run("s STATUS INBOX (MESSAGES UNSEEN)", BOXES).request).toEqual({ kind: "listMailboxes", statusRights: true });
+    expect(run('l LIST "" "*" RETURN (STATUS (MESSAGES))', BOXES).request).toEqual({ kind: "listMailboxes", statusRights: true });
     expect(run('l LIST "" "*"', BOXES).request).toEqual({ kind: "listMailboxes" });
+  });
+
+  test("★DELETED-STORAGE는 1024바이트 단위로 올림한다 — LIST-STATUS 정상 입력이 BAD가 되지 않는다", () => {
+    const boxes = [mailbox({ name: "INBOX", role: "inbox", deletedCount: 2, deletedBytes: 1025 })];
+    const status = run("s STATUS INBOX (DELETED-STORAGE)", boxes);
+    expect(status.request).toEqual({ kind: "listMailboxes", statusRights: true, deletedCounts: true });
+    expect(status.out).toEqual(['* STATUS "INBOX" (DELETED-STORAGE 2)', "s OK STATUS completed"]);
+    const list = run('l LIST "" "*" RETURN (STATUS (MESSAGES DELETED-STORAGE))', boxes);
+    expect(list.out).toContain('* STATUS "INBOX" (MESSAGES 4 DELETED-STORAGE 2)');
+    expect(list.out.at(-1)).toBe("l OK LIST completed");
+  });
+});
+
+describe("STATUS 읽기 권한(RFC 4314 §4)", () => {
+  const boxes = [mailbox({ name: "INBOX", role: "inbox", deletedCount: 1 }), mailbox({ name: "Shared", readable: false, deletedCount: 5 })];
+
+  test("★읽을 수 없는 메일함의 STATUS는 NO — 메시지 수를 보여 주지 않는다", () => {
+    const { out } = run("s STATUS Shared (MESSAGES DELETED)", boxes);
+    expect(out).toEqual(["s NO [NOPERM] STATUS no read access"]);
+  });
+
+  test("★LIST-STATUS는 읽을 수 없는 메일함의 STATUS 줄만 뺀다(RFC 5819 §2)", () => {
+    const { out } = run('l LIST "" "*" RETURN (STATUS (MESSAGES DELETED))', boxes);
+    expect(out).toEqual([
+      '* LIST (\\HasNoChildren) "/" "INBOX"',
+      '* STATUS "INBOX" (MESSAGES 4 DELETED 1)',
+      '* LIST (\\HasNoChildren) "/" "Shared"',
+      "l OK LIST completed",
+    ]);
   });
 });

@@ -125,18 +125,8 @@ export class IonosphereImapBackend implements ImapBackend {
           const q = await this.store.getQuota(accountId);
           return { kind: "quota", usedBytes: q.usedBytes, limitBytes: q.quotaBytes, messageCount: q.messageCount };
         }
-        case "listMailboxes": {
-          const pathed = await this.pathedMailboxes(accountId);
-          // DELETED를 물을 때만 센다(engine.ts ImapMailbox.deletedCount 주석).
-          const deleted = req.deletedCounts ? await this.store.deletedCountsByMailbox(pathed.map((p) => p.row.id)) : null;
-          return {
-            kind: "mailboxes",
-            mailboxes: pathed.map((p) => ({
-              ...this.toImapMailbox(p),
-              ...(deleted ? { deletedCount: deleted.get(p.row.id) ?? 0 } : {}),
-            })),
-          };
-        }
+        case "listMailboxes":
+          return { kind: "mailboxes", mailboxes: await this.listForImap(accountId, req) };
         case "createMailbox":
           return await this.createMailbox(accountId, req.name);
         case "deleteMailbox":
@@ -266,6 +256,37 @@ export class IonosphereImapBackend implements ImapBackend {
   private async hasMailboxRight(accountId: string, mailboxId: string, operation: "read" | "insert" | "write" | "delete" | "expunge" | "create" | "admin"): Promise<boolean> {
     const decision = await this.store.authorizeMailbox(await this.principalContext(accountId), mailboxId, operation);
     return decision.allowed;
+  }
+
+  /**
+   * LIST·STATUS용 메일함 목록. STATUS용(`statusRights`)이면 읽기 권한을, DELETED를 물으면(`deletedCounts`)
+   * 삭제 표시 수·크기를 함께 채운다.
+   *
+   * ★읽기 권한: 목록 권한(`l`)만 있는 공유 메일함도 LIST에는 나온다. 그런데 STATUS는 `r`가 필요하다
+   * (RFC 4314 §4) — 예전엔 확인하지 않아 메시지 수가 그대로 보였고, DELETED를 더하면서 그 범위가
+   * 넓어졌다(코드 리뷰). 자기 메일함은 항상 읽을 수 있으므로 **남의 메일함만** 권한을 묻는다.
+   * 삭제 집계도 읽을 수 있는 메일함만 센다 — 못 보여 줄 값을 셀 이유가 없다.
+   */
+  private async listForImap(accountId: string, req: { statusRights?: true; deletedCounts?: true }): Promise<ImapMailbox[]> {
+    const pathed = await this.pathedMailboxes(accountId);
+    let readable: Set<string> | null = null;
+    if (req.statusRights) {
+      readable = new Set<string>();
+      const ctx = await this.principalContext(accountId);
+      for (const p of pathed) {
+        if (p.row.accountId === accountId || (await this.store.authorizeMailbox(ctx, p.row.id, "read")).allowed) readable.add(p.row.id);
+      }
+    }
+    const countable = readable ? pathed.filter((p) => readable.has(p.row.id)) : pathed;
+    const deleted = req.deletedCounts ? await this.store.deletedCountsByMailbox(countable.map((p) => p.row.id)) : null;
+    return pathed.map((p) => {
+      const d = deleted?.get(p.row.id);
+      return {
+        ...this.toImapMailbox(p),
+        ...(readable ? { readable: readable.has(p.row.id) } : {}),
+        ...(deleted ? { deletedCount: d?.count ?? 0, deletedBytes: d?.bytes ?? 0 } : {}),
+      };
+    });
   }
 
   private toImapMailbox(p: PathedMailbox): ImapMailbox {

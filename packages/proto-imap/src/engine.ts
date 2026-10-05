@@ -72,12 +72,23 @@ export interface ImapMailbox {
    * 백엔드는 요청에 `deletedCounts`가 있을 때만 센다(평소 LIST에 집계 비용을 얹지 않으려고).
    */
   deletedCount?: number;
+  /** `\Deleted` 표시 메시지의 크기 합(바이트) — STATUS DELETED-STORAGE(RFC 9208 §4.1.4)용. */
+  deletedBytes?: number;
+  /**
+   * 읽기 권한(ACL `r`)이 있는가 — STATUS용 목록일 때만 백엔드가 채운다. `false`면 STATUS는 NO,
+   * LIST-STATUS는 그 메일함의 STATUS 줄을 내지 않는다(RFC 4314 §4, RFC 5819 §2). 목록 권한(`l`)만
+   * 있는 공유 메일함의 메시지 수·삭제 수가 새지 않게 한다. 생략은 읽을 수 있음(자기 메일함·하위 호환).
+   */
+  readable?: boolean;
 }
 
 /** 엔진 → 어댑터 백엔드 요청. 이름은 정규화(INBOX 케이스) 완료 상태로 전달된다. */
 export type ImapBackendRequest =
-  /** `deletedCounts`: STATUS DELETED를 위해 메일함별 `\Deleted` 수를 함께 센다. */
-  | { kind: "listMailboxes"; deletedCounts?: true }
+  /**
+   * `statusRights`: STATUS·LIST-STATUS용 목록 — 메일함별 읽기 권한(`readable`)을 함께 채운다.
+   * `deletedCounts`: STATUS DELETED·DELETED-STORAGE를 위해 `\Deleted` 수·크기를 함께 센다.
+   */
+  | { kind: "listMailboxes"; statusRights?: true; deletedCounts?: true }
   /** QUOTA (RFC 9208) — 계정 단위 사용량·한도. */
   | { kind: "getQuota" }
   | { kind: "createMailbox"; name: string }
@@ -393,12 +404,20 @@ const LIST_SELECT_OPTIONS: ReadonlySet<string> = new Set(["SUBSCRIBED", "REMOTE"
 /**
  * STATUS 항목 — STATUS 명령과 LIST-STATUS(RFC 5819)가 **같은 집합**을 쓴다(statusFields가 정본).
  * rev2 필수 항목(RFC 9051 §6.3.11: MESSAGES·UIDNEXT·UIDVALIDITY·UNSEEN·DELETED·SIZE) + rev1 RECENT +
- * CONDSTORE HIGHESTMODSEQ + OBJECTID MAILBOXID. 모르는 항목은 **백엔드를 부르기 전에** BAD다 —
+ * CONDSTORE HIGHESTMODSEQ + OBJECTID MAILBOXID + QUOTA DELETED-STORAGE. 모르는 항목은 **백엔드를 부르기 전에** BAD다 —
  * 예전엔 STATUS는 백엔드 뒤에 BAD, LIST-STATUS는 STATUS 줄을 조용히 빼먹었다.
  */
 const STATUS_ITEMS: ReadonlySet<string> = new Set([
   "MESSAGES", "RECENT", "UIDNEXT", "UIDVALIDITY", "UNSEEN", "DELETED", "SIZE", "HIGHESTMODSEQ", "MAILBOXID",
+  // QUOTA=RES-STORAGE를 광고하면 필수(RFC 9208 §4.1.4). 빠뜨리면 정상 입력이 BAD가 된다(코드 리뷰).
+  "DELETED-STORAGE",
 ]);
+
+/** STATUS·LIST-STATUS용 목록 요청 — 권한은 항상, 삭제 집계는 물을 때만. */
+function statusListRequest(items: readonly string[]): ImapBackendRequest {
+  const deleted = items.includes("DELETED") || items.includes("DELETED-STORAGE");
+  return { kind: "listMailboxes", statusRights: true, ...(deleted ? { deletedCounts: true as const } : {}) };
+}
 
 /** STATUS 항목 목록을 읽는다 — 모르거나 읽을 수 없는 항목이면 그 이유 문자열. */
 function parseStatusItems(list: ImapValue): string[] | string {
@@ -1016,7 +1035,7 @@ export class ImapEngine {
       .map((p) => compileListPattern(normalizeMailboxName(joinListPattern(ref, p))));
     const matches = (name: string): boolean => matchers.some((m) => m(name));
 
-    const listReq: ImapBackendRequest = statusItems?.includes("DELETED") ? { kind: "listMailboxes", deletedCounts: true } : { kind: "listMailboxes" };
+    const listReq: ImapBackendRequest = statusItems ? statusListRequest(statusItems) : { kind: "listMailboxes" };
     return this.callBackend(listReq, (res) => {
       if (res.kind === "no") return [ImapEngine.noReply(cmd.tag, verb, res)];
       if (res.kind !== "mailboxes") return [{ kind: "reply", text: `${cmd.tag} NO ${verb} failed` }];
@@ -1085,9 +1104,11 @@ export class ImapEngine {
         });
         // LIST-STATUS — 각 LIST 라인 뒤에 STATUS 인라인(RFC 5819)
         if (statusItems) {
-          // 항목은 파싱 때 검사했다 — 여기서 빠지는 줄은 없다.
-          const fields = ImapEngine.statusFields(m, statusItems);
-          actions.push({ kind: "reply", text: `* STATUS ${quoteMailboxName(m.name)} (${fields.join(" ")})` });
+          // 항목은 파싱 때 검사했다. 읽을 수 없는 메일함만 STATUS 줄을 내지 않는다(RFC 5819 §2).
+          if (m.readable !== false) {
+            const fields = ImapEngine.statusFields(m, statusItems);
+            actions.push({ kind: "reply", text: `* STATUS ${quoteMailboxName(m.name)} (${fields.join(" ")})` });
+          }
         }
       }
       actions.push({ kind: "reply", text: `${cmd.tag} OK ${verb} completed` });
@@ -2211,14 +2232,15 @@ export class ImapEngine {
     if (wanted.length === 0) {
       return [{ kind: "reply", text: `${cmd.tag} BAD empty STATUS item list` }];
     }
-    const listReq: ImapBackendRequest = wanted.includes("DELETED") ? { kind: "listMailboxes", deletedCounts: true } : { kind: "listMailboxes" };
-    return this.callBackend(listReq, (res) => {
+    return this.callBackend(statusListRequest(wanted), (res) => {
       if (res.kind === "no") return [ImapEngine.noReply(cmd.tag, "STATUS", res)];
       if (res.kind !== "mailboxes") return [{ kind: "reply", text: `${cmd.tag} NO STATUS failed` }];
       const m = res.mailboxes.find((x) => x.name === name);
       if (!m) {
         return [{ kind: "reply", text: `${cmd.tag} NO [NONEXISTENT] STATUS no such mailbox` }];
       }
+      // STATUS에는 읽기 권한이 필요하다(RFC 4314 §4) — 목록 권한만으로 메시지 수를 보여 주지 않는다.
+      if (m.readable === false) return [{ kind: "reply", text: `${cmd.tag} NO [NOPERM] STATUS no read access` }];
       const fields = ImapEngine.statusFields(m, wanted);
       return [
         { kind: "reply", text: `* STATUS ${quoteMailboxName(m.name)} (${fields.join(" ")})` },
@@ -2260,6 +2282,10 @@ export class ImapEngine {
         case "DELETED":
           // 백엔드가 세지 않았으면(구버전 백엔드·테스트 스텁) 0 — 없는 것을 있다고 하지 않는다.
           fields.push(`DELETED ${m.deletedCount ?? 0}`);
+          break;
+        case "DELETED-STORAGE":
+          // 단위는 1024바이트(RFC 9208 §4.1.4). GETQUOTA와 같은 올림(Math.ceil)을 쓴다.
+          fields.push(`DELETED-STORAGE ${Math.ceil((m.deletedBytes ?? 0) / 1024)}`);
           break;
       }
     }
