@@ -215,6 +215,27 @@ export class Store {
   }
 
   /** LIST/namespace가 사용할 메일함 집합. ACL 없는 mailboxId는 결과에서 제거한다. */
+  /**
+   * 메일함별 `\Deleted` 표시 메시지의 수와 크기 합 — IMAP STATUS DELETED(RFC 9051 §6.3.11)와
+   * DELETED-STORAGE(RFC 9208 §4.1.4).
+   *
+   * 왜 컬럼이 아니라 요청 때 세는가: `unread_count`처럼 메일함 행에 카운터를 두면 \Deleted를 바꾸는
+   * 모든 경로(STORE·MOVE·EXPUNGE·APPEND)가 함께 갱신해야 하고 마이그레이션도 필요하다. 이 값은
+   * 클라이언트가 가끔 묻는 값이라, 물을 때만 `message_mailbox`(PK가 mailbox_id로 시작)에서 센다.
+   * 공유 메일함도 있으므로 계정이 아니라 **id 목록**으로 센다. 표시가 없는 메일함은 결과에 없다(=0).
+   * 크기는 메시지 크기 합이다 — 같은 메시지가 다른 메일함에도 있으면 실제 회수량은 이보다 작다.
+   */
+  async deletedCountsByMailbox(mailboxIds: readonly string[]): Promise<Map<string, { count: number; bytes: number }>> {
+    const rows = await queryInChunks(
+      this.db,
+      mailboxIds,
+      (ph) => `SELECT mm.mailbox_id, COUNT(*) AS n, COALESCE(SUM(m.size_bytes), 0) AS b
+               FROM message_mailbox mm JOIN messages m ON m.id = mm.message_id
+               WHERE mm.deleted = 1 AND mm.mailbox_id IN (${ph}) GROUP BY mm.mailbox_id`,
+    );
+    return new Map(rows.map((r) => [String(r.mailbox_id), { count: Number(r.n), bytes: Number(r.b) }]));
+  }
+
   async listAccessibleMailboxes(context: PrincipalContext): Promise<MailboxRow[]> {
     const { rows } = await this.db.query({
       sql: `SELECT m.* FROM mailboxes m JOIN accounts a ON a.id = m.account_id
