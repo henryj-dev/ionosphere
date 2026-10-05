@@ -705,9 +705,12 @@ export class ImapEngine {
     if (this.onCommand) {
       const label = imapCommandLabel(cmd);
       // 모르는 UID 하위 명령은 표본에 하위 이름까지 남긴다 — "UID"만으로는 무엇이 BAD로 도는지 모른다.
-      const sub = cmd.name === "UID" && cmd.args[0] ? valueText(cmd.args[0]) : null;
+      // ★atom일 때만 — valueText는 quoted·literal도 원문으로 되살려, `UID "secret"`의 내용이 세션 요약의
+      // 모르는 명령 표본으로 새어 나갔다(BAD 표본 2차 리뷰).
+      const first = cmd.name === "UID" ? cmd.args[0] : undefined;
+      const sub = first?.kind === "atom" ? first.value : null;
       const rawName = sub ? `UID ${sub}` : cmd.name;
-      this.onCommand(cmd.tag, label, rawName, imapCommandSample(cmd, label, rawName));
+      this.onCommand(cmd.tag, label, rawName, imapCommandSample(cmd, label));
     }
 
     switch (cmd.name) {

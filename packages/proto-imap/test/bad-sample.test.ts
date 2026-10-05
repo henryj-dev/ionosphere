@@ -11,6 +11,7 @@
  */
 import { afterEach, describe, expect, test } from "@ionosphere/testkit";
 import { connect, type Socket } from "node:net";
+import type { SessionSummary } from "@ionosphere/core";
 import { BadSampleBudget, ImapServer, type ImapBackend } from "../src/server.ts";
 
 let servers: ImapServer[] = [];
@@ -29,9 +30,11 @@ const backend: ImapBackend = {
 
 type Warn = { msg: string; fields: Record<string, unknown> };
 
-async function start(opts: { badSamplesPerWindow?: number; logger?: boolean; backend?: ImapBackend } = {}): Promise<{ port: number; warns: Warn[] }> {
+async function start(opts: { badSamplesPerWindow?: number; logger?: boolean; backend?: ImapBackend } = {}): Promise<{ port: number; warns: Warn[]; summaries: SessionSummary[] }> {
   const warns: Warn[] = [];
+  const summaries: SessionSummary[] = [];
   const server = new ImapServer({
+    sessions: { report: (summary) => void summaries.push(summary) },
     hostname: "imap.test",
     backend: opts.backend ?? backend,
     allowInsecureAuth: true,
@@ -39,7 +42,7 @@ async function start(opts: { badSamplesPerWindow?: number; logger?: boolean; bac
     ...(opts.badSamplesPerWindow !== undefined ? { badSamplesPerWindow: opts.badSamplesPerWindow } : {}),
   });
   servers.push(server);
-  return { port: await server.listen(0, "127.0.0.1"), warns };
+  return { port: await server.listen(0, "127.0.0.1"), warns, summaries };
 }
 
 /** 줄을 하나씩 보내고 그 태그의 완료 응답을 기다린다. */
@@ -106,15 +109,62 @@ describe("IMAP BAD 원문 표본", () => {
   });
 
   /**
-   * ★1차 리뷰가 재현한 누출: 제외 목록(LOGIN·AUTHENTICATE)이었을 때 `UID LOGIN user secret`은 모르는 UID
-   * 하위 명령으로 BAD를 받으며 비밀번호를 그대로 남겼다. 이제 허용 목록 밖은 이름만 남는다.
+   * ★리뷰가 재현한 누출들. 1차: 제외 목록이었을 때 `UID LOGIN user secret`이 비밀번호를 남겼다.
+   * 2차: 모르는 명령의 **이름 자리**로도 샜다 — `UID "secret"`은 quoted 내용이 하위 이름으로 복원됐고,
+   * 태그 없이 친 `user private-password`는 비밀번호가 명령 이름이 된다. 이제 모르는 명령은 "unknown"뿐이다.
    */
-  test("★모르는 명령·UID 하위 명령은 이름만 남긴다 — 무엇이 실렸는지 모르기 때문이다", async () => {
+  test("★모르는 명령은 이름도 남기지 않는다 — 이름 자리에도 비밀이 올 수 있다", async () => {
+    const { port, warns, summaries } = await start();
+    await session(port, [
+      "a1 LOGIN u@imap.test pw",
+      "a2 UID LOGIN someone hunter2",
+      'a3 UID "quoted-secret"',
+      "user private-password",
+    ]);
+    await session(port, ["a1 LOGIN u@imap.test pw", "b1 UID {14+}\r\nliteral-secret", "b2 URLFETCH imap://x;URLAUTH=tok3n"]);
+    expect(samples(warns).map((w) => w.fields.sample)).toEqual(Array(5).fill("unknown [인자 생략]"));
+    // 세션 요약의 모르는 명령 표본(unknownCommands)도 quoted·literal을 되살리지 않는다.
+    await new Promise((r) => setTimeout(r, 50));
+    const text = JSON.stringify([warns, summaries]);
+    for (const secret of ["hunter2", "someone", "quoted-secret", "QUOTED-SECRET", "literal-secret", "LITERAL-SECRET", "tok3n", "TOK3N"]) {
+      expect(text).not.toContain(secret);
+    }
+  });
+
+  /** 허용된 명령 이름이어도 확장 인자에 토큰이 실릴 수 있다 — APPEND CATENATE의 URLAUTH(2차 리뷰 재현). */
+  test("★인자가 자유로운 명령(APPEND·STORE)은 이름만 남긴다", async () => {
     const { port, warns } = await start();
-    await session(port, ["a1 LOGIN u@imap.test pw", "a2 UID LOGIN someone hunter2", "a3 URLFETCH imap://x;URLAUTH=tok3n", 'a4 FROB "q" {5+}\r\nworld']);
-    expect(samples(warns).map((w) => w.fields.sample)).toEqual(["UID LOGIN [인자 생략]", "URLFETCH [인자 생략]", "FROB [인자 생략]"]);
+    await session(port, [
+      "a1 LOGIN u@imap.test pw",
+      "a2 APPEND INBOX CATENATE (URL imap://u@imap.test/INBOX/;UID=1;URLAUTH=submit+u:internal:s3cret)",
+      "a3 STORE 1 +FLAGS (diagnosis-private)",
+    ]);
+    expect(samples(warns).map((w) => w.fields.sample)).toEqual(["APPEND [인자 생략]", "STORE [인자 생략]"]);
     const text = JSON.stringify(warns);
-    for (const secret of ["hunter2", "someone", "tok3n", "world"]) expect(text).not.toContain(secret);
+    expect(text).not.toContain("s3cret");
+    expect(text).not.toContain("diagnosis-private");
+  });
+
+  test("★SASL 연속 줄의 비밀은 남지 않는다", async () => {
+    const { port, warns } = await start();
+    const sock = connect(port, "127.0.0.1");
+    sockets.push(sock);
+    let buf = "";
+    sock.on("data", (c: Buffer) => (buf += c.toString("latin1")));
+    const until = Date.now() + 4000;
+    const wait = async (re: RegExp): Promise<void> => {
+      while (!re.test(buf)) {
+        if (Date.now() > until) throw new Error(`timeout ${re}: ${JSON.stringify(buf)}`);
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    };
+    await wait(/^\* OK/m);
+    sock.write("s1 AUTHENTICATE PLAIN\r\n");
+    await wait(/^\+/m);
+    sock.write("!!not-base64-sasl-secret!!\r\n");
+    await wait(/^s1 BAD/m);
+    expect(samples(warns).map((w) => w.fields.sample)).toEqual(["AUTHENTICATE [인자 생략]"]);
+    expect(JSON.stringify(warns)).not.toContain("sasl-secret");
   });
 
   test("★계정 식별자(ACL)·검색어(SEARCH)를 싣는 명령도 이름만 남긴다", async () => {
@@ -131,7 +181,19 @@ describe("IMAP BAD 원문 표본", () => {
     await session(port, ["a1 LOGIN u@imap.test pw", `a2 UID FETCH ${seq} (FLAGS)`]);
     const sample = String(samples(warns)[0]?.fields.sample);
     expect(sample.startsWith("UID FETCH 1,2,3,")).toBe(true);
-    expect(sample.length).toBeLessThanOrEqual(201);
+    expect(sample.length).toBe(200);
+    expect(sample.endsWith("…")).toBe(true);
+  });
+
+  test("깊은 중첩 목록도 같은 길이 예산을 나눠 쓴다", async () => {
+    const { port, warns } = await start();
+    const nested = `${"(".repeat(300)}FLAGS${")".repeat(300)}`;
+    await session(port, ["a1 LOGIN u@imap.test pw", `a2 FETCH 1 ${nested}`]);
+    const got = samples(warns);
+    expect(got).toHaveLength(1);
+    const sample = String(got[0]!.fields.sample);
+    expect(sample.startsWith("FETCH 1 ((((")).toBe(true);
+    expect(sample.length).toBeLessThanOrEqual(200);
   });
 
   test("파싱도 못 한 줄은 응답 문구만 남긴다", async () => {
