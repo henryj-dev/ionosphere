@@ -129,6 +129,12 @@ export type ImapBackendRequest =
        * 백엔드가 `1:uidnext-1`로 간주한다 — RFC가 정한 기본값이다.
        */
       knownUids?: readonly SeqRange[];
+      /**
+       * 사라진 uid만 필요하다 — 변경 델타(`changed`)는 비워 둔다. UID FETCH의 VANISHED 수정자
+       * (RFC 7162 §3.2.6)는 변경분을 FETCH 자신이 CHANGEDSINCE로 거르므로, 델타를 또 가져오면
+       * 같은 메시지를 두 번 읽는다.
+       */
+      vanishedOnly?: true;
     }
   /** EXPUNGE — \Deleted 영구 삭제. uids 지정 시 그 UID들만(UIDPLUS UID EXPUNGE). */
   | { kind: "expunge"; name: string; uids: readonly number[] | null }
@@ -244,6 +250,12 @@ interface SelectedView {
   readWrite: boolean;
   uidvalidity: number;
   uids: number[];
+  /**
+   * 이 세션이 아는 UIDNEXT — 빈 메일함에서 UID `*`의 값이다(RFC 3501 §9: 비었으면 현재 UIDNEXT).
+   * SELECT 시점 값에서 시작해 뷰에 uid가 들어올 때마다 올린다 — 세션 중 들어왔다 지워져 뷰가
+   * 다시 비어도 `*`가 SELECT 때의 낡은 값으로 돌아가지 않게.
+   */
+  uidnext: number;
   /** `* FLAGS`로 공지된 키워드 집합(시스템 플래그 제외) — 미공지 키워드 사용 전 재공지. */
   announcedKeywords: Set<string>;
   /** NOOP/CHECK 플래그 재동기화 워터마크 — 이 modseq 이후 변경만 델타 방출. */
@@ -1233,6 +1245,7 @@ export class ImapEngine {
         readWrite,
         uidvalidity: m.uidvalidity,
         uids: [...res.uids],
+        uidnext: Math.max(m.uidnext, (res.uids[res.uids.length - 1] ?? 0) + 1),
         announcedKeywords: new Set(keywords),
         lastSyncModseq: m.highestmodseq,
       };
@@ -1359,16 +1372,44 @@ export class ImapEngine {
     if (!view) return [{ kind: "reply", text: `${cmd.tag} BAD command requires a selected mailbox` }];
     const setText = cmd.args[0] ? valueText(cmd.args[0]) : null;
     const ranges = setText !== null ? this.resolveSetArg(setText, uidMode) : null;
-    // CONDSTORE 수정자(RFC 7162): 마지막 인자가 (CHANGEDSINCE n) 리스트
+    // CONDSTORE 수정자(RFC 7162): 마지막 인자가 (CHANGEDSINCE n [VANISHED]) 리스트
     let itemArgs = cmd.args.slice(1);
     let changedSince: number | null = null;
+    /**
+     * ★QRESYNC의 VANISHED 수정자(RFC 7162 §3.2.6). 우리는 QRESYNC를 광고하는데 이 수정자를 몰라
+     * `(CHANGEDSINCE n VANISHED)`를 BAD로 거절했다 — 2026-10-05 실측에서 UID FETCH BAD가 5분에
+     * 2건씩 쌓였고 ok는 거의 없었다(QRESYNC 클라이언트가 동기화마다 같은 요청을 되풀이한다).
+     * 광고와 구현이 어긋난 BAD는 10-02 LIST 루프와 같은 유형이다.
+     */
+    let vanishedWanted = false;
     const lastArg = itemArgs[itemArgs.length - 1];
-    if (itemArgs.length >= 2 && lastArg?.kind === "list" && valueText(lastArg.items[0] ?? { kind: "atom", value: "" })?.toUpperCase() === "CHANGEDSINCE") {
-      const n = valueText(lastArg.items[1] ?? { kind: "atom", value: "" });
-      if (!n || !/^\d+$/.test(n) || lastArg.items.length !== 2) {
-        return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} invalid CHANGEDSINCE` }];
+    const firstModifier = lastArg?.kind === "list" ? valueText(lastArg.items[0] ?? { kind: "atom", value: "" })?.toUpperCase() : undefined;
+    if (itemArgs.length >= 2 && lastArg?.kind === "list" && (firstModifier === "CHANGEDSINCE" || firstModifier === "VANISHED")) {
+      /**
+       * 수정자 목록은 **순서가 자유**다 — `fetch-modifier *(SP fetch-modifier)`(RFC 4466 §2.4, RFC 7162 §7).
+       * VANISHED는 CHANGEDSINCE의 꼬리 인자가 아니라 독립 수정자라 `(VANISHED CHANGEDSINCE n)`도 유효하다
+       * (독립 리뷰 1차). 중복·모르는 수정자는 BAD.
+       */
+      const mods = lastArg.items;
+      for (let i = 0; i < mods.length; i++) {
+        const name = mods[i]?.kind === "atom" ? (mods[i] as { value: string }).value.toUpperCase() : null;
+        if (name === "CHANGEDSINCE" && changedSince === null) {
+          const n = valueText(mods[i + 1] ?? { kind: "atom", value: "" });
+          if (!n || !/^\d+$/.test(n)) return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} invalid CHANGEDSINCE` }];
+          changedSince = Number(n);
+          i += 1;
+        } else if (name === "VANISHED" && !vanishedWanted) {
+          vanishedWanted = true;
+        } else {
+          return [{ kind: "reply", text: `${cmd.tag} BAD ${verb} invalid CHANGEDSINCE` }];
+        }
       }
-      changedSince = Number(n);
+      if (vanishedWanted) {
+        // §3.2.6: CHANGEDSINCE와 함께, UID FETCH에서만, QRESYNC를 켠 세션에서만 — 아니면 BAD.
+        if (changedSince === null) return [{ kind: "reply", text: `${cmd.tag} BAD VANISHED requires CHANGEDSINCE` }];
+        if (!uidMode) return [{ kind: "reply", text: `${cmd.tag} BAD VANISHED requires UID FETCH` }];
+        if (!this.enabled.has("QRESYNC")) return [{ kind: "reply", text: `${cmd.tag} BAD QRESYNC not enabled` }];
+      }
       this.enabled.add("CONDSTORE"); // 사용 자체가 활성화(RFC 7162)
       itemArgs = itemArgs.slice(0, -1);
     }
@@ -1381,9 +1422,6 @@ export class ImapEngine {
     if (changedSince !== null && !items.some((it) => it.kind === "modseq")) items.push({ kind: "modseq" });
 
     const targets = this.resolveTargets(ranges, uidMode);
-    if (targets.length === 0) {
-      return [{ kind: "reply", text: `${cmd.tag} OK ${verb} completed` }];
-    }
 
     const needRaw = items.some(
       (it) =>
@@ -1453,7 +1491,35 @@ export class ImapEngine {
         },
       );
     };
-    return fetchFrom(0);
+    const fetchAll = (): ImapAction[] =>
+      targets.length === 0 ? [{ kind: "reply", text: `${cmd.tag} OK ${verb} completed` }] : fetchFrom(0);
+    if (!vanishedWanted || changedSince === null) return fetchAll();
+
+    /**
+     * VANISHED (EARLIER)를 FETCH 응답보다 **먼저** 보낸다(RFC 7162 §3.2.6 예시 순서). 사라진 uid는
+     * QRESYNC SELECT와 같은 백엔드 계산(syncSince — 툼스톤, 보존창 밖이면 known-uids 차집합)을 쓰고,
+     * 요청한 UID 집합을 known-uids로 넘긴다. 툼스톤 경로는 메일함 전체를 돌려주므로 요청 집합으로
+     * 다시 거른다.
+     * ★`*`는 FETCH 대상(resolveTargets)과 **같은 값** — 세션 뷰의 최대 UID — 으로 정해 숫자로 넘긴다
+     * (RFC 3501 §9). 한 명령 안에서 VANISHED와 FETCH가 서로 다른 집합을 보면 안 된다(독립 리뷰 1차:
+     * 무한대로 보았더니 `8:*`이 범위 밖 uid를 싣고, `12:*`(=9:12)는 안의 uid를 빠뜨렸다).
+     * 빈 뷰면 `*`는 UIDNEXT다(같은 절) — 0으로 두면 `1:*`이 1만 보고 `12:*`이 1:9를 싣는다(2차 리뷰).
+     * FETCH 대상은 빈 뷰에서 어차피 없으므로 resolveTargets와 어긋나지 않는다.
+     */
+    const maxUid = view.uids.length > 0 ? view.uids[view.uids.length - 1]! : view.uidnext;
+    const requested: SeqRange[] = ranges.map((r) => ({ from: r.from === "*" ? maxUid : r.from, to: r.to === "*" ? maxUid : r.to }));
+    return this.callBackend(
+      { kind: "syncSince", name: view.name, sinceModseq: changedSince, knownUids: requested, vanishedOnly: true },
+      (sync) => {
+        if (sync.kind === "no") return [ImapEngine.noReply(cmd.tag, verb, sync)];
+        if (sync.kind !== "sync") return [{ kind: "reply", text: `${cmd.tag} NO ${verb} failed` }];
+        const vanished = sync.vanished.filter((uid) => matchSequenceSet(requested, uid, maxUid));
+        return [
+          ...(vanished.length > 0 ? [{ kind: "reply" as const, text: `* VANISHED (EARLIER) ${formatUidSet(vanished)}` }] : []),
+          ...fetchAll(),
+        ];
+      },
+    );
   }
 
   /** APPEND (RFC 9051 §6.3.12) — [flags] [date-time] literal. UIDPLUS APPENDUID 방출. */
@@ -1525,6 +1591,7 @@ export class ImapEngine {
             for (const u of uids) {
               if (view.uids.includes(u)) continue;
               view.uids.push(u);
+              view.uidnext = Math.max(view.uidnext, u + 1);
               added = true;
             }
             if (added) {
@@ -1614,6 +1681,7 @@ export class ImapEngine {
         // 새 메시지가 선택 중 메일함에 들어갔으면 EXISTS를 먼저 알린다(§5의 예시 순서).
         if (view.name === dest && !view.uids.includes(res.uid)) {
           view.uids.push(res.uid);
+          view.uidnext = Math.max(view.uidnext, res.uid + 1);
           view.uids.sort((a, b) => a - b);
           actions.push({ kind: "reply", text: `* ${view.uids.length} EXISTS` });
         }
@@ -1830,10 +1898,17 @@ export class ImapEngine {
       const fresh = new Set(res.uids);
       const removed = current.uids.filter((u) => !fresh.has(u));
       actions.push(...this.removalActions(removed));
+      /**
+       * ★스냅샷의 UIDNEXT를 그대로 받는다. 두 동기화 사이에 들어왔다가 지워진 uid는 뷰에 한 번도
+       * 들어오지 않으므로, "뷰에 들어올 때 올리기"만으로는 놓친다 — 빈 뷰의 `*`가 낡은 값에 묶여
+       * VANISHED에서 그 uid가 빠졌다(독립 리뷰 3차). 줄이지는 않는다(UIDNEXT는 감소하지 않는다).
+       */
+      current.uidnext = Math.max(current.uidnext, res.mailbox.uidnext);
       const known = new Set(current.uids);
       const added = res.uids.filter((u) => !known.has(u));
       if (added.length > 0) {
         current.uids.push(...added);
+        current.uidnext = Math.max(current.uidnext, ...added.map((u) => u + 1));
         current.uids.sort((a, b) => a - b);
         actions.push({ kind: "reply", text: `* ${current.uids.length} EXISTS` });
       }
