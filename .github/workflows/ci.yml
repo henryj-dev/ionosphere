@@ -105,23 +105,21 @@ jobs:
       - run: npm run gate:shared-mailbox:archived
 
   # **정책 층은 이 저장소 것이 아니다.** 자격증명·워크플로 감사·의존성 리뷰는 이 저장소가
-  # 무엇을 만드는지와 무관하게 다섯 저장소가 같은 것을 묻는 축이다. 복제해 들고 있으면
+  # 무엇을 만드는지와 무관하게 부르는 저장소 모두에 같은 것을 묻는 축이다. 복제해 들고 있으면
   # 같은 상태가 유지된다는 보장이 없고, 갈라지기 시작하면 어느 쪽이 기준인지 알 수 없다.
   #
   # 재사용 워크플로는 **부르는 저장소의 맥락에서** 돈다 — 체크아웃도 이 저장소를 받고
   # `.gitleaks.toml` 도 이쪽 것을 읽는다. 예외 목록은 각자 자기 근거와 함께 갖는다.
   #
   # ⚠️ 커밋 SHA 로 박는다. `@main` 이면 저쪽 파일 한 줄이 이 저장소의 게이트를 바꾼다.
-  #    dependabot 이 이 SHA 를 갱신한다.
+  #    dependabot 은 이 SHA 를 갱신하지 못한다(태그 없는 저장소의 재사용 워크플로라서).
+  #    손으로 올린다: `gh api repos/henryj-dev/.github/commits/main --jq .sha`
   policy:
-    uses: henryj-dev/.github/.github/workflows/policy-checks.yml@f8eab7393216bd0054e6b65297a0cc5baa865630
+    uses: henryj-dev/.github/.github/workflows/policy-checks.yml@982f0bc15519dc094fa0a4cc8de6724d3f1bba4c
     permissions:
       contents: read
       # dependency-review 가 무엇이 왜 막혔는지 PR 안에 적는다.
       pull-requests: write
-    secrets:
-      # 조직 소유 저장소는 gitleaks-action 라이선스가 필수다. org 시크릿에 있다.
-      GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
   # **브랜치 규칙이 거는 이름은 이것 하나다.**
   #
