@@ -1,7 +1,6 @@
 {
   "worktree": {
-    "baseRef": "head",
-    "symlinkDirectories": ["node_modules"]
+    "baseRef": "head"
   },
   "hooks": {
     "PreToolUse": [
