@@ -15,6 +15,7 @@ npm run verify                              # lint + typecheck + test + smoke
 워크트리에서 `npm run verify` 를 돌려도 메인 코드를 검증한다(2026-09-30 실측, `readlink
 node_modules/@ionosphere/core` 로 확인할 수 있다). `npm ci` 는 워크트리 자기 `packages/` 를 링크한다.
 
-`.claude/settings.json` 의 `worktree.symlinkDirectories` 는 Claude 전용 워크트리 도구에서 같은
-심링크를 자동으로 건다 — 같은 문제가 있다. 도구 중립 생성기(`scripts/claude-hooks/enter-worktree.py`)
-는 그 설정을 읽지 않는다. 그 도구로 만든 워크트리라면 심링크를 지우고 `npm ci` 를 돌린다.
+예전에는 `.claude/settings.json` 의 `worktree.symlinkDirectories` 가 Claude 전용 워크트리 도구에서
+같은 심링크를 자동으로 걸었다 — 2026-10-08에 뺐다. 그 전에 만든 워크트리에 심링크가 남아 있으면
+`npm ci` **앞에서** 지운다(`[ ! -L node_modules ] || rm node_modules`). 심링크가 걸린 채 `npm ci` 를
+돌리면 npm이 심링크를 따라가 **메인 트리의 의존성을 지운다.**

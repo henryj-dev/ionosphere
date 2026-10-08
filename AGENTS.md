@@ -153,9 +153,10 @@ Actions의 **Release & deploy**(`.github/workflows/release.yml`, `workflow_dispa
 **메인 트리의 `packages/`** 를 가리켜, 워크트리에서 `npm run verify`를 돌려도 워크트리가 아니라
 메인 코드를 검증한다 — 초록이 아무것도 증명하지 않는다(2026-09-30 실측). `npm ci`는 1초 안팎이다.
 **심링크가 걸린 채로 `npm ci`를 돌리면 더 나쁘다** — npm이 심링크를 따라가 `node_modules` 안을
-지우므로 **메인 트리의 의존성이 사라진다.** 하네스 전용 워크트리 도구는 `.claude/settings.json`의
-`worktree.symlinkDirectories` 때문에 이 심링크를 자동으로 건다. 그래서 위 흐름은 `npm ci` 앞에서
-심링크를 먼저 지운다.
+지우므로 **메인 트리의 의존성이 사라진다.** 예전에는 `.claude/settings.json`의
+`worktree.symlinkDirectories`가 하네스 전용 워크트리 도구에서 이 심링크를 자동으로 걸었다 —
+2026-10-08에 그 설정을 뺐다(대가: 새 워크트리마다 `npm ci`, 1초 안팎). 그래도 위 흐름은 `npm ci`
+앞에서 심링크를 먼저 지운다 — 그 전에 만든 워크트리나 다른 도구가 건 심링크가 남아 있을 수 있다.
 
 **main에는 PR로만 들어간다.** 저장소 ruleset(`main`, 우회자 없음)이 main 직접 push를 거부한다
 (2026-09-30 확인) — PR 필수·squash 머지·필수 검사(`gate`·`codeql`). CI가 초록이어야 머지할 수 있다.
