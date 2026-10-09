@@ -469,7 +469,7 @@ export class ImapServer {
 
     /** 나가는 줄에서 명령 완료를 읽는다 — 결과(ok/no/bad)는 태그 달린 응답에만 있다. */
     const observeReply = (text: string): void => {
-      // untagged·continuation 줄은 결과가 아니다('+'는 파서가 태그로 받지 않는다. '*' 태그는 위 한계 참조).
+      // untagged·continuation 줄은 결과가 아니다('+'·'*'·'%'는 파서가 태그로 받지 않는다 — 그래서 '*'로 시작하는 줄은 언제나 untagged다).
       const first = text.charCodeAt(0);
       if (first === 42 /* * */) {
         // `* BAD`는 파싱 전에 거절된 줄 — 파싱 실패 또는 리더 한도 초과(줄·리터럴이 너무 큼).

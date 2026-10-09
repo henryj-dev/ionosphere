@@ -75,6 +75,8 @@ describe("parseCommand — envelope", () => {
     for (const tag of ["*", "%1", "a*b", "a%"]) expect(() => parseCommand([text(`${tag} NOOP`)])).toThrow(ImapParseError);
     // 다른 atom 문자는 그대로 받는다 — 거부 범위가 넓어지지 않았는지.
     expect(parseCommand([text("A.1-_~ NOOP")]).tag).toBe("A.1-_~");
+    // `]`는 resp-specials라 ATOM-CHAR는 아니지만 ASTRING-CHAR라서 tag에 올 수 있다 — 막지 않는다.
+    expect(parseCommand([text("a] NOOP")]).tag).toBe("a]");
     expect(() => parseCommand([text("a1")])).toThrow(ImapParseError); // 명령명 없음
   });
 
