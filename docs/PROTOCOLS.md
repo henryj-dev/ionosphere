@@ -134,7 +134,7 @@ LOGIN-REFERRALS/MAILBOX-REFERRALS(죽음), ANNOTATE-EXPERIMENT-1, CONVERT, UTF8=
 | LIST-EXTENDED 광고 | **광고한다** | 확장 문법은 10-02부터 받았고 7일 LIST bad 0(IMAP 사서함 호스트) — 다만 광고 전이라 규칙을 지키는 클라이언트는 확장 옵션을 거의 보내지 않았다. 「회귀 없음」의 근거이지 「확장 경로 검증」은 아니다 | 릴리즈 뒤 LIST bad가 생기거나 NAMESPACE→LIST가 함께 오를 때(10-02 루프의 모양) |
 | IMAP 세션 명령 속도 상한 | **두지 않는다** | 사서함 호스트 전체 명령 p99 0.170/s · 최대 0.297/s(5분 89건), 7일 32,689건·종료 세션 1,670 — 호스트 최대가 어떤 세션의 상한보다도 낮다. 세션 라벨이 없어 세션별 분위는 못 봤다 | 루프 세션이 다시 나타날 때(세션 요약의 commands/durationMs) |
 | api 실패의 4xx·5xx 분리 | **지금은 나누지 않는다** | `ionosphere_audit_events_total{surface=api,outcome=fail}` 7일 0(세 호스트). api 서버도 같은 감사 싱크라 계측 누락이 아니라 실제 0건 | **첫 5xx가 나타날 때** — 5xx를 별도 outcome 으로 나눈다(db 인코딩·admin-cmd 라벨·stardust 알림 규칙을 함께) |
-| 태그 `*`·`%` 거부 | 대기 | `wildcardTags` 7일 합(사서함 호스트 journal) 집계 뒤 정한다 | — |
+| 태그 `*`·`%` 거부 | **거부한다**(`* BAD invalid tag`) | 7일 세션 요약 1,518개에서 `*`·`%` 태그 0(사서함 호스트 journal, 10-02 07:26Z ~ 10-09 07:26Z). 셈 필드(`wildcardTags`)는 거부와 함께 뺐다 | 릴리즈 뒤 unparsed bad가 함께 오르면(거부가 재시도 루프를 부르는 모양) |
 
 **권장 구현 순서**: Tier1 전부 → CONDSTORE → QRESYNC → {OBJECTID+SAVEDATE+STATUS=SIZE 스키마 배치} → COMPRESS/PREVIEW/QUOTA → SORT/THREAD(웹메일 시) → IMAP4REV2 광고
 

@@ -60,12 +60,6 @@ export interface SessionSummary {
    * 리스너에선 TCP 데이터 이벤트, TLS(993·STARTTLS 뒤)에선 복호화된 레코드 이벤트다.
    */
   reads?: number;
-  /**
-   * 태그에 `*`·`%`를 쓴 명령 수(RFC 9051상 태그에 올 수 없는 문자). 지금은 **거부하지 않고 센다** —
-   * 거부는 새 BAD 경로라 "BAD를 받으면 재시도하는 루프" 가설과 같은 방향으로 작동할 수 있다.
-   * 실제로 쓰는 클라이언트가 있는지 이 값으로 본 뒤 정한다(관측기와 관측 대상을 한 배포에 섞지 않는다).
-   */
-  wildcardTags?: number;
   authFailures: number;
   /**
    * 연결 시점 소켓이 읽고 쓴 바이트 — **리스너마다 단위가 다르다**:
@@ -201,7 +195,6 @@ export class SessionMeter {
   private readonly commandCounts = new Map<string, number>();
   private readonly unknownSamples = new Set<string>();
   private reads = 0;
-  private wildcardTags = 0;
   private progressTimer: ReturnType<typeof setInterval> | null = null;
   /** 지난 진행 요약 시점의 누계 — 증분 계산용. */
   private lastProgress = { commands: 0, reads: 0, bytesIn: 0, bytesOut: 0 };
@@ -244,11 +237,6 @@ export class SessionMeter {
     this.reads++;
   }
 
-  /** 태그에 `*`·`%`가 든 명령을 받았다(RFC 위반이지만 거부하지 않고 센다 — 필드 주석 참조). */
-  wildcardTag(): void {
-    this.wildcardTags++;
-  }
-
   /** 엔진이 모르는 명령 이름을 표본으로 남긴다 — 정제(대문자·영숫자와 `-_.`만)·절단하고 개수를 묶는다. */
   unknownCommand(raw: string): void {
     if (this.unknownSamples.size >= MAX_UNKNOWN_SAMPLES) return;
@@ -270,7 +258,6 @@ export class SessionMeter {
         : {}),
       ...(this.unknownSamples.size > 0 ? { unknownCommands: [...this.unknownSamples] } : {}),
       ...(this.opts.countCommands ? { reads: this.reads } : {}),
-      ...(this.wildcardTags > 0 ? { wildcardTags: this.wildcardTags } : {}),
       authFailures: this.authFailures,
       bytesIn: s.bytesRead,
       bytesOut: s.bytesWritten,

@@ -182,7 +182,11 @@ export function parseCommand(parts: readonly LinePart[]): ParsedCommand {
   const values = parseValues(parts);
   const tagVal = values[0];
   if (!tagVal || tagVal.kind !== "atom") throw new ImapParseError("missing command tag");
-  if (tagVal.value.includes("+")) throw new ImapParseError("invalid tag"); // tag는 '+' 금지(RFC 9051)
+  // tag는 `+`·`*`·`%`를 쓸 수 없다(RFC 9051 tag = 1*<any ASTRING-CHAR except "+">, ASTRING-CHAR에 list-wildcards
+  // `*`·`%` 없음). `*`·`%`는 2026-10-09까지 **거부하지 않고 셌다** — 거부는 새 BAD 경로라 재시도 루프를 부를 수
+  // 있어서, 쓰는 클라이언트가 있는지 먼저 봤다. 7일(10-02~10-09) 세션 요약 1,518개에서 0건이라 거부한다.
+  // 거부는 `* BAD invalid tag`로 나가 서버가 unparsed bad로 세고 표본을 남긴다 — 루프가 생기면 그것으로 보인다.
+  if (/[+*%]/.test(tagVal.value)) throw new ImapParseError("invalid tag");
   const nameVal = values[1];
   if (!nameVal || nameVal.kind !== "atom") throw new ImapParseError("missing command name");
   return { tag: tagVal.value, name: nameVal.value.toUpperCase(), args: values.slice(2) };
