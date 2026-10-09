@@ -395,8 +395,9 @@ type Pending =
   | { kind: "backend"; resume: (res: ImapBackendResponse) => ImapAction[] };
 
 // ★`LIST-EXTENDED`(RFC 5258)는 2026-10-09에 광고를 더했다. 문법은 10-02부터 이미 받고 있었다(아래 cmdList) —
-// 받으면서 광고하지 않는 상태를 7일 지켜봤고 LIST bad가 0이었다(stardust 수집, 10-02~10-09). 광고와
-// 실제가 어긋나면 클라이언트가 그 차이에서 루프를 돈다는 것이 10-02의 교훈이라, 실제에 광고를 맞췄다.
+// 받으면서 광고하지 않는 상태를 7일 지켜봤고 LIST bad가 0이었다(stardust 수집, 10-02~10-09) — 다만 광고 전이라
+// 확장 옵션을 보낸 클라이언트는 드물었다. 「회귀 없음」의 근거이지 확장 경로가 검증된 것은 아니다.
+// 광고와 실제가 어긋나면 클라이언트가 그 차이에서 루프를 돈다는 것이 10-02의 교훈이라, 실제에 광고를 맞췄다.
 const BASE_CAPABILITIES = ["IMAP4rev1", "IMAP4rev2", "LITERAL-", "SASL-IR", "ID", "ENABLE", "NAMESPACE", "CHILDREN", "SPECIAL-USE", "UNSELECT", "UIDPLUS", "MOVE", "IDLE", "CONDSTORE", "QRESYNC", "ESEARCH", "SEARCHRES", "BINARY", "SAVEDATE", "MULTIAPPEND", "REPLACE", "OBJECTID", "SORT", "THREAD=ORDEREDSUBJECT", "THREAD=REFERENCES", "LIST-EXTENDED", "LIST-STATUS", "QUOTA", "QUOTA=RES-STORAGE", "QUOTA=RES-MESSAGE"] as const;
 
 /**
@@ -1088,15 +1089,31 @@ export class ImapEngine {
        * 통과해야 한다(passesSelection). SPECIAL-USE용 CHILDINFO 값은 정의돼 있지 않아 태그는 SUBSCRIBED뿐이다.
        */
       const childInfo = select.has("RECURSIVEMATCH") && select.has("SUBSCRIBED");
-      const hasSelectedChild = new Set<string>();
+      /**
+       * 집합이 **둘**이다 — 줄의 종류마다 묻는 것이 다르다:
+       *  - `hasSelectedDesc`: 선택된 자손이 **하나라도** 있는가. **선택된 줄**의 CHILDINFO는 이것으로 단다 —
+       *    자손이 패턴에 맞아 자기 줄로 나가도 붙인다(RFC 5258 §3.5 표 `meets=yes, has child=yes`,
+       *    §5 예시 9의 `eps2`).
+       *  - `hasUnreturnedSelectedDesc`: 선택된 자손 중 **패턴 밖에 있어 안 나가는** 것이 있는가. **선택되지
+       *    않은 조상**을 따로 내는 이유는 그것뿐이다(§3.3 2.B, §3.5 "SHOULD ONLY return a non-matching
+       *    mailbox name along with CHILDINFO if at least one matching child is not also being returned").
+       * ★2026-10-09 리뷰: 처음엔 하나의 집합에 패턴 제외를 걸어 **구독한 부모의 CHILDINFO까지** 지웠다.
+       * ⚠️ RFC 예시 9의 `"*"` 응답은 구독 안 한 `baz2`도 CHILDINFO와 함께 낸다(스스로 "redundant"라 적음).
+       *    같은 예시의 `"*2"` 응답과 규범 본문(§3.5 SHOULD)은 그런 줄을 빼라고 한다 — 본문을 따른다.
+       *    예시 `"*"`를 근거로 되돌리지 말 것.
+       */
+      const hasSelectedDesc = new Set<string>();
+      const hasUnreturnedSelectedDesc = new Set<string>();
       if (childInfo) {
         for (const m of res.mailboxes) {
-          // 패턴에 맞는 자손은 **자기 줄로** 이미 나간다 — 그 조상에 CHILDINFO를 또 다는 것은 중복이다.
-          // 선택되지 않은 조상을 내는 이유는 "선택된 자손이 패턴 밖에 있을 때"뿐이다(RFC 5258 §3.3 2.B,
-          // §3.5 SHOULD suppress redundant CHILDINFO).
-          if (!passesSelection(m) || matches(m.name)) continue;
+          if (!passesSelection(m)) continue;
+          const unreturned = !matches(m.name);
           const segs = m.name.split(HIERARCHY_DELIMITER);
-          for (let i = 1; i < segs.length; i++) hasSelectedChild.add(segs.slice(0, i).join(HIERARCHY_DELIMITER));
+          for (let i = 1; i < segs.length; i++) {
+            const ancestor = segs.slice(0, i).join(HIERARCHY_DELIMITER);
+            hasSelectedDesc.add(ancestor);
+            if (unreturned) hasUnreturnedSelectedDesc.add(ancestor);
+          }
         }
       }
       const childInfoSuffix = ' ("CHILDINFO" ("SUBSCRIBED"))';
@@ -1120,9 +1137,8 @@ export class ImapEngine {
         if (!matches(m.name)) continue;
         if (verb === "LSUB" && m.subscribed === false) continue; // 구독 필터(영속화됨)
         const selected = passesSelection(m);
-        const withChildInfo = childInfo && hasSelectedChild.has(m.name);
         if (!selected) {
-          if (withChildInfo) {
+          if (childInfo && hasUnreturnedSelectedDesc.has(m.name)) {
             actions.push({
               kind: "reply",
               text: `* ${verb} (${listAttributes(m, false)}) "${HIERARCHY_DELIMITER}" ${quoteMailboxName(m.name)}${childInfoSuffix}`,
@@ -1132,7 +1148,7 @@ export class ImapEngine {
         }
         actions.push({
           kind: "reply",
-          text: `* ${verb} (${listAttributes(m, returnSubscribed && m.subscribed !== false)}) "${HIERARCHY_DELIMITER}" ${quoteMailboxName(m.name)}${withChildInfo ? childInfoSuffix : ""}`,
+          text: `* ${verb} (${listAttributes(m, returnSubscribed && m.subscribed !== false)}) "${HIERARCHY_DELIMITER}" ${quoteMailboxName(m.name)}${childInfo && hasSelectedDesc.has(m.name) ? childInfoSuffix : ""}`,
         });
         // LIST-STATUS — 각 LIST 라인 뒤에 STATUS 인라인(RFC 5819)
         if (statusItems) {

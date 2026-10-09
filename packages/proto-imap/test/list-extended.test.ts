@@ -114,6 +114,9 @@ describe("LIST-EXTENDED", () => {
     }
     // 빈 패턴이 다른 패턴과 섞이면 빈 것만 무시된다.
     expect(list('l LIST "" ("" "INBOX")')).toEqual(['* LIST (\\HasNoChildren) "/" "INBOX"', "l OK LIST completed"]);
+    // 빈 괄호도 확장 형태다(RFC 5258 §3 — 문법 형태로 가른다).
+    expect(list('l LIST () "" ""')).toEqual(["l OK LIST completed"]);
+    expect(list('l LIST "" "" RETURN ()')).toEqual(["l OK LIST completed"]);
   });
 
   test("RECURSIVEMATCH — 패턴에 맞는 자손이 이미 나가면 부모에 CHILDINFO를 또 달지 않는다(RFC 5258 §3.5)", () => {
@@ -121,6 +124,36 @@ describe("LIST-EXTENDED", () => {
     const out = list('l LIST (SUBSCRIBED RECURSIVEMATCH) "" "*"');
     expect(out).toContain('* LIST (\\HasNoChildren \\Subscribed) "/" "Work/Reports"');
     expect(out.some((l) => l.includes('"Work" ("CHILDINFO"'))).toBe(false);
+  });
+
+  test("★RECURSIVEMATCH — 구독한 부모는 자손이 패턴에 맞아 나가도 CHILDINFO를 단다(RFC 5258 §3.5 표)", () => {
+    const nested = [mailbox({ name: "Fruit" }), mailbox({ name: "Fruit/Apple" })];
+    expect(list('l LIST (SUBSCRIBED RECURSIVEMATCH) "" "*"', nested)).toEqual([
+      '* LIST (\\HasChildren \\Subscribed) "/" "Fruit" ("CHILDINFO" ("SUBSCRIBED"))',
+      '* LIST (\\HasNoChildren \\Subscribed) "/" "Fruit/Apple"',
+      "l OK LIST completed",
+    ]);
+  });
+
+  test("RFC 5258 §5 예시 9의 \"*2\" 응답과 같다 — baz2는 빼고 foo2·eps2는 CHILDINFO", () => {
+    // 예시 9의 계층·구독 그대로(qux2는 메일함 없이 qux2/bar2만 있다). 속성은 우리 서버가 항상 내는
+    // \\HasChildren/\\HasNoChildren이 더 붙을 뿐이다.
+    const sub = (name: string, subscribed: boolean): ImapMailbox => mailbox({ name, subscribed });
+    const example9 = [
+      sub("foo2", false), sub("foo2/bar1", true), sub("foo2/bar2", true),
+      sub("baz2", false), sub("baz2/bar2", true), sub("baz2/bar22", true), sub("baz2/bar222", true),
+      sub("eps2", true), sub("eps2/mamba", true), sub("qux2/bar2", true),
+    ];
+    expect(list('l LIST (RECURSIVEMATCH SUBSCRIBED) "" "*2"', example9)).toEqual([
+      '* LIST (\\HasChildren) "/" "foo2" ("CHILDINFO" ("SUBSCRIBED"))',
+      '* LIST (\\HasNoChildren \\Subscribed) "/" "foo2/bar2"',
+      '* LIST (\\HasNoChildren \\Subscribed) "/" "baz2/bar2"',
+      '* LIST (\\HasNoChildren \\Subscribed) "/" "baz2/bar22"',
+      '* LIST (\\HasNoChildren \\Subscribed) "/" "baz2/bar222"',
+      '* LIST (\\HasChildren \\Subscribed) "/" "eps2" ("CHILDINFO" ("SUBSCRIBED"))',
+      '* LIST (\\HasNoChildren \\Subscribed) "/" "qux2/bar2"',
+      "l OK LIST completed",
+    ]);
   });
 
   /** 빈 목록·조합 — 문법상 허용되는 경계 형태(코드 검수가 짚은 빈칸). */
