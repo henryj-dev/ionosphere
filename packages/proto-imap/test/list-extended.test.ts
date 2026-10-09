@@ -119,7 +119,7 @@ describe("LIST-EXTENDED", () => {
     expect(list('l LIST "" "" RETURN ()')).toEqual(["l OK LIST completed"]);
   });
 
-  test("RECURSIVEMATCH — 패턴에 맞는 자손이 이미 나가면 부모에 CHILDINFO를 또 달지 않는다(RFC 5258 §3.5)", () => {
+  test("RECURSIVEMATCH — 패턴에 맞는 자손이 이미 나가면 **선택되지 않은** 부모를 CHILDINFO로 따로 내지 않는다(RFC 5258 §3.5)", () => {
     // `*`이면 Work/Reports가 자기 줄로 나가므로, 구독 안 한 Work를 따로 낼 이유가 없다.
     const out = list('l LIST (SUBSCRIBED RECURSIVEMATCH) "" "*"');
     expect(out).toContain('* LIST (\\HasNoChildren \\Subscribed) "/" "Work/Reports"');
@@ -152,6 +152,33 @@ describe("LIST-EXTENDED", () => {
       '* LIST (\\HasNoChildren \\Subscribed) "/" "baz2/bar222"',
       '* LIST (\\HasChildren \\Subscribed) "/" "eps2" ("CHILDINFO" ("SUBSCRIBED"))',
       '* LIST (\\HasNoChildren \\Subscribed) "/" "qux2/bar2"',
+      "l OK LIST completed",
+    ]);
+    // 같은 계층에 "%"면 baz2가 나온다 — 구독한 자손이 전부 패턴 밖이기 때문이다. "*2"에서 빠지고
+    // "%"에서 나오는 이 대비가 집합을 둘로 나눈 이유다. (qux2는 메일함이 없어 \\NonExistent 줄을
+    // 만들지 않는다 — 스토어가 부모 없는 메일함을 만들지 않으므로 닿지 않는 경로다.)
+    expect(list('l LIST (RECURSIVEMATCH SUBSCRIBED) "" "%"', example9)).toEqual([
+      '* LIST (\\HasChildren) "/" "foo2" ("CHILDINFO" ("SUBSCRIBED"))',
+      '* LIST (\\HasChildren) "/" "baz2" ("CHILDINFO" ("SUBSCRIBED"))',
+      '* LIST (\\HasChildren \\Subscribed) "/" "eps2" ("CHILDINFO" ("SUBSCRIBED"))',
+      "l OK LIST completed",
+    ]);
+  });
+
+  test("RECURSIVEMATCH — 여러 단계 조상: 패턴 밖 자손이 있는 조상만 낸다(§3.3 2.B)", () => {
+    // 조상을 단계마다 펼치는 계산은 2단계 이상에서만 시험된다 — a·a/b는 구독 안 함, a/b/c만 구독.
+    const deep = [mailbox({ name: "a", subscribed: false }), mailbox({ name: "a/b", subscribed: false }), mailbox({ name: "a/b/c" })];
+    expect(list('l LIST (SUBSCRIBED RECURSIVEMATCH) "" "*"', deep)).toEqual([
+      '* LIST (\\HasNoChildren \\Subscribed) "/" "a/b/c"',
+      "l OK LIST completed",
+    ]);
+    expect(list('l LIST (SUBSCRIBED RECURSIVEMATCH) "" "%"', deep)).toEqual([
+      '* LIST (\\HasChildren) "/" "a" ("CHILDINFO" ("SUBSCRIBED"))',
+      "l OK LIST completed",
+    ]);
+    expect(list('l LIST (SUBSCRIBED RECURSIVEMATCH) "" ("a" "a/b")', deep)).toEqual([
+      '* LIST (\\HasChildren) "/" "a" ("CHILDINFO" ("SUBSCRIBED"))',
+      '* LIST (\\HasChildren) "/" "a/b" ("CHILDINFO" ("SUBSCRIBED"))',
       "l OK LIST completed",
     ]);
   });

@@ -1084,7 +1084,7 @@ export class ImapEngine {
         (!select.has("SUBSCRIBED") || m.subscribed !== false) &&
         (!select.has("SPECIAL-USE") || roleToAttribute(m.role) !== null);
       /**
-       * RECURSIVEMATCH + SUBSCRIBED: 자기는 선택되지 않아도 **선택된 자손이 있으면** CHILDINFO로 낸다
+       * RECURSIVEMATCH + SUBSCRIBED: 자기는 선택되지 않아도 **선택된 자손이 패턴 밖에 있으면** CHILDINFO로 낸다
        * (RFC 5258 §3.5). 선택된 메일함의 조상을 한 번만 모아 둔다. 자손은 **모든** 선택 조건을
        * 통과해야 한다(passesSelection). SPECIAL-USE용 CHILDINFO 값은 정의돼 있지 않아 태그는 SUBSCRIBED뿐이다.
        */
