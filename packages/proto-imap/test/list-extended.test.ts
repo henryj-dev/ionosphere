@@ -107,6 +107,82 @@ describe("LIST-EXTENDED", () => {
     expect(list('l LSUB (SUBSCRIBED) "" "*"').at(-1)).toMatch(/^l BAD /);
   });
 
+  test("★확장 LIST의 빈 패턴은 구분자 조회가 아니라 무시된다(RFC 5258 §3 MUST)", () => {
+    // 기본 형태만 구분자 공지다 — 확장 형태 셋은 응답 줄 없이 OK만 낸다.
+    for (const line of ['l LIST "" ("")', 'l LIST (SUBSCRIBED) "" ""', 'l LIST "" "" RETURN (CHILDREN)']) {
+      expect(list(line)).toEqual(["l OK LIST completed"]);
+    }
+    // 빈 패턴이 다른 패턴과 섞이면 빈 것만 무시된다.
+    expect(list('l LIST "" ("" "INBOX")')).toEqual(['* LIST (\\HasNoChildren) "/" "INBOX"', "l OK LIST completed"]);
+    // 빈 괄호도 확장 형태다(RFC 5258 §3 — 문법 형태로 가른다).
+    expect(list('l LIST () "" ""')).toEqual(["l OK LIST completed"]);
+    expect(list('l LIST "" "" RETURN ()')).toEqual(["l OK LIST completed"]);
+  });
+
+  test("RECURSIVEMATCH — 패턴에 맞는 자손이 이미 나가면 **선택되지 않은** 부모를 CHILDINFO로 따로 내지 않는다(RFC 5258 §3.5)", () => {
+    // `*`이면 Work/Reports가 자기 줄로 나가므로, 구독 안 한 Work를 따로 낼 이유가 없다.
+    const out = list('l LIST (SUBSCRIBED RECURSIVEMATCH) "" "*"');
+    expect(out).toContain('* LIST (\\HasNoChildren \\Subscribed) "/" "Work/Reports"');
+    expect(out.some((l) => l.includes('"Work" ("CHILDINFO"'))).toBe(false);
+  });
+
+  test("★RECURSIVEMATCH — 구독한 부모는 자손이 패턴에 맞아 나가도 CHILDINFO를 단다(RFC 5258 §3.5 표)", () => {
+    const nested = [mailbox({ name: "Fruit" }), mailbox({ name: "Fruit/Apple" })];
+    expect(list('l LIST (SUBSCRIBED RECURSIVEMATCH) "" "*"', nested)).toEqual([
+      '* LIST (\\HasChildren \\Subscribed) "/" "Fruit" ("CHILDINFO" ("SUBSCRIBED"))',
+      '* LIST (\\HasNoChildren \\Subscribed) "/" "Fruit/Apple"',
+      "l OK LIST completed",
+    ]);
+  });
+
+  test("RFC 5258 §5 예시 9의 \"*2\" 응답과 같다 — baz2는 빼고 foo2·eps2는 CHILDINFO", () => {
+    // 예시 9의 계층·구독 그대로(qux2는 메일함 없이 qux2/bar2만 있다). 속성은 우리 서버가 항상 내는
+    // \\HasChildren/\\HasNoChildren이 더 붙을 뿐이다.
+    const sub = (name: string, subscribed: boolean): ImapMailbox => mailbox({ name, subscribed });
+    const example9 = [
+      sub("foo2", false), sub("foo2/bar1", true), sub("foo2/bar2", true),
+      sub("baz2", false), sub("baz2/bar2", true), sub("baz2/bar22", true), sub("baz2/bar222", true),
+      sub("eps2", true), sub("eps2/mamba", true), sub("qux2/bar2", true),
+    ];
+    expect(list('l LIST (RECURSIVEMATCH SUBSCRIBED) "" "*2"', example9)).toEqual([
+      '* LIST (\\HasChildren) "/" "foo2" ("CHILDINFO" ("SUBSCRIBED"))',
+      '* LIST (\\HasNoChildren \\Subscribed) "/" "foo2/bar2"',
+      '* LIST (\\HasNoChildren \\Subscribed) "/" "baz2/bar2"',
+      '* LIST (\\HasNoChildren \\Subscribed) "/" "baz2/bar22"',
+      '* LIST (\\HasNoChildren \\Subscribed) "/" "baz2/bar222"',
+      '* LIST (\\HasChildren \\Subscribed) "/" "eps2" ("CHILDINFO" ("SUBSCRIBED"))',
+      '* LIST (\\HasNoChildren \\Subscribed) "/" "qux2/bar2"',
+      "l OK LIST completed",
+    ]);
+    // 같은 계층에 "%"면 baz2가 나온다 — 구독한 자손이 전부 패턴 밖이기 때문이다. "*2"에서 빠지고
+    // "%"에서 나오는 이 대비가 집합을 둘로 나눈 이유다. (qux2는 메일함이 없어 \\NonExistent 줄을
+    // 만들지 않는다 — 스토어가 부모 없는 메일함을 만들지 않으므로 닿지 않는 경로다.)
+    expect(list('l LIST (RECURSIVEMATCH SUBSCRIBED) "" "%"', example9)).toEqual([
+      '* LIST (\\HasChildren) "/" "foo2" ("CHILDINFO" ("SUBSCRIBED"))',
+      '* LIST (\\HasChildren) "/" "baz2" ("CHILDINFO" ("SUBSCRIBED"))',
+      '* LIST (\\HasChildren \\Subscribed) "/" "eps2" ("CHILDINFO" ("SUBSCRIBED"))',
+      "l OK LIST completed",
+    ]);
+  });
+
+  test("RECURSIVEMATCH — 여러 단계 조상: 패턴 밖 자손이 있는 조상만 낸다(§3.3 2.B)", () => {
+    // 조상을 단계마다 펼치는 계산은 2단계 이상에서만 시험된다 — a·a/b는 구독 안 함, a/b/c만 구독.
+    const deep = [mailbox({ name: "a", subscribed: false }), mailbox({ name: "a/b", subscribed: false }), mailbox({ name: "a/b/c" })];
+    expect(list('l LIST (SUBSCRIBED RECURSIVEMATCH) "" "*"', deep)).toEqual([
+      '* LIST (\\HasNoChildren \\Subscribed) "/" "a/b/c"',
+      "l OK LIST completed",
+    ]);
+    expect(list('l LIST (SUBSCRIBED RECURSIVEMATCH) "" "%"', deep)).toEqual([
+      '* LIST (\\HasChildren) "/" "a" ("CHILDINFO" ("SUBSCRIBED"))',
+      "l OK LIST completed",
+    ]);
+    expect(list('l LIST (SUBSCRIBED RECURSIVEMATCH) "" ("a" "a/b")', deep)).toEqual([
+      '* LIST (\\HasChildren) "/" "a" ("CHILDINFO" ("SUBSCRIBED"))',
+      '* LIST (\\HasChildren) "/" "a/b" ("CHILDINFO" ("SUBSCRIBED"))',
+      "l OK LIST completed",
+    ]);
+  });
+
   /** 빈 목록·조합 — 문법상 허용되는 경계 형태(코드 검수가 짚은 빈칸). */
   test("빈 선택 목록·빈 RETURN·선택된 부모의 CHILDINFO·SPECIAL-USE+RECURSIVEMATCH·STATUS 조합", () => {
     expect(list('l LIST () "" "*"')).toEqual(list('l LIST "" "*"'));

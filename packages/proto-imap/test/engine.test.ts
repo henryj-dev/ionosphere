@@ -44,6 +44,8 @@ describe("ImapEngine — 인사말/기본 명령", () => {
     expect(caps[0]).toContain("AUTH=PLAIN");
     expect(caps[0]).toContain("AUTH=XOAUTH2");
     expect(caps[0]).toContain("AUTH=OAUTHBEARER");
+    // 확장 LIST 문법을 받으므로 광고도 한다 — 받는 것과 광고가 어긋나면 클라이언트가 루프를 돈다(2026-10-02).
+    expect(caps[0]!.split(" ")).toContain("LIST-EXTENDED");
     expect(caps[1]).toBe("a1 OK CAPABILITY completed");
 
     expect(replies(feed(e, "a2 NOOP\r\n"))).toEqual(["a2 OK NOOP completed"]);
