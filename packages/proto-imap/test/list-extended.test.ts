@@ -107,6 +107,22 @@ describe("LIST-EXTENDED", () => {
     expect(list('l LSUB (SUBSCRIBED) "" "*"').at(-1)).toMatch(/^l BAD /);
   });
 
+  test("★확장 LIST의 빈 패턴은 구분자 조회가 아니라 무시된다(RFC 5258 §3 MUST)", () => {
+    // 기본 형태만 구분자 공지다 — 확장 형태 셋은 응답 줄 없이 OK만 낸다.
+    for (const line of ['l LIST "" ("")', 'l LIST (SUBSCRIBED) "" ""', 'l LIST "" "" RETURN (CHILDREN)']) {
+      expect(list(line)).toEqual(["l OK LIST completed"]);
+    }
+    // 빈 패턴이 다른 패턴과 섞이면 빈 것만 무시된다.
+    expect(list('l LIST "" ("" "INBOX")')).toEqual(['* LIST (\\HasNoChildren) "/" "INBOX"', "l OK LIST completed"]);
+  });
+
+  test("RECURSIVEMATCH — 패턴에 맞는 자손이 이미 나가면 부모에 CHILDINFO를 또 달지 않는다(RFC 5258 §3.5)", () => {
+    // `*`이면 Work/Reports가 자기 줄로 나가므로, 구독 안 한 Work를 따로 낼 이유가 없다.
+    const out = list('l LIST (SUBSCRIBED RECURSIVEMATCH) "" "*"');
+    expect(out).toContain('* LIST (\\HasNoChildren \\Subscribed) "/" "Work/Reports"');
+    expect(out.some((l) => l.includes('"Work" ("CHILDINFO"'))).toBe(false);
+  });
+
   /** 빈 목록·조합 — 문법상 허용되는 경계 형태(코드 검수가 짚은 빈칸). */
   test("빈 선택 목록·빈 RETURN·선택된 부모의 CHILDINFO·SPECIAL-USE+RECURSIVEMATCH·STATUS 조합", () => {
     expect(list('l LIST () "" "*"')).toEqual(list('l LIST "" "*"'));

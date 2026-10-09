@@ -394,7 +394,10 @@ type Pending =
   /** 백엔드 요청 대기 — resume이 응답을 액션으로 변환(명령별 continuation). */
   | { kind: "backend"; resume: (res: ImapBackendResponse) => ImapAction[] };
 
-const BASE_CAPABILITIES = ["IMAP4rev1", "IMAP4rev2", "LITERAL-", "SASL-IR", "ID", "ENABLE", "NAMESPACE", "CHILDREN", "SPECIAL-USE", "UNSELECT", "UIDPLUS", "MOVE", "IDLE", "CONDSTORE", "QRESYNC", "ESEARCH", "SEARCHRES", "BINARY", "SAVEDATE", "MULTIAPPEND", "REPLACE", "OBJECTID", "SORT", "THREAD=ORDEREDSUBJECT", "THREAD=REFERENCES", "LIST-STATUS", "QUOTA", "QUOTA=RES-STORAGE", "QUOTA=RES-MESSAGE"] as const;
+// ★`LIST-EXTENDED`(RFC 5258)는 2026-10-09에 광고를 더했다. 문법은 10-02부터 이미 받고 있었다(아래 cmdList) —
+// 받으면서 광고하지 않는 상태를 7일 지켜봤고 LIST bad가 0이었다(stardust 수집, 10-02~10-09). 광고와
+// 실제가 어긋나면 클라이언트가 그 차이에서 루프를 돈다는 것이 10-02의 교훈이라, 실제에 광고를 맞췄다.
+const BASE_CAPABILITIES = ["IMAP4rev1", "IMAP4rev2", "LITERAL-", "SASL-IR", "ID", "ENABLE", "NAMESPACE", "CHILDREN", "SPECIAL-USE", "UNSELECT", "UIDPLUS", "MOVE", "IDLE", "CONDSTORE", "QRESYNC", "ESEARCH", "SEARCHRES", "BINARY", "SAVEDATE", "MULTIAPPEND", "REPLACE", "OBJECTID", "SORT", "THREAD=ORDEREDSUBJECT", "THREAD=REFERENCES", "LIST-EXTENDED", "LIST-STATUS", "QUOTA", "QUOTA=RES-STORAGE", "QUOTA=RES-MESSAGE"] as const;
 
 /**
  * 쿼터 루트 이름 — 이 저장소의 쿼터는 **계정 단위**라 루트가 하나뿐이다(RFC 9208 §3.1이
@@ -1041,8 +1044,12 @@ export class ImapEngine {
     // 선택 옵션 SUBSCRIBED는 반환 옵션 SUBSCRIBED를 함께 뜻한다(RFC 5258 §3.1).
     if (select.has("SUBSCRIBED")) returnSubscribed = true;
 
-    // 빈 패턴 하나 — 계층 구분자 공지(RFC 9051 §6.3.9)
-    if (patterns.length === 1 && patterns[0]!.length === 0) {
+    // 빈 패턴 하나 — 계층 구분자 공지(RFC 9051 §6.3.9). **기본 형태의 LIST·LSUB에서만** 그렇다:
+    // 확장 LIST(선택 옵션·괄호 패턴·RETURN 중 하나라도 있음)는 빈 이름을 이 특별 요청으로 다루면
+    // 안 되고 매칭에서 무시해야 한다(RFC 5258 §3 MUST). LIST-EXTENDED를 광고하면서 지키지 않으면
+    // 광고와 실제가 다시 어긋난다(2026-10-09 리뷰). 무시된 빈 패턴만 남으면 아래 매처가 0개라 OK만 낸다.
+    const extended = at > 0 || patArg?.kind === "list" || rest.length > 0;
+    if (!extended && patterns.length === 1 && patterns[0]!.length === 0) {
       return [
         { kind: "reply", text: `* ${verb} (\\Noselect) "${HIERARCHY_DELIMITER}" ""` },
         { kind: "reply", text: `${cmd.tag} OK ${verb} completed` },
@@ -1084,7 +1091,10 @@ export class ImapEngine {
       const hasSelectedChild = new Set<string>();
       if (childInfo) {
         for (const m of res.mailboxes) {
-          if (!passesSelection(m)) continue;
+          // 패턴에 맞는 자손은 **자기 줄로** 이미 나간다 — 그 조상에 CHILDINFO를 또 다는 것은 중복이다.
+          // 선택되지 않은 조상을 내는 이유는 "선택된 자손이 패턴 밖에 있을 때"뿐이다(RFC 5258 §3.3 2.B,
+          // §3.5 SHOULD suppress redundant CHILDINFO).
+          if (!passesSelection(m) || matches(m.name)) continue;
           const segs = m.name.split(HIERARCHY_DELIMITER);
           for (let i = 1; i < segs.length; i++) hasSelectedChild.add(segs.slice(0, i).join(HIERARCHY_DELIMITER));
         }
