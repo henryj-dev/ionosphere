@@ -401,13 +401,8 @@ export class ImapServer {
       onCommand: (tag, label, summaryName, sample) => {
         meter.command(label);
         if (label === "unknown") meter.unknownCommand(summaryName);
-        /**
-         * 태그에 `*`·`%`는 RFC상 올 수 없지만 **거부하지 않고 센다**(SessionSummary.wildcardTags 주석).
-         * `*` 태그의 완료 응답은 untagged 줄(`* OK ...`)과 구별되지 않으므로 결과를 추적하지 않는다 —
-         * 그 명령이 BAD를 받으면 `* BAD`가 unparsed로 한 번 더 세어지는 한계가 있다.
-         */
-        if (/[*%]/.test(tag)) meter.wildcardTag();
-        if (!tag.includes("*")) rememberPending(tag, { label, sample });
+        // 태그에 `*`·`%`는 파서가 거부한다(parser.ts) — 여기까지 오는 태그는 untagged 줄과 헷갈리지 않는다.
+        rememberPending(tag, { label, sample });
       },
       hostname: this.opts.hostname,
       secure,
