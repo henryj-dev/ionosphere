@@ -22,7 +22,13 @@ const WAIT_LIMIT_MS = 2000;
 
 type RefreshStep = "held" | "lost" | "throw";
 
-/** 갱신 결과를 순서대로 내주는 가짜 락. 다 쓰면 마지막 결과를 반복한다. */
+/**
+ * 갱신 결과를 순서대로 내주는 가짜 락. 다 쓰면 마지막 결과를 반복한다.
+ *
+ * ★`refresh`가 즉시 끝난다는 전제에 기댄다. 그래서 갱신이 겹치지 않고 "상실 경고 정확히 1회"가
+ * 성립한다. 실제 DB 락처럼 갱신이 주기보다 오래 걸리면 진행 중인 갱신마다 경고가 찍힐 수 있다 —
+ * 그건 이 테스트가 아니라 운영 코드 쪽 검토 대상이다.
+ */
 function scriptedLock(steps: RefreshStep[]): MaildropLock & { refreshCalls: () => number } {
   let calls = 0;
   return {
@@ -110,8 +116,10 @@ test("갱신이 던지면 경고만 남기고 다음 주기에 다시 시도한�
 
   const failed = log.warns.filter((w) => w.msg === "maildrop lease refresh failed");
   expect(failed).toHaveLength(2);
-  expect(failed[0]!.fields?.accountId).toBe("acc-1");
-  expect(String(failed[0]!.fields?.error)).toContain("simulated db outage");
+  for (const w of failed) {
+    expect(w.fields?.accountId).toBe("acc-1");
+    expect(String(w.fields?.error)).toContain("simulated db outage");
+  }
   // 예외는 락 상실이 아니다 — 두 경고를 섞으면 운영에서 탈취와 DB 장애를 구분하지 못한다.
   expect(log.warns.some((w) => w.msg === "maildrop lease lost")).toBe(false);
 });
