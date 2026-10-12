@@ -25,9 +25,7 @@ type RefreshStep = "held" | "lost" | "throw";
 /**
  * 갱신 결과를 순서대로 내주는 가짜 락. 다 쓰면 마지막 결과를 반복한다.
  *
- * ★`refresh`가 즉시 끝난다는 전제에 기댄다. 그래서 갱신이 겹치지 않고 "상실 경고 정확히 1회"가
- * 성립한다. 실제 DB 락처럼 갱신이 주기보다 오래 걸리면 진행 중인 갱신마다 경고가 찍힐 수 있다 —
- * 그건 이 테스트가 아니라 운영 코드 쪽 검토 대상이다.
+ * 즉시 완료 결과는 겹치지 않는다. 주기보다 오래 걸리는 갱신은 아래 지연 락 검사가 따로 고정한다.
  */
 function scriptedLock(steps: RefreshStep[]): MaildropLock & { refreshCalls: () => number } {
   let calls = 0;
@@ -43,6 +41,46 @@ function scriptedLock(steps: RefreshStep[]): MaildropLock & { refreshCalls: () =
     release: async () => {},
     refreshCalls: () => calls,
   };
+}
+
+type PendingRefresh = { owner: string; complete: (held: boolean) => Promise<void> };
+
+/** 주기보다 느린 DB 응답을 재현한다 — 요청마다 owner와 완료 함수를 따로 보관한다. */
+function delayedLock() {
+  const pending: PendingRefresh[] = [];
+  const owners: string[] = [];
+  const lock: MaildropLock = {
+    refreshIntervalMs: TICK_MS,
+    acquire: async () => true,
+    refresh: (_accountId, owner) => {
+      owners.push(owner);
+      let resolve!: (held: boolean) => void;
+      const result = new Promise<boolean>((r) => { resolve = r; });
+      const request: PendingRefresh = {
+        owner,
+        complete: async (held) => {
+          const index = pending.indexOf(request);
+          if (index < 0) throw new Error("이미 완료한 갱신 요청이다");
+          pending.splice(index, 1);
+          resolve(held);
+          // refresh Promise와 그 다음 백엔드 반응 콜백이 모두 끝난 뒤에만 어서션하게 한다.
+          await result;
+          await new Promise<void>((done) => queueMicrotask(done));
+        },
+      };
+      pending.push(request);
+      return result;
+    },
+    release: async () => {},
+  };
+  const delayed = {
+    lock,
+    pending,
+    owners,
+    drain: async () => { await Promise.all([...pending].map((r) => r.complete(true))); },
+  };
+  delayedLocks.push(delayed);
+  return delayed;
 }
 
 /** warn만 모으는 로거. 백엔드가 `child()`로 감싸므로 자식도 같은 배열에 쓴다. */
@@ -66,9 +104,14 @@ const fakeStore = {
 } as unknown as Store;
 
 const backends: IonospherePop3Backend[] = [];
+const delayedLocks: { drain: () => Promise<void> }[] = [];
 afterEach(async () => {
-  // 타이머를 남기면 다음 테스트의 호출 수가 섞인다.
-  for (const b of backends.splice(0)) await b.releaseMaildrop("acc-1");
+  try {
+    // 타이머를 먼저 멈춰야 대기 결과를 회수하는 동안 새 요청이 생기지 않는다.
+    for (const b of backends.splice(0)) await b.releaseMaildrop("acc-1");
+  } finally {
+    for (const lock of delayedLocks.splice(0)) await lock.drain();
+  }
 });
 
 function backendWith(lock: MaildropLock, logger: Logger): IonospherePop3Backend {
@@ -135,4 +178,49 @@ test("해제하면 갱신 타이머도 멈춘다", async () => {
   const callsAtRelease = lock.refreshCalls();
   await idleTicks(10);
   expect(lock.refreshCalls()).toBe(callsAtRelease);
+});
+
+test("겹친 갱신이 모두 false여도 리스 상실 경고는 한 번만 남긴다", async () => {
+  const delayed = delayedLock();
+  const log = recordingLogger();
+  const backend = backendWith(delayed.lock, log);
+  expect((await backend.openMaildrop("acc-1")).ok).toBe(true);
+  await waitUntil(() => delayed.pending.length >= 2, "겹친 갱신 요청");
+
+  const [first, ...rest] = delayed.pending;
+  await first!.complete(false);
+  expect(log.warns.filter((w) => w.msg === "maildrop lease lost")).toHaveLength(1);
+  await idleTicks(10);
+  expect(delayed.pending).toHaveLength(rest.length);
+
+  for (const request of rest) await request.complete(false);
+  expect(log.warns.filter((w) => w.msg === "maildrop lease lost")).toHaveLength(1);
+});
+
+test("해제 후 이전 owner의 늦은 false는 새 세션에 경고를 남기거나 갱신을 멈추지 않는다", async () => {
+  const delayed = delayedLock();
+  const log = recordingLogger();
+  const backend = backendWith(delayed.lock, log);
+  expect((await backend.openMaildrop("acc-1")).ok).toBe(true);
+  await waitUntil(() => delayed.pending.length >= 1, "이전 owner 갱신");
+  const oldRequest = delayed.pending[0]!;
+
+  await backend.releaseMaildrop("acc-1");
+  expect((await backend.openMaildrop("acc-1")).ok).toBe(true);
+  await waitUntil(() => delayed.pending.some((r) => r.owner !== oldRequest.owner), "새 owner 갱신");
+
+  await oldRequest.complete(false);
+  expect(log.warns.filter((w) => w.msg === "maildrop lease lost")).toHaveLength(0);
+  const oldCount = delayed.owners.filter((owner) => owner === oldRequest.owner).length;
+  await idleTicks(10);
+  expect(delayed.owners.filter((owner) => owner === oldRequest.owner).length).toBe(oldCount);
+  expect(delayed.pending.some((r) => r.owner !== oldRequest.owner)).toBe(true);
+
+  const newOwner = delayed.owners.find((owner) => owner !== oldRequest.owner)!;
+  const newRequest = delayed.pending.find((r) => r.owner === newOwner)!;
+  await newRequest.complete(false);
+  expect(log.warns.filter((w) => w.msg === "maildrop lease lost")).toHaveLength(1);
+  const newCount = delayed.owners.filter((owner) => owner === newOwner).length;
+  await idleTicks(10);
+  expect(delayed.owners.filter((owner) => owner === newOwner).length).toBe(newCount);
 });
