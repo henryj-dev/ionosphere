@@ -2100,10 +2100,10 @@ export class IonospherePop3Backend implements Pop3Backend {
         .refresh(accountId, owner)
         .then((held) => {
           if (held) return;
-          // 이미 뺏겼다 — 갱신을 계속해봐야 남의 락을 건드릴 뿐이라 타이머를 멈추고 알린다.
-          this.log.warn("maildrop lease lost", { accountId });
           const session = this.sessions.get(accountId);
           if (session?.owner === owner && session.heartbeat) {
+            // 겹친 갱신·이전 owner의 늦은 결과는 이 가드를 못 지난다. 유효한 첫 상실만 알린다.
+            this.log.warn("maildrop lease lost", { accountId });
             clearInterval(session.heartbeat);
             session.heartbeat = null;
           }
