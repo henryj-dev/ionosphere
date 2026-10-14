@@ -128,20 +128,19 @@ Actions의 **Release & deploy**(`.github/workflows/release.yml`, `workflow_dispa
 
 마이그레이션이 포함된 릴리즈 전에는 DB 백업(`scripts/backup.sh`) — 절차는 운영 저장소 문서에 있다.
 운영 저장소의 배포는 라이브 리비전과 비교해 마이그레이션 변경이 있으면 **배포 직전에 자동으로 백업을 뜬다**
-(2026-09-30 로그로 확인). 그래도 범위를 사람에게 먼저 알리는 것은 아래 §에이전트는 워크트리의 규칙대로 에이전트 몫이다.
+(2026-09-30 로그로 확인). 그래도 범위를 사람에게 먼저 알리는 것은 아래 §작업별 브랜치와 워크트리의 규칙대로 에이전트 몫이다.
 
-## 에이전트는 워크트리, 사람은 메인에서 작업
+## 작업별 브랜치와 워크트리
 
-**에이전트**의 `Edit`/`Write`/트리 변경 git 명령은 메인 작업 트리에서 **항상 거부**된다.
-단독 세션이어도 같다. **사람은 메인 트리에서 수정·커밋할 수 있다** — git `pre-commit`은
-에이전트 하네스 환경 변수가 있을 때만 메인 커밋을 막는다. 다만 원격 main에는 **사람도 PR로만**
-들어간다(아래 — 저장소 ruleset에 우회자가 없다).
+작업마다 별도 브랜치를 만들고 그 브랜치의 워크트리에서 작업한다. 다른 작업의 변경은
+포함하거나 덮어쓰지 않는다. 원격 main에는 **사람도 PR로만** 들어간다(아래 — 저장소
+ruleset에 우회자가 없다).
 
 작업 흐름:
 
-    # 하네스 전용 도구가 있으면 그것을 쓰고, 없으면 모든 에이전트 공통 생성기:
-    python3 scripts/claude-hooks/enter-worktree.py <이름>
-    # 출력된 .claude/worktrees/<이름> 경로에서 작업·커밋
+    # 하네스의 worktree 도구가 있으면 그것을 쓰고, 없으면 일반 git worktree:
+    git worktree add .claude/worktrees/<이름> -b <브랜치> origin/main
+    # .claude/worktrees/<이름> 경로에서 작업·커밋
     [ ! -L node_modules ] || rm node_modules   # ★심링크가 있으면 먼저 지운다 — 아래 ⚠
     npm ci                                     # 워크트리 전용 의존성 (.claude/worktree-bootstrap.md)
     npm run verify
@@ -171,15 +170,4 @@ PR을 미루면 그 사이클은 아직 끝나지 않은 것이다.
 `packages/db/src/migrations/` 변경이 끼는지. 2026-09-30에는 라이브가 한 달 전 리비전이라
 마이그레이션 14개가 함께 나갔는데, 그 사실을 배포 **뒤에** 알렸다.
 
-메인은 세션 시작·종료에 자동 fast-forward된다 — 다만 이건 안전망일 뿐, **사용자는
-기다리지 않고 언제든 메인 트리에서 직접 `git pull`(ff-only)을 받아도 된다.**
-에이전트가 메인에서 통과하는 것: `Read`·`Grep`·`git status|log|diff|pull|fetch`,
-그리고 `worktree list|remove|prune`·`stash list`·`tag -l` 같은 읽기·회수 계열.
-**임의 `git worktree add`는 계속 거부된다** — 생성기를 거쳐야 소유자가 기록되고
-종료·다음 시작에 자동 회수된다.
-에이전트가 정말 메인에서 해야 하면 `touch .git/claude-main-tree-rescue`
-(30분 TTL, **사용자 승인 후에만**). 사람은 이 파일이 필요 없다.
-
-이 장치가 못 하는 것: 세 층 다 내부 오류 시 **통과**시키고(fail-open),
-`git commit --no-verify`로 우회되며, `core.hooksPath`를 안 세운 클론에서는 git 층이 안 돈다
-(머신마다 한 번 `bash scripts/git-hooks/install.sh`). **경계가 아니라 위생 장치다.**
+메인 트리는 자동으로 갱신되지 않는다. 필요하면 직접 `git pull --ff-only`를 받는다.
