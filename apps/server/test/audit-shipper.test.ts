@@ -11,6 +11,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
+import type { Logger } from "@ionosphere/core";
 import { AuditShipper, type AuditS3Target } from "../src/audit-shipper.ts";
 
 const dirs: string[] = [];
@@ -306,6 +307,169 @@ describe("★보존기간 — 디스크가 차는 것이 더 나쁘다", () => {
     await s.tick(NOW);
     expect(fails).toBe(2);
     expect(dropped).toBe(1);
+  });
+});
+
+/** warn 필드를 모으는 로거 — 진단 필드가 실제로 로그에 실리는지 본다. */
+function warnRecorder(): { logger: Logger; warns: Record<string, unknown>[] } {
+  const warns: Record<string, unknown>[] = [];
+  const logger: Logger = {
+    debug: () => {},
+    info: () => {},
+    warn: (_msg, fields) => warns.push({ ...fields }),
+    error: () => {},
+    child: () => logger,
+  };
+  return { logger, warns };
+}
+
+function targetWith(f: typeof fetch): AuditS3Target {
+  return { endpoint: "https://s3.example.test", bucket: "b", accessKeyId: "k", secretAccessKey: "s", forcePathStyle: true, fetch: f };
+}
+
+/**
+ * ★2026-10-15~16: 세 인스턴스가 31시간 동안 `"error":"fetch failed"`만 남겨, 장애가 풀린 뒤
+ * 저장소가 죽었는지 경로가 막혔는지 가를 수 없었다. 원인은 undici가 `cause`에만 둔다.
+ */
+describe("★실패 원인이 로그에 남는다", () => {
+  test("fetch 예외의 cause(코드 포함)를 남긴다", async () => {
+    const dir = tmp();
+    writeDay(dir, "2026-08-03");
+    const { logger, warns } = warnRecorder();
+    const cause = Object.assign(new Error("connect ECONNREFUSED 10.0.0.11:9000"), { code: "ECONNREFUSED" });
+    const target = targetWith((async () => {
+      throw new TypeError("fetch failed", { cause });
+    }) as unknown as typeof fetch);
+    await new AuditShipper({ dir, host: "mx", target, logger }).tick(NOW);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]?.error).toBe("TypeError: fetch failed");
+    expect(warns[0]?.cause).toBe("connect ECONNREFUSED 10.0.0.11:9000");
+  });
+
+  test("메시지에 코드가 없으면 코드를 앞에 붙인다", async () => {
+    const dir = tmp();
+    writeDay(dir, "2026-08-03");
+    const { logger, warns } = warnRecorder();
+    const cause = Object.assign(new Error("getaddrinfo failed"), { code: "ENOTFOUND" });
+    const target = targetWith((async () => {
+      throw new TypeError("fetch failed", { cause });
+    }) as unknown as typeof fetch);
+    await new AuditShipper({ dir, host: "mx", target, logger }).tick(NOW);
+    expect(warns[0]?.cause).toBe("ENOTFOUND: getaddrinfo failed");
+  });
+
+  test("cause가 없으면 error만 남긴다", async () => {
+    const dir = tmp();
+    writeDay(dir, "2026-08-03");
+    const { logger, warns } = warnRecorder();
+    const target = targetWith((async () => {
+      throw new Error("ECONNREFUSED");
+    }) as unknown as typeof fetch);
+    await new AuditShipper({ dir, host: "mx", target, logger }).tick(NOW);
+    expect(warns[0]?.error).toBe("ECONNREFUSED");
+    expect("cause" in warns[0]!).toBe(false);
+  });
+
+  test("거부 응답이면 S3 오류 코드를 남긴다(403 한 숫자로는 원인이 안 갈린다)", async () => {
+    const dir = tmp();
+    writeDay(dir, "2026-08-03");
+    const { logger, warns } = warnRecorder();
+    const xml = '<?xml version="1.0"?><Error><Code>RequestTimeTooSkewed</Code><Message>m</Message></Error>';
+    const target = targetWith((async () => new Response(xml, { status: 403 })) as unknown as typeof fetch);
+    const r = await new AuditShipper({ dir, host: "mx", target, logger }).tick(NOW);
+    expect(r.failed).toBe(1);
+    expect(warns[0]?.status).toBe(403);
+    expect(warns[0]?.s3Code).toBe("RequestTimeTooSkewed");
+  });
+
+  test("본문이 XML이 아니면 s3Code 없이 status만 남긴다", async () => {
+    const dir = tmp();
+    writeDay(dir, "2026-08-03");
+    const { logger, warns } = warnRecorder();
+    const target = targetWith((async () => new Response("bad gateway", { status: 502 })) as unknown as typeof fetch);
+    await new AuditShipper({ dir, host: "mx", target, logger }).tick(NOW);
+    expect(warns[0]?.status).toBe(502);
+    expect("s3Code" in warns[0]!).toBe(false);
+  });
+});
+
+/**
+ * ★응답이 오지 않는 저장소 앞에서 tick이 끝나지 않으면, 재진입 가드 때문에 이후 tick은 아무것도
+ * 세지 않고 돌아간다 — 장애가 「조용함」으로 보인다. 상한에서 실패로 끊어야 한다.
+ */
+describe("★업로드 시간 상한", () => {
+  test("응답이 없으면 상한에서 실패로 끊고 파일을 남긴다", async () => {
+    const dir = tmp();
+    writeDay(dir, "2026-08-03");
+    const { logger, warns } = warnRecorder();
+    const target = targetWith(((_input: unknown, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+      })) as unknown as typeof fetch);
+    let fails = 0;
+    const s = new AuditShipper({ dir, host: "mx", target, logger, uploadTimeoutMs: 20, onShipFailure: () => fails++ });
+    const r = await s.tick(NOW);
+    expect(r.failed).toBe(1);
+    expect(fails).toBe(1);
+    expect(String(warns[0]?.error)).toContain("TimeoutError");
+    expect(existsSync(join(dir, "audit-2026-08-03.jsonl"))).toBe(true);
+    // 끊긴 뒤 다음 tick은 다시 시도한다(재진입 가드에 막히지 않는다).
+    expect((await s.tick(NOW)).failed).toBe(1);
+  });
+});
+
+describe("★성공과 적체를 따로 센다 — 실패 증분 0은 복구의 증거가 아니다", () => {
+  test("onShipped는 올린 파일마다 호출된다", async () => {
+    const dir = tmp();
+    const { target } = fakeS3();
+    writeDay(dir, "2026-08-02");
+    writeDay(dir, "2026-08-03");
+    let shipped = 0;
+    await new AuditShipper({ dir, host: "mx", target, onShipped: () => shipped++ }).tick(NOW);
+    expect(shipped).toBe(2);
+  });
+
+  test("onShipped는 실패에는 호출되지 않는다", async () => {
+    const dir = tmp();
+    const { target } = fakeS3(500);
+    writeDay(dir, "2026-08-03");
+    let shipped = 0;
+    await new AuditShipper({ dir, host: "mx", target, onShipped: () => shipped++ }).tick(NOW);
+    expect(shipped).toBe(0);
+  });
+
+  test("pendingCount는 오늘 파일과 다른 형식을 빼고 지난 날짜만 센다", async () => {
+    const dir = tmp();
+    writeDay(dir, "2026-08-02");
+    writeDay(dir, "2026-08-03");
+    writeDay(dir, "2026-08-04"); // 오늘 — 아직 쓰는 중
+    writeFileSync(join(dir, "notes.txt"), "x");
+    const s = new AuditShipper({ dir, host: "mx" });
+    expect(await s.pendingCount(NOW)).toBe(2);
+  });
+
+  test("pendingCount는 tick 없이도 센다(재시작 직후 한 시간의 공백이 없다)", async () => {
+    const dir = tmp();
+    const { target } = fakeS3(500);
+    writeDay(dir, "2026-08-03");
+    const s = new AuditShipper({ dir, host: "mx", target });
+    expect(await s.pendingCount(NOW)).toBe(1); // tick 전
+    await s.tick(NOW); // 실패 — 파일이 남는다
+    expect(await s.pendingCount(NOW)).toBe(1);
+  });
+
+  test("이관에 성공하면 적체가 0이 된다", async () => {
+    const dir = tmp();
+    const { target } = fakeS3();
+    writeDay(dir, "2026-08-03");
+    const s = new AuditShipper({ dir, host: "mx", target });
+    await s.tick(NOW);
+    expect(await s.pendingCount(NOW)).toBe(0);
+  });
+
+  test("디렉터리가 없으면 적체 0", async () => {
+    const s = new AuditShipper({ dir: join(tmp(), "missing"), host: "mx" });
+    expect(await s.pendingCount(NOW)).toBe(0);
   });
 });
 
