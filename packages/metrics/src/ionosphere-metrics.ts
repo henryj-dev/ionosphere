@@ -46,6 +46,17 @@ export interface IonosphereMetrics {
    */
   auditShipDropped: Counter;
   /**
+   * 이관에 성공한 감사 로그 파일 수. ★실패 카운터가 멈춘 것만으로는 복구를 말할 수 없다 — 일별
+   * 파일이라 올릴 파일이 없는 시간에는 저장소가 죽어 있어도 실패가 늘지 않는다.
+   */
+  auditShipped: Counter;
+  /**
+   * 아직 이관되지 않은 지난 날짜 감사 로그 파일 수(적체). 정상이면 0, 날이 바뀐 직후 첫 tick 전까지만
+   * 1이다. 계속 1 이상이면 보존기간 안에 손을 써야 한다 — 실패 카운터는 재시작하면 0으로 돌아가지만
+   * 이 값은 디스크에서 다시 센다.
+   */
+  auditShipPending: Gauge;
+  /**
    * 닫힌 세션 수 — 라벨 surface=imap|pop3|managesieve, reason=closed|idle|preauth.
    * `reason=preauth`가 인증하지 않고 붙들다 마감에 끊긴 연결이다(2026-09-30 사서함 호스트 점유 사고).
    */
@@ -74,6 +85,8 @@ export function createIonosphereMetrics(registry: Registry = new Registry()): Io
     auditEvents: registry.counter("ionosphere_audit_events_total", "접근 감사 이벤트 수(surface, outcome)"),
     auditShipFailures: registry.counter("ionosphere_audit_ship_failures_total", "감사 로그 오브젝트 스토리지 이관 실패 수"),
     auditShipDropped: registry.counter("ionosphere_audit_ship_dropped_total", "이관 실패 상태로 보존기간을 넘겨 버린 감사 로그 파일 수"),
+    auditShipped: registry.counter("ionosphere_audit_shipped_total", "오브젝트 스토리지로 이관에 성공한 감사 로그 파일 수"),
+    auditShipPending: registry.gauge("ionosphere_audit_ship_pending", "아직 이관되지 않은 지난 날짜 감사 로그 파일 수"),
     sessions: registry.counter("ionosphere_sessions_total", "닫힌 연결 세션 수(surface, reason=closed|idle|preauth)"),
     peerLimitRejections: registry.counter("ionosphere_peer_limit_rejections_total", "IP 프리픽스 동시 연결 상한으로 거절된 연결 수"),
     imapCommands: registry.counter("ionosphere_imap_commands_total", "IMAP 명령 완료 수(command, result=ok|no|bad)"),

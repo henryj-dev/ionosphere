@@ -1412,12 +1412,19 @@ export class IonosphereApp {
       ...(cfg.localRetainDays !== undefined ? { localRetainDays: cfg.localRetainDays } : {}),
       ...(this.metrics
         ? {
+            onShipped: () => this.metrics!.auditShipped.inc({}),
             onShipFailure: () => this.metrics!.auditShipFailures.inc({}),
             onShipDropped: () => this.metrics!.auditShipDropped.inc({}),
           }
         : {}),
     });
     this.auditShipper.start();
+    if (this.metrics) {
+      // 적체는 렌더 직전 디스크에서 센다 — 큐 깊이와 같은 지연 갱신(setupMetrics).
+      const shipper = this.auditShipper;
+      const pending = this.metrics.auditShipPending;
+      this.metrics.registry.onCollect(async () => pending.set(await shipper.pendingCount()));
+    }
 
     if (!cfg.s3) {
       // 조용히 두지 않는다 — 이 구성은 보존기간이 지나면 기록을 **버린다**(장기 보존 없음).

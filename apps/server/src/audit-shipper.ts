@@ -53,7 +53,17 @@ export interface AuditShipperOptions {
    * 신호다.
    */
   localRetainDays?: number;
+  /**
+   * 파일 하나의 업로드 상한(ms). 기본 5분.
+   *
+   * ★없으면 응답이 오지 않는 저장소 앞에서 tick이 끝나지 않고, 재진입 가드 때문에 그 뒤 tick은
+   * **아무것도 세지 않고** 돌아간다 — 실패 카운터도 로그도 멈춰 「장애」가 「조용함」으로 보인다.
+   * 하루치 파일 한 개를 느린 링크로 올릴 여유는 두되 주기(1시간)보다는 충분히 짧게 잡았다.
+   */
+  uploadTimeoutMs?: number;
   logger?: Logger;
+  /** 이관 성공 관측 훅 — 실패 증분 0은 「복구됨」과 「시도할 파일이 없었음」을 가르지 못한다. */
+  onShipped?: () => void;
   /** 이관 실패 관측 훅(메트릭 배선용). 파일이 로컬에 남아 재시도되는 경우도 포함한다. */
   onShipFailure?: () => void;
   /** 보존기간을 넘겨 파일을 **버렸을 때** 훅 — 실패와 달리 되돌릴 수 없는 유실이다. */
@@ -62,9 +72,36 @@ export interface AuditShipperOptions {
 
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000;
 const DEFAULT_LOCAL_RETAIN_DAYS = 7;
+const DEFAULT_UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** `audit-YYYY-MM-DD.jsonl` — 이 형식만 이관 대상이다(다른 파일은 건드리지 않는다). */
 const FILE_RE = /^audit-(\d{4}-\d{2}-\d{2})\.jsonl$/;
+/** S3 오류 응답에서 읽는 양. `<Code>`는 본문 앞쪽에 있고, 나머지(Message·Key)는 진단에 필요 없다. */
+const S3_ERROR_BODY_PEEK = 2048;
+const S3_ERROR_CODE_RE = /<Code>([A-Za-z0-9.]{1,64})<\/Code>/;
+
+/**
+ * 예외를 로그 필드로 — `err.cause`까지 펼친다.
+ *
+ * ★왜(2026-10-15~16): 세 인스턴스가 31시간 동안 `"error":"fetch failed"`만 남겼다. node의
+ * fetch(undici)는 연결 단계 실패를 전부 이 한 문장으로 감싸고 **실제 원인(ECONNREFUSED·
+ * ETIMEDOUT·DNS)은 `cause`에만** 둔다. 그것이 없으면 「저장소가 죽었다」와 「경로가 막혔다」를
+ * 로그로 가를 수 없어, 장애가 풀린 뒤에는 원인을 영영 알 수 없었다.
+ */
+function errorFields(err: unknown): { error: string; cause?: string } {
+  if (!(err instanceof Error)) return { error: String(err) };
+  const cause = err.cause;
+  if (cause === undefined) return { error: errorText(err) };
+  return { error: errorText(err), cause: cause instanceof Error ? errorText(cause) : String(cause) };
+}
+
+/** `TimeoutError`·`ECONNREFUSED`처럼 메시지보다 분류가 먼저 읽히게 이름과 코드를 앞에 붙인다. */
+function errorText(e: Error): string {
+  const code = (e as { code?: unknown }).code;
+  const tags = [e.name !== "Error" ? e.name : "", typeof code === "string" && !e.message.includes(code) ? code : ""];
+  const prefix = tags.filter((t) => t !== "").join(" ");
+  return prefix ? `${prefix}: ${e.message}` : e.message;
+}
 
 export interface AuditShipResult {
   shipped: number;
@@ -79,7 +116,9 @@ export class AuditShipper {
   private readonly target?: AuditS3Target;
   private readonly intervalMs: number;
   private readonly localRetainDays: number;
+  private readonly uploadTimeoutMs: number;
   private readonly log: Logger;
+  private readonly onShipped?: () => void;
   private readonly onShipFailure?: () => void;
   private readonly onShipDropped?: () => void;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -91,7 +130,9 @@ export class AuditShipper {
     if (opts.target) this.target = opts.target;
     this.intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.localRetainDays = opts.localRetainDays ?? DEFAULT_LOCAL_RETAIN_DAYS;
+    this.uploadTimeoutMs = opts.uploadTimeoutMs ?? DEFAULT_UPLOAD_TIMEOUT_MS;
     this.log = (opts.logger ?? noopLogger).child({ component: "audit-ship" });
+    if (opts.onShipped) this.onShipped = opts.onShipped;
     if (opts.onShipFailure) this.onShipFailure = opts.onShipFailure;
     if (opts.onShipDropped) this.onShipDropped = opts.onShipDropped;
   }
@@ -108,6 +149,26 @@ export class AuditShipper {
       this.timer = null;
     }
     while (this.running) await new Promise((r) => setTimeout(r, 10));
+  }
+
+  /**
+   * 아직 이관되지 않은 지난 날짜 파일 수(적체) — tick과 무관하게 디렉터리에서 직접 센다.
+   *
+   * ★tick 결과로 세지 않는 이유: 첫 tick은 기동 1시간 뒤라, 재시작 직후 한 시간 동안 「밀린 파일
+   * 0개」로 보인다. 이 값은 복구 판정의 근거라 그 공백이 곧 오판이 된다.
+   */
+  async pendingCount(now: number = Date.now()): Promise<number> {
+    const today = auditDayUtc(now);
+    let names: string[];
+    try {
+      names = await readdir(this.dir);
+    } catch {
+      return 0; // 디렉터리가 아직 없다 — 감사 이벤트가 한 건도 없었다는 뜻
+    }
+    return names.filter((name) => {
+      const day = FILE_RE.exec(name)?.[1];
+      return day !== undefined && day < today;
+    }).length;
   }
 
   /** 한 사이클(수동 구동 가능). */
@@ -137,6 +198,7 @@ export class AuditShipper {
         const ok = await this.ship(path, day);
         if (ok) {
           result.shipped++;
+          this.onShipped?.();
           continue;
         }
         result.failed++;
@@ -183,7 +245,7 @@ export class AuditShipper {
       if (!this.target) return false; // 로컬 전용 구성 — 보존기간 정책만 적용된다
       const body = gzipSync(raw);
       const key = this.objectKey(day);
-      const status = await this.put(this.target, key, body);
+      const { status, s3Code } = await this.put(this.target, key, body);
       if (status !== 200 && status !== 201) {
         // 필드명이 `key`면 로거가 통째로 `<redacted>`로 가린다(`log.ts` SENSITIVE_KEY_PARTS —
         // `key` 부분 일치). 여기 값은 비밀이 아니라 **S3 객체 경로**이고, 업로드 실패를 진단하려면
@@ -193,6 +255,8 @@ export class AuditShipper {
           file: `audit-${day}.jsonl`,
           objectPath: key,
           status,
+          // 403 하나에 자격 폐기·시계 편차·정책 거부가 다 들어 있다 — 코드가 있어야 갈린다.
+          ...(s3Code ? { s3Code } : {}),
         });
         return false;
       }
@@ -201,7 +265,7 @@ export class AuditShipper {
     } catch (err) {
       this.log.warn("감사 로그 이관 실패 — 로컬에 유지한다", {
         file: `audit-${day}.jsonl`,
-        error: err instanceof Error ? err.message : String(err),
+        ...errorFields(err),
       });
       return false;
     }
@@ -222,7 +286,7 @@ export class AuditShipper {
   }
 
   /** SigV4 PUT — 서명 프리미티브는 `@ionosphere/store`의 것을 그대로 쓴다(재구현 금지). */
-  private async put(t: AuditS3Target, key: string, body: Uint8Array): Promise<number> {
+  private async put(t: AuditS3Target, key: string, body: Uint8Array): Promise<{ status: number; s3Code?: string }> {
     const url = new URL(t.endpoint);
     const host = t.forcePathStyle ? url.host : `${t.bucket}.${url.host}`;
     const path = t.forcePathStyle ? `/${t.bucket}/${key}` : `/${key}`;
@@ -247,7 +311,20 @@ export class AuditShipper {
       method: "PUT",
       headers: { ...headers, authorization: signed.authorization },
       body,
+      signal: AbortSignal.timeout(this.uploadTimeoutMs),
     });
-    return res.status;
+    if (res.status === 200 || res.status === 201) return { status: res.status };
+    const s3Code = await peekS3ErrorCode(res);
+    return s3Code ? { status: res.status, s3Code } : { status: res.status };
+  }
+}
+
+/** 오류 응답 본문 앞부분에서 S3 `<Code>`만 읽는다. 본문을 못 읽어도 상태 코드 판정은 그대로다. */
+async function peekS3ErrorCode(res: Response): Promise<string | undefined> {
+  try {
+    const text = (await res.text()).slice(0, S3_ERROR_BODY_PEEK);
+    return S3_ERROR_CODE_RE.exec(text)?.[1];
+  } catch {
+    return undefined;
   }
 }
