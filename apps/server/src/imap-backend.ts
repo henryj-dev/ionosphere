@@ -68,9 +68,9 @@ export class IonosphereImapBackend implements ImapBackend {
   private readonly store: Store;
   private readonly blobs: BlobStore;
   private readonly log: Logger;
-  private readonly authenticatePassword: (user: string, pass: string) => Promise<{ accountId: string; credKind?: string | undefined } | null>;
+  private readonly authenticatePassword: (user: string, pass: string) => Promise<{ accountId: string; credKind?: string | undefined; expiresAt?: number | undefined } | null>;
 
-  constructor(db: DbDriver, store: Store, blobs: BlobStore, logger: Logger = noopLogger, authenticatePassword?: (user: string, pass: string) => Promise<{ accountId: string; credKind?: string | undefined } | null>) {
+  constructor(db: DbDriver, store: Store, blobs: BlobStore, logger: Logger = noopLogger, authenticatePassword?: (user: string, pass: string) => Promise<{ accountId: string; credKind?: string | undefined; expiresAt?: number | undefined } | null>) {
     this.db = db;
     this.store = store;
     this.blobs = blobs;
@@ -78,7 +78,7 @@ export class IonosphereImapBackend implements ImapBackend {
     this.authenticatePassword = authenticatePassword ?? (async (user, pass) => authenticate(this.db, user, pass, "imap"));
   }
 
-  async authenticate(user: string, pass: string): Promise<{ accountId: string; credKind?: string | undefined } | null> {
+  async authenticate(user: string, pass: string): Promise<{ accountId: string; credKind?: string | undefined; expiresAt?: number | undefined } | null> {
     const result = await this.authenticatePassword(user, pass);
     if (!result) {
       this.log.warn("auth failed", { user });
@@ -87,7 +87,7 @@ export class IonosphereImapBackend implements ImapBackend {
     this.log.info("auth ok", { user, accountId: result.accountId });
     // credKind를 어댑터로 올려 보낸다 — 감사 로그가 자격증명 종류를 남기는 유일한 경로다
     // (여기엔 IP가 없고 어댑터엔 종류가 없어서, 둘이 만나야 한 줄이 완성된다).
-    return { accountId: result.accountId, ...(result.credKind ? { credKind: result.credKind } : {}) };
+    return { accountId: result.accountId, ...(result.credKind ? { credKind: result.credKind } : {}), ...(result.expiresAt !== undefined ? { expiresAt: result.expiresAt } : {}) };
   }
 
 

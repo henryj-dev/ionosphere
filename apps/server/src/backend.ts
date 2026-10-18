@@ -1929,7 +1929,7 @@ export class IonospherePop3Backend implements Pop3Backend {
    * DbMaildropLock(@ionosphere/store)을 주입해야 RFC 1939 §3 배타성이 성립한다.
    */
   private readonly lock: MaildropLock;
-  private readonly authenticatePassword: (user: string, pass: string) => Promise<{ accountId: string; credKind?: string | undefined } | null>;
+  private readonly authenticatePassword: (user: string, pass: string) => Promise<{ accountId: string; credKind?: string | undefined; expiresAt?: number | undefined } | null>;
   /** accountId → INBOX mailboxId (세션 간 캐시 아님 — commit 시 재사용 위해 세션 수명만). */
   private readonly inboxByAccount = new Map<string, string>();
   /** accountId → 이 프로세스가 잡은 락 세션. 없으면 락을 안 잡은 것 = 풀 것도 없다. */
@@ -1941,7 +1941,7 @@ export class IonospherePop3Backend implements Pop3Backend {
     blobs: BlobStore,
     logger: Logger = noopLogger,
     lock: MaildropLock = new InProcessMaildropLock(),
-    authenticatePassword?: (user: string, pass: string) => Promise<{ accountId: string; credKind?: string | undefined } | null>,
+    authenticatePassword?: (user: string, pass: string) => Promise<{ accountId: string; credKind?: string | undefined; expiresAt?: number | undefined } | null>,
   ) {
     this.db = db;
     this.store = store;
@@ -1960,7 +1960,7 @@ export class IonospherePop3Backend implements Pop3Backend {
     this.log.info("auth ok", { user, accountId: result.accountId });
     // `credKind`를 어댑터로 올린다 — 감사 로그가 기본 비번/앱 비번/OAuth를 구분해야 한다.
     // 여기서 기록하지 않는 이유: 이 클래스에는 IP가 없다(어댑터만 소켓을 본다).
-    return { accountId: result.accountId, credKind: result.credKind };
+    return { accountId: result.accountId, credKind: result.credKind, ...(result.expiresAt !== undefined ? { expiresAt: result.expiresAt } : {}) };
   }
 
 

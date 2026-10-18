@@ -696,7 +696,7 @@ export class IonosphereApp {
       if (result) {
         log.info("auth ok", { user });
         this.authThrottle.clear({ account: user });
-        return { ok: true, credKind: result.credKind };
+        return { ok: true, credKind: result.credKind, ...(result.expiresAt !== undefined ? { expiresAt: result.expiresAt } : {}) };
       }
       log.warn("auth failed", { user });
       this.authThrottle.recordFailure({ account: user });
@@ -708,7 +708,7 @@ export class IonosphereApp {
    * local 자격증명을 우선한다. 실패하면 외부 OAuth access token(E4, 설정했을 때만), 그다음 immutable identity로
    * 연결된 directory를 조회한다. 순서가 곧 우선순위다 — 로컬 자격증명은 IdP 장애와 무관하게 동작한다.
    */
-  private async authenticatePassword(user: string, pass: string, surface: AuthSurface): Promise<{ accountId: string; credKind?: string | undefined } | null> {
+  private async authenticatePassword(user: string, pass: string, surface: AuthSurface): Promise<{ accountId: string; credKind?: string | undefined; expiresAt?: number | undefined } | null> {
     const local = await authenticate(this.db, user, pass, surface);
     if (local) return { accountId: local.accountId, ...(local.credKind ? { credKind: local.credKind } : {}) };
     const external = await this.mailOAuth?.authenticate(user, pass, surface);

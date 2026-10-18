@@ -5,6 +5,7 @@
 import { createServer as createNetServer, type Server, type Socket } from "node:net";
 import { createServer as createTlsServer, TLSSocket } from "node:tls";
 import {
+  armAuthExpiry,
   AUDIT_OUTCOME,
   AUDIT_SURFACE,
   AuthFailureThrottle,
@@ -67,6 +68,8 @@ export interface SmtpBackend {
 export interface SmtpAuthResult {
   ok: boolean;
   credKind?: string | undefined;
+  /** 자격증명 만료 시각(외부 access token, E4). 있으면 그 시각에 연결을 닫는다. */
+  expiresAt?: number | undefined;
   /**
    * 백엔드가 **자체 스로틀로 거부**했음(자격증명을 검사하지 않았다).
    *
@@ -386,6 +389,18 @@ export class SmtpServer {
       }
       if (result.ok) this.authThrottle.clear(ip);
       else this.authThrottle.recordFailure(ip);
+      // 토큰 만료에 연결을 닫는다(E4) — 제출 세션이 만료된 토큰으로 계속 메일을 보내지 못하게.
+      if (result.ok) {
+        armAuthExpiry(rawSocket, result.expiresAt, () => {
+          /**
+           * ★end()가 아니라 destroy()다. end()는 쓰기 쪽만 닫아, 421을 무시하는 클라이언트가 같은 연결로 MAIL/RCPT/DATA를
+           * 계속 보내면 엔진이 받아 큐에 넣는다(SMTP에는 명령마다 만료를 보는 관문이 없다, 2026-10-18 검토).
+           * 응답을 다 쓴 뒤 끊고, 그 사이 들어온 입력은 data 핸들러가 버린다(credentialExpired).
+           */
+          credentialExpired = true;
+          socket.write("421 4.7.0 Authentication expired, closing connection\r\n", () => socket.destroy());
+        });
+      }
       /**
        * ★**어댑터에서 기록한다**. 조립층의 `authFn`(app.ts)에는 IP가 없어서, 거기서 찍는 로그는
        * "누가"만 알고 "어디서"를 모른다 — 이 저장소가 인증 실패의 출처를 짚지 못한 원인이다.
@@ -466,8 +481,11 @@ export class SmtpServer {
       });
     };
 
+    /** 이 연결의 자격증명(외부 토큰, E4)이 만료됐는가 — 그 뒤 입력은 버린다. */
+    let credentialExpired = false;
     const attachDataHandler = (s: Socket | TLSSocket): void => {
       s.on("data", (chunk: Buffer) => {
+        if (credentialExpired) return; // 만료 뒤 입력은 엔진에 넘기지 않는다(위 주석)
         resetIdle();
         applyActions(engine.feed(chunk));
       });

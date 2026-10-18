@@ -86,7 +86,10 @@ async function fixture(surfaces?: string[]): Promise<{ db: DbDriver; v: MailOAut
 describe("MailOAuthVerifier", () => {
   test("메일 audience·scope·연결·사용자가 맞으면 계정과 credKind를 돌려준다", async () => {
     const f = await fixture();
-    expect(await f.v.authenticate("Alice@acme.test", token(mailClaims("sub-alice")), "imap")).toEqual({ accountId: f.accountId, credKind: "oauth:corp" });
+    const r = await f.v.authenticate("Alice@acme.test", token(mailClaims("sub-alice")), "imap");
+    expect(r).toMatchObject({ accountId: f.accountId, credKind: "oauth:corp" });
+    // 만료 시각을 함께 올린다 — 어댑터가 그 시각에 연결을 닫는다.
+    expect(typeof r?.expiresAt === "number" && r.expiresAt > Date.now()).toBe(true);
     await f.db.close();
   });
 
@@ -142,13 +145,68 @@ describe("IMAP XOAUTH2 e2e(외부 access token)", () => {
     const tenantId = String(rows[0]!.tenant_id);
     await linkAccountOidcIdentity(probe.db, tenantId, "corp", "sub-alice", String(rows[0]!.id));
     await probe.stop();
-    app = new IonosphereApp({ hostname: "test.local", dbPath: join(blobRoot, "db.sqlite"), blobRoot, imapPort: 0, resolver: offlineResolver(), oidcProviders: providers(tenantId) });
+    app = new IonosphereApp({ hostname: "test.local", dbPath: join(blobRoot, "db.sqlite"), blobRoot, imapPort: 0, submissionPort: 0, resolver: offlineResolver(), oidcProviders: providers(tenantId) });
     await app.start();
   }, E2E_HOOK_TIMEOUT_MS);
   afterAll(async () => {
     await app.stop();
     rmSync(blobRoot, { recursive: true, force: true });
   }, E2E_HOOK_TIMEOUT_MS);
+
+  /** 연결을 열고 XOAUTH2로 인증한 뒤, 명령 없이 기다린다. 서버가 닫으면 그때까지 받은 전부를 돌려준다. */
+  async function idleAfterAuth(port: number, greet: string, authLine: (ir: string) => string, okPrefix: string, user: string, tok: string): Promise<string> {
+    const s = connect(port, "127.0.0.1");
+    let buf = "";
+    s.on("data", (c) => (buf += c.toString("latin1")));
+    const closed = new Promise<void>((r) => s.once("close", () => r()));
+    const until = Date.now() + 8000;
+    while (!buf.includes(greet)) {
+      if (Date.now() > until) throw new Error(`no greeting: ${buf}`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const ir = Buffer.from(`user=${user}${SOH}auth=Bearer ${tok}${SOH}${SOH}`).toString("base64");
+    s.write(authLine(ir));
+    while (!buf.includes(okPrefix)) {
+      if (Date.now() > until) throw new Error(`no auth ok: ${buf}`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    await Promise.race([closed, new Promise((r) => setTimeout(r, 7000))]);
+    s.destroy();
+    return buf;
+  }
+
+  test("★토큰이 만료되면 명령이 없어도 IMAP 연결을 닫는다(사용자 결정 2026-10-18)", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const out = await idleAfterAuth(app.imapPort, "* OK", (ir) => `a1 AUTHENTICATE XOAUTH2 ${ir}\r\n`, "a1 OK", "alice@acme.test", token(mailClaims("sub-alice", { iat: now, exp: now + 2 })));
+    expect(out).toContain("* BYE authentication expired");
+  }, 15_000);
+
+  test("★토큰이 만료되면 SMTP 제출 연결을 421로 닫는다", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const s = connect(app.submissionPort, "127.0.0.1");
+    let buf = "";
+    s.on("data", (c) => (buf += c.toString("latin1")));
+    const closed = new Promise<void>((r) => s.once("close", () => r()));
+    const waitFor = async (needle: string) => {
+      const until = Date.now() + 8000;
+      while (!buf.includes(needle)) {
+        if (Date.now() > until) throw new Error(`timeout ${needle}: ${buf}`);
+        await new Promise((r) => setTimeout(r, 10));
+      }
+    };
+    await waitFor("220");
+    s.write("EHLO client.example.com\r\n");
+    await waitFor("250 ");
+    const ir = Buffer.from(`user=alice@acme.test${SOH}auth=Bearer ${token(mailClaims("sub-alice", { iat: now, exp: now + 2 }))}${SOH}${SOH}`).toString("base64");
+    s.write(`AUTH XOAUTH2 ${ir}\r\n`);
+    await waitFor("235");
+    let serverClosed = false;
+    await Promise.race([closed.then(() => (serverClosed = true)), new Promise((r) => setTimeout(r, 7000))]);
+    expect(buf).toContain("421 4.7.0 Authentication expired");
+    // ★연결이 완전히 끊겨야 한다 — 쓰기 쪽만 닫으면 421을 무시한 클라이언트가 계속 제출할 수 있다.
+    expect(serverClosed).toBe(true);
+    s.destroy();
+  }, 15_000);
 
   async function imapAuth(user: string, tok: string): Promise<string> {
     const s = connect(app.imapPort, "127.0.0.1");

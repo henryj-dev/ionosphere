@@ -11,9 +11,9 @@
  *  - IdP 장애·키 조회 실패는 **거절**이다(fail closed). 로컬 자격증명은 영향이 없다.
  *  - 실패는 전부 같은 null이다(인증 실패와 구분하지 않는다). 사유는 로그에만, 토큰 원문은 어디에도 남기지 않는다.
  *
- * ⚠ 지원 제한(lodestar 보고 반영):
- *  - introspection을 하지 않는다 — IdP에서 토큰을 철회해도 **exp까지** 통한다(lodestar access TTL 5분).
- *  - 인증은 연결을 열 때 한 번이다. 토큰이 만료돼도 열린 IMAP 연결은 계속된다. 계정 정지는 다음 명령에서 반영된다(G2).
+ * ★토큰 만료 = 연결 종료(2026-10-18 사용자 결정): 결과에 exp를 실어 보내고, IMAP·POP3·ManageSieve 어댑터가 열린 연결의
+ * **다음 명령**에서 그 시각을 넘겼는지 본다(계정 정지 G2와 같은 자리). 그래서 철회가 반영되는 상한이 토큰 수명이다.
+ * ⚠ introspection은 하지 않는다 — 수명 안의 철회는 반영되지 않는다(lodestar introspection은 사용자·세션을 보지 않아 효과가 없다).
  */
 import { decodeJwt, noopLogger, OidcClient, type Logger, type OidcFetch } from "@ionosphere/core";
 import type { DbDriver } from "@ionosphere/db";
@@ -67,7 +67,7 @@ export class MailOAuthVerifier {
   }
 
   /** 검증되면 계정 id와 감사용 자격증명 종류. 아니면 null. */
-  async authenticate(user: string, token: string, surface: AuthSurface): Promise<{ accountId: string; credKind: string } | null> {
+  async authenticate(user: string, token: string, surface: AuthSurface): Promise<{ accountId: string; credKind: string; expiresAt: number } | null> {
     if (!this.enabled || !looksLikeJwt(token)) return null;
     let issuer: unknown;
     try {
@@ -80,15 +80,17 @@ export class MailOAuthVerifier {
     for (const p of candidates) {
       if (p.surfaces && !p.surfaces.includes(surface)) continue;
       let sub: string;
+      let expiresAt: number;
       try {
-        sub = (
-          await p.client.verifyAccessToken(token, {
+        const verified = await p.client.verifyAccessToken(token, {
             audience: p.audience,
             requiredScope: p.requiredScope,
             ...(p.requireAtJwtTyp !== undefined ? { requireAtJwtTyp: p.requireAtJwtTyp } : {}),
-            ...(p.maxLifetimeSec !== undefined ? { maxLifetimeSec: p.maxLifetimeSec } : {}),
-          })
-        ).sub;
+          ...(p.maxLifetimeSec !== undefined ? { maxLifetimeSec: p.maxLifetimeSec } : {}),
+        });
+        sub = verified.sub;
+        // exp는 verifyAccessToken이 필수로 검사했다 — 열린 연결이 이 시각 뒤 다음 명령에서 닫힌다(사용자 결정, 2026-10-18).
+        expiresAt = Number(verified.claims.exp) * 1000;
       } catch (err) {
         this.log.info("mail access token 거절", { provider: p.id, reason: err instanceof Error ? (err as { reason?: string }).reason ?? "error" : "error" });
         continue;
@@ -104,7 +106,7 @@ export class MailOAuthVerifier {
         this.log.info("mail access token — SASL 사용자와 토큰 주인이 다름", { provider: p.id });
         continue;
       }
-      return { accountId, credKind: `oauth:${p.id}` };
+      return { accountId, credKind: `oauth:${p.id}`, expiresAt };
     }
     return null;
   }

@@ -212,6 +212,8 @@ export class OidcClient {
     const check = (claims: JwtClaims): void => {
       if (!scopesOf(claims).includes(req.requiredScope)) throw new OidcError("access_token_missing_scope");
       const exp = Number(claims.exp) * 1000;
+      // 메일 경로에서는 exp에 시계 오차를 주지 않는다 — 막 만료된 토큰이 AUTH를 통과한 직후 바로 끊기는 혼란을 없앤다.
+      if (exp <= nowMs) throw new OidcError("access_token_expired");
       const iat = typeof claims.iat === "number" ? claims.iat * 1000 : nowMs;
       if (exp - iat > maxLifetime) throw new OidcError("access_token_lifetime_too_long");
     };
