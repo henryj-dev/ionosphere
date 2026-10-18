@@ -427,10 +427,14 @@ export class SmtpServer {
      */
     const runScramKeys = async (user: string): Promise<void> => {
       let keys: ScramStoredKeys | null = null;
-      try {
-        keys = (await this.opts.backend.scramKeys?.(user)) ?? null;
-      } catch {
-        /* 없는 것으로 진행 */
+      // ★IP 축이 막혀 있으면 진짜 키 대신 null — 가짜 salt로 교환이 진행돼 어떤 증명도 통과하지 못한다. SCRAM은 서버 서명을
+      //   먼저 보내므로, 여기서 막지 않으면 차단 중에도 "비밀번호가 맞았다"가 응답 모양으로 드러난다. 계정 축은 백엔드가 본다.
+      if (!(await this.authThrottle.blocked(normalizeIp(rawSocket.remoteAddress)))) {
+        try {
+          keys = (await this.opts.backend.scramKeys?.(user)) ?? null;
+        } catch {
+          /* 없는 것으로 진행 */
+        }
       }
       applyActions(engine.scramKeysResult(keys));
     };
@@ -442,16 +446,22 @@ export class SmtpServer {
     const runScramAuthorize = async (user: string): Promise<void> => {
       const ip = normalizeIp(rawSocket.remoteAddress);
       let result: SmtpAuthResult = { ok: false };
-      try {
-        result = (await this.opts.backend.scramAuthorize?.(user)) ?? { ok: false };
-      } catch {
-        /* 실패로 수렴 */
+      // IP 축 이중 방어 — 키 조회 단계에서 막혔으면 여기까지 오지 못하지만, 그 사이에 막혔을 수 있다.
+      if (await this.authThrottle.blocked(ip)) {
+        result = { ok: false, throttled: true };
+      } else {
+        try {
+          result = (await this.opts.backend.scramAuthorize?.(user)) ?? { ok: false };
+        } catch {
+          /* 실패로 수렴 */
+        }
+        if (!result.ok && result.throttled !== true) await this.authThrottle.recordFailure(ip);
       }
       this.audit.record({
         ts: Date.now(),
         surface: this.auditSurface,
         action: "auth",
-        outcome: result.ok ? AUDIT_OUTCOME.ok : AUDIT_OUTCOME.fail,
+        outcome: result.ok ? AUDIT_OUTCOME.ok : result.throttled === true ? AUDIT_OUTCOME.throttled : AUDIT_OUTCOME.fail,
         ip,
         user,
         // SCRAM으로 들어온 것을 감사에서 구분할 수 있어야 한다 — 평문 경로와 위험이 다르다.

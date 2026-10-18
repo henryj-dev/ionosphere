@@ -427,10 +427,14 @@ export class JmapServer {
     try {
       decoded = Buffer.from(header.slice(6), "base64").toString("utf8");
     } catch {
-      return { ok: false, presented: true };
+      decoded = "";
     }
     const idx = decoded.indexOf(":");
-    if (idx === -1) return { ok: false, presented: true };
+    if (idx === -1) {
+      // 형식이 틀린 헤더도 차단 중이면 429로 답한다 — 401로 답하고 실패로 세면 차단 중 시도가 스스로 차단을 늘린다.
+      const ipRetry = await this.authThrottle.retryAfterSeconds(ip);
+      return ipRetry > 0 ? { ok: false, presented: true, retryAfter: ipRetry } : { ok: false, presented: true };
+    }
     const user = decoded.slice(0, idx);
     const pass = decoded.slice(idx + 1);
     // 차단 중이면 검증(scrypt)을 아예 돌리지 않는다 — 이 스로틀이 생긴 이유다.

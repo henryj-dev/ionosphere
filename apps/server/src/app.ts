@@ -738,7 +738,8 @@ export class IonosphereApp {
        * "그 사용자는 조회가 막혔다"가 응답 형태로 새어 계정 열거가 열린다. 차단 판정은
        * `authorize`에서 한다(그 시점에는 이미 증명이 끝나 응답 형태가 갈리지 않는다).
        */
-      keys: async (user) => await scramKeysFor(this.db, user),
+      // 계정 축이 막혀 있으면 null — 가짜 salt로 교환이 진행돼 응답 모양이 "계정 없음"과 같다(차단 중 정답 여부가 새지 않게).
+      keys: async (user) => ((await this.authThrottle.blocked({ account: user })) ? null : await scramKeysFor(this.db, user)),
       authorize: async (user) => {
         // 계정 축 차단 — SCRAM은 scrypt를 돌지 않지만 분산 대입 방어는 그대로 필요하다.
         if (await this.authThrottle.blocked({ account: user })) {

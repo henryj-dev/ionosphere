@@ -284,11 +284,19 @@ export class ManageSieveServer {
              * 조회 실패를 **null로 수렴**시킨다. 예외를 밖으로 내면 교환이 중간에 끊겨
              * "그 사용자는 조회가 실패한다"가 드러난다 — 없는 것과 못 읽은 것을 같게 다룬다.
              */
+            /**
+             * ★차단 중이면 진짜 키 대신 null을 넘긴다 — 엔진이 가짜 salt로 교환을 끝까지 진행하므로 어떤 증명도 통과하지
+             * 못하고, 응답 모양은 "계정 없음"·"비밀번호 틀림"과 같다. SCRAM은 서버 서명(server-final)을 먼저 보내므로
+             * 여기서 막지 않으면 차단 중에도 "비밀번호가 맞았다"가 응답 모양으로 드러난다(P1 델타 리뷰 HIGH).
+             */
+            const ip = normalizeIp(socket.remoteAddress);
             let keys = null;
-            try {
-              keys = (await backend.scramKeys?.(a.user)) ?? null;
-            } catch {
-              /* 없는 것으로 진행 */
+            if (!(await this.authThrottle.blocked({ ip, account: a.user }))) {
+              try {
+                keys = (await backend.scramKeys?.(a.user)) ?? null;
+              } catch {
+                /* 없는 것으로 진행 */
+              }
             }
             await run(engine.scramKeysResult(keys));
             break;
@@ -316,7 +324,7 @@ export class ManageSieveServer {
               ts: Date.now(),
               surface: AUDIT_SURFACE.managesieve,
               action: "auth",
-              outcome: ok ? AUDIT_OUTCOME.ok : AUDIT_OUTCOME.fail,
+              outcome: ok ? AUDIT_OUTCOME.ok : throttled ? AUDIT_OUTCOME.throttled : AUDIT_OUTCOME.fail,
               ip,
               user: a.user,
               // SCRAM으로 들어온 것을 감사에서 구분할 수 있어야 한다 — 평문 경로와 위험이 다르다.
