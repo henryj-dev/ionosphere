@@ -123,6 +123,12 @@ class FakeBackend implements Pop3Backend {
     this.released.push(accountId);
     await this.lock.release(accountId, OWNER);
   }
+
+  /** 테스트가 세션 도중 계정을 정지시키는 스위치. */
+  active = true;
+  async accountActive(): Promise<boolean> {
+    return this.active;
+  }
 }
 
 function buildBackend(): FakeBackend {
@@ -187,6 +193,43 @@ describe("Pop3Server — 소켓 어댑터 통합", () => {
     expect(backend.committed).toHaveLength(1);
     expect(backend.committed[0]?.accountId).toBe("acc-1");
     expect(backend.committed[0]?.messages.map((m) => m.ref)).toEqual(["msgA"]);
+    expect(backend.released).toEqual(["acc-1"]);
+  });
+
+  async function loggedIn(backend: FakeBackend): Promise<{ socket: net.Socket; reader: SocketReader }> {
+    server = new Pop3Server({ allowInsecureAuth: true, hostname: "pop.test", backend });
+    const port = await server.listen(0, "127.0.0.1");
+    const socket = await connect(port);
+    sockets.push(socket);
+    const reader = new SocketReader(socket);
+    expect(await reader.readLine()).toStartWith("+OK");
+    send(socket, "USER alice");
+    expect(await reader.readLine()).toStartWith("+OK");
+    send(socket, "PASS secret");
+    expect(await reader.readLine()).toStartWith("+OK");
+    return { socket, reader };
+  }
+
+  test("세션 중 정지: 다음 RETR은 -ERR [AUTH] 후 닫히고 잠금은 풀린다", async () => {
+    const backend = buildBackend();
+    const { socket, reader } = await loggedIn(backend);
+    backend.active = false;
+    send(socket, "RETR 1");
+    expect(await reader.readLine()).toBe("-ERR [AUTH] account unavailable");
+    await new Promise((resolve) => socket.once("close", resolve));
+    expect(backend.released).toEqual(["acc-1"]);
+  });
+
+  test("세션 중 정지: QUIT은 DELE를 커밋하지 않는다(정지는 데이터를 보존한다)", async () => {
+    const backend = buildBackend();
+    const { socket, reader } = await loggedIn(backend);
+    send(socket, "DELE 1");
+    expect(await reader.readLine()).toStartWith("+OK");
+    backend.active = false;
+    send(socket, "QUIT");
+    expect(await reader.readLine()).toBe("-ERR [AUTH] account unavailable");
+    await new Promise((resolve) => socket.once("close", resolve));
+    expect(backend.committed).toHaveLength(0);
     expect(backend.released).toEqual(["acc-1"]);
   });
 

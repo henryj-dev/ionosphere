@@ -23,6 +23,7 @@ afterEach(async () => {
 
 const backend: ImapBackend = {
   authenticate: async (user, pass) => (user === "u@imap.test" && pass === "pw" ? { accountId: "acct-1" } : null),
+  accountActive: async () => true,
   // 요청 수만 세면 되므로 어떤 요청이든 NO로 답한다.
   request: async () => ({ kind: "no", message: "stub" }),
 };

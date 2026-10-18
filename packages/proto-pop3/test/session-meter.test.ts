@@ -23,6 +23,7 @@ function backend(): Pop3Backend {
   const body = new TextEncoder().encode("Subject: A\r\n\r\nbody\r\n");
   return {
     authenticate: async (u, p) => (u === "alice" && p === "secret" ? { accountId: "acc-1" } : null),
+    accountActive: async () => true,
     openMaildrop: async (id) =>
       (await lock.acquire(id, "o")) ? { ok: true, messages: [{ uidl: "u1", sizeBytes: body.length, ref: "m" }] } : { ok: false, inUse: true },
     retrieve: async () => body,

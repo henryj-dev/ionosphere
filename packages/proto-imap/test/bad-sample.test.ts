@@ -25,6 +25,7 @@ afterEach(async () => {
 
 const backend: ImapBackend = {
   authenticate: async (user, pass) => (user === "u@imap.test" && pass === "pw" ? { accountId: "acct-1" } : null),
+  accountActive: async () => true,
   request: async () => ({ kind: "no", message: "stub" }),
 };
 

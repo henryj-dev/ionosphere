@@ -47,6 +47,14 @@ export interface ImapBackend {
   authenticate(user: string, pass: string): Promise<{ accountId: string; credKind?: string | undefined } | null>;
   /** 엔진 백엔드 요청 단일 디스패치 — 응답 kind는 요청 kind별 계약(engine.ts 참조). */
   request(accountId: string, req: ImapBackendRequest): Promise<ImapBackendResponse>;
+  /**
+   * 인증된 연결의 계정이 아직 active인가 — 어댑터가 **백엔드 요청마다** 묻는다.
+   *
+   * ★선택이 아니라 필수다. 인증은 연결을 열 때 한 번뿐이라, 이게 없으면 정지·삭제된 계정의 열린
+   * 연결이 계속 메일을 읽고 지운다. 조립 누락은 타입으로만 막을 수 있다(SCRAM 배선 누락 선례).
+   * 예외로 끝나면 어댑터는 그 명령을 실행하지 않는다(fail closed).
+   */
+  accountActive(accountId: string): Promise<boolean>;
 }
 
 export interface ImapServerOptions {
@@ -646,8 +654,36 @@ export class ImapServer {
               break;
             }
             meter.request();
+            /**
+             * ★계정 상태 재확인 — 정지·삭제는 **다음 백엔드 명령부터** 반영된다(IDLE 폴링도 여기를 지난다).
+             * 비활성이면 BYE로 닫는다(RFC 9051 §7.1.5 — 서버가 연결을 닫을 때 보낸다). accountId를 비워
+             * 닫히는 사이 도착한 파이프라인 명령이 백엔드에 닿지 않게 한다.
+             * 조회 실패면 이 명령만 NO로 돌린다 — 실행하지 않되(fail closed), DB가 잠깐 흔들렸다고
+             * 모든 연결을 끊지는 않는다.
+             */
+            let active: boolean | null;
+            try {
+              active = await backend.accountActive(accountId);
+            } catch {
+              active = null;
+            }
+            if (active === false) {
+              this.audit.record({
+                ts: Date.now(),
+                surface: AUDIT_SURFACE.imap,
+                action: "accountInactive",
+                outcome: AUDIT_OUTCOME.denied,
+                ip: normalizeIp(socket.remoteAddress),
+                accountId,
+              });
+              accountId = null;
+              writeText("* BYE account unavailable");
+              if (!socket.destroyed) socket.end();
+              break;
+            }
             let res: ImapBackendResponse;
             try {
+              if (active === null) throw new Error("account status check failed");
               res = await backend.request(accountId, action.req);
             } catch (err) {
               const dropped = this.opts.logger ? this.backendErrors.take(Date.now()) : null;

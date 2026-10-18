@@ -7,6 +7,7 @@ export {
   generateAppPassword,
   generateOAuthToken,
   hashSecret,
+  isAccountActive,
   listCredentials,
   revokeCredential,
   setPrimaryPassword,

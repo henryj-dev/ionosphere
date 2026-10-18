@@ -44,6 +44,7 @@ import { runSieve, type SieveEnv, type VacationRequest } from "@ionosphere/sieve
 import { isSrsAddress, srsForward, srsReverse } from "@ionosphere/srs";
 import {
   authenticate,
+  isAccountActive,
   putBlob,
   projectHeaders,
   Store,
@@ -1985,6 +1986,11 @@ export class IonospherePop3Backend implements Pop3Backend {
     }
     this.log.info("auth ok (scram)", { user, accountId: ok.accountId });
     return { accountId: ok.accountId, credKind: "password" as const };
+  }
+
+  /** 열린 연결의 계정 상태 재확인 — 정의·이유는 store `isAccountActive`. */
+  async accountActive(accountId: string): Promise<boolean> {
+    return await isAccountActive(this.db, accountId);
   }
 
   async openMaildrop(accountId: string) {

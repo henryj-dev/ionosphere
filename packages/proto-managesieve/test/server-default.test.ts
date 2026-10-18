@@ -13,6 +13,7 @@ import { ManageSieveServer, type ManageSieveBackend } from "../src/server.ts";
 /** 어떤 호출이 와도 실패로 답하는 백엔드 — 이 테스트는 인증 도달 여부만 본다. */
 const denyBackend: ManageSieveBackend = {
   authenticate: () => Promise.resolve(null),
+  accountActive: () => Promise.resolve(true),
   putScript: () => Promise.resolve({ ok: false, message: "no" }),
   checkScript: () => ({ ok: false, message: "no" }),
   listScripts: () => Promise.resolve([]),

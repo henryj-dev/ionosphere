@@ -25,6 +25,7 @@ import {
   Store,
   scramKeysFor,
   scramAuthorize,
+  isAccountActive,
 } from "@ionosphere/store";
 import type { ImapBackend, ImapBackendRequest, ImapBackendResponse, ImapFetchData, ImapMailbox, SeqRange } from "@ionosphere/proto-imap";
 import { toAppendAddresses } from "./addresses.ts";
@@ -112,6 +113,11 @@ export class IonosphereImapBackend implements ImapBackend {
     }
     this.log.info("auth ok (scram)", { user, accountId: ok.accountId });
     return { accountId: ok.accountId, credKind: "password" as const };
+  }
+
+  /** 열린 연결의 계정 상태 재확인 — 정의·이유는 store `isAccountActive`. */
+  async accountActive(accountId: string): Promise<boolean> {
+    return await isAccountActive(this.db, accountId);
   }
 
   async request(accountId: string, req: ImapBackendRequest): Promise<ImapBackendResponse> {
