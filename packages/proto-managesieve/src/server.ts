@@ -12,6 +12,7 @@
 import * as net from "node:net";
 import { TLSSocket } from "node:tls";
 import {
+  armAuthExpiry,
   AUDIT_OUTCOME,
   AUDIT_SURFACE,
   AuthFailureThrottle,
@@ -43,7 +44,7 @@ export interface ManageSieveBackend {
   /** SCRAM 증명 통과 뒤 계정 상태 확인 — 증명했어도 정지 계정이면 들여보내지 않는다. */
   scramAuthorize?(user: string): Promise<{ accountId: string; credKind?: string } | null>;
   /** `credKind`는 선택 — 접근 감사 로그가 자격증명 종류를 남길 때만 쓴다(IMAP·POP3와 같은 계약). */
-  authenticate(user: string, pass: string): Promise<{ accountId: string; credKind?: string | undefined } | null>;
+  authenticate(user: string, pass: string): Promise<{ accountId: string; credKind?: string | undefined; expiresAt?: number | undefined } | null>;
   /** 스크립트 저장(검증 통과 전제). 실패 시 사유. */
   putScript(accountId: string, name: string, content: string): Promise<{ ok: true } | { ok: false; code?: string; message: string }>;
   /** 스크립트 문법 검증(저장 안 함). */
@@ -191,6 +192,11 @@ export class ManageSieveServer {
     });
     const backend = this.opts.backend;
     let accountId: string | null = null;
+    /**
+     * 이 연결을 연 자격증명의 만료 시각(외부 access token, 회원 정책 E4). 지나면 **다음 명령**에서 닫는다 — 계정 정지(G2)와
+     * 같은 자리에서. 만료가 없는 자격증명(비밀번호·앱 비밀번호)은 null이다.
+     */
+    let authExpiresAt: number | null = null;
     // STARTTLS 업그레이드 후엔 socket이 TLSSocket으로 교체된다 — 쓰기는 항상 **지금 것**으로.
     let socket: net.Socket | TLSSocket = rawSocket;
     rawSocket.setTimeout(IDLE_TIMEOUT_MS);
@@ -246,6 +252,13 @@ export class ManageSieveServer {
          * 활성 스크립트는 모든 수신 메일의 행방을 바꾸므로(setActive 주석) 정지된 계정이 열린 연결로
          * 규칙을 계속 바꿀 수 있으면 안 된다. 조회 실패는 throw로 올라가 safeRun이 끊는다(fail closed).
          */
+        if (ACCOUNT_OPS.has(a.kind) && accountId !== null && authExpiresAt !== null && Date.now() >= authExpiresAt) {
+          audit("authExpired", AUDIT_OUTCOME.denied);
+          accountId = null;
+          write('BYE "authentication expired"');
+          if (!socket.destroyed) socket.end();
+          return;
+        }
         if (ACCOUNT_OPS.has(a.kind) && accountId !== null && !(await backend.accountActive(accountId))) {
           audit("accountInactive", AUDIT_OUTCOME.denied);
           accountId = null;
@@ -356,6 +369,13 @@ export class ManageSieveServer {
             if (meter.deadlinePassed) break;
             if (r) {
               accountId = r.accountId;
+              authExpiresAt = r.expiresAt ?? null;
+              armAuthExpiry(rawSocket, authExpiresAt, () => {
+                audit("authExpired", AUDIT_OUTCOME.denied);
+                accountId = null;
+                write('BYE "authentication expired"');
+                if (!socket.destroyed) socket.end();
+              });
               meter.authenticated(r.accountId);
               this.authThrottle.clear(ip);
             } else {

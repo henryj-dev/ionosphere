@@ -114,6 +114,11 @@ export interface ClaimRequirements {
   requireAzpWhenMultiAud?: boolean;
   /** exp가 반드시 있어야 하는가. 기본 true. */
   requireExp?: boolean;
+  /**
+   * azp를 audience와 맞춰 볼 것인가. 기본 true(ID 토큰). **access token에서는 끈다** — RFC 9068에서 azp·client_id는
+   * 토큰을 요청한 클라이언트(메일 앱)이고 aud는 리소스(메일)라 둘이 다른 것이 정상이다(2026-10-18 검토).
+   */
+  checkAzp?: boolean;
 }
 
 /**
@@ -126,8 +131,10 @@ export function verifyJwtClaims(claims: JwtClaims, req: ClaimRequirements): { su
   const aud = claims.aud;
   const auds = typeof aud === "string" ? [aud] : Array.isArray(aud) ? aud.filter((a): a is string => typeof a === "string") : [];
   if (!auds.includes(req.audience)) throw new JwtError("bad_audience");
-  if ((req.requireAzpWhenMultiAud ?? true) && auds.length > 1 && claims.azp !== req.audience) throw new JwtError("bad_azp");
-  if (claims.azp !== undefined && claims.azp !== req.audience) throw new JwtError("bad_azp");
+  if (req.checkAzp ?? true) {
+    if ((req.requireAzpWhenMultiAud ?? true) && auds.length > 1 && claims.azp !== req.audience) throw new JwtError("bad_azp");
+    if (claims.azp !== undefined && claims.azp !== req.audience) throw new JwtError("bad_azp");
+  }
   const exp = claims.exp;
   if (typeof exp !== "number") {
     if (req.requireExp ?? true) throw new JwtError("no_exp");

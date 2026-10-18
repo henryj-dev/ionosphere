@@ -50,7 +50,7 @@ export interface JmapServerOptions {
   /** 프로세스 단위 JMAP Email/query cache. 관리 명령이 같은 인스턴스를 비운다. */
   listingCache?: ListingCache<JmapEmailQueryResult>;
   /** local credential과 directory password를 합친 조립층 인증기. */
-  authenticatePassword?: (user: string, pass: string) => Promise<{ accountId: string; credKind?: string | undefined } | null>;
+  authenticatePassword?: (user: string, pass: string) => Promise<{ accountId: string; credKind?: string | undefined; expiresAt?: number | undefined } | null>;
   hostname: string;
   /** 세션/URL 생성용 외부 베이스 URL(예: https://mx.ionosphere.test). 미지정 시 요청 Host 사용. */
   externalBaseUrl?: string;
@@ -122,7 +122,7 @@ const MAX_AUTH_CACHE = 10_000;
  * (`presented`가 false인 실패는 절대 세지 않는다).
  */
 type JmapAuthResult =
-  | { ok: true; accountId: string; email: string; credKind?: string | undefined; cached: boolean }
+  | { ok: true; accountId: string; email: string; credKind?: string | undefined; cached: boolean; expiresAt?: number | undefined }
   | { ok: false; presented: boolean; user?: string };
 
 export class JmapServer {
@@ -139,7 +139,7 @@ export class JmapServer {
   /** 접근 감사 싱크 — 미주입 시 no-op(호출부가 `?.`를 쓰지 않게). */
   private readonly audit: AuditSink;
   /** Authorization 헤더 해시 → 인증 결과. 평문 자격증명은 담지 않는다. */
-  private readonly authCache = new Map<string, { accountId: string; email: string; expiresAt: number }>();
+  private readonly authCache = new Map<string, { accountId: string; email: string; expiresAt: number; credentialExpiresAt?: number | undefined }>();
 
   constructor(opts: JmapServerOptions) {
     this.opts = opts;
@@ -228,7 +228,7 @@ export class JmapServer {
     req: IncomingMessage,
     res: ServerResponse,
     url: URL,
-    auth: { accountId: string; email: string },
+    auth: { accountId: string; email: string; expiresAt?: number | undefined },
   ): void {
     const accountId = auth.accountId;
     const typesParam = url.searchParams.get("types") ?? "*";
@@ -256,8 +256,20 @@ export class JmapServer {
     let pingAccum = 0;
     let timer: ReturnType<typeof setInterval>;
     const conn = { res, timer: null as unknown as ReturnType<typeof setInterval> };
+    /**
+     * 자격증명 만료에 스트림을 닫는다(E4). EventSource는 한 번 인증하고 오래 열려 있는 연결이라, 만료된 토큰으로 계속
+     * 변경 알림을 받지 못하게 한다. 클라이언트는 새 토큰으로 다시 연다.
+     */
+    const expiryTimer = auth.expiresAt !== undefined
+      ? setTimeout(() => {
+          cleanup();
+          if (!res.writableEnded) res.end();
+        }, Math.min(Math.max(0, auth.expiresAt - Date.now()), 2 ** 31 - 1))
+      : null;
+    expiryTimer?.unref?.();
     const cleanup = () => {
       clearInterval(timer);
+      if (expiryTimer) clearTimeout(expiryTimer);
       this.sseConnections.delete(conn);
     };
 
@@ -402,7 +414,9 @@ export class JmapServer {
     if (hit) {
       // `cached: true` — 감사 로그가 "이 요청은 자격증명을 다시 검증하지 않았다"를 남긴다.
       // 그 구분이 없으면 자격증명 폐기 후 최대 30초간의 접근이 정상 인증처럼 보인다.
-      if (hit.expiresAt > now) return { ok: true, accountId: hit.accountId, email: hit.email, cached: true };
+      if (hit.expiresAt > now) {
+        return { ok: true, accountId: hit.accountId, email: hit.email, cached: true, ...(hit.credentialExpiresAt !== undefined ? { expiresAt: hit.credentialExpiresAt } : {}) };
+      }
       this.authCache.delete(cacheKey);
     }
 
@@ -425,7 +439,14 @@ export class JmapServer {
     }
     const account = await this.opts.db.query({ sql: "SELECT email FROM accounts WHERE id = ? AND status = 1", params: [result.accountId] });
     const email = String(account.rows[0]?.email ?? user).toLowerCase();
-    this.authCache.set(cacheKey, { accountId: result.accountId, email, expiresAt: now + AUTH_CACHE_TTL_MS });
+    const credentialExpiresAt = "expiresAt" in result ? result.expiresAt : undefined;
+    // ★캐시 수명은 자격증명 만료를 넘지 않는다(E4) — 만료된 토큰이 캐시로 최대 30초 더 통하지 않게.
+    this.authCache.set(cacheKey, {
+      accountId: result.accountId,
+      email,
+      expiresAt: Math.min(now + AUTH_CACHE_TTL_MS, credentialExpiresAt ?? Number.POSITIVE_INFINITY),
+      ...(credentialExpiresAt !== undefined ? { credentialExpiresAt } : {}),
+    });
 
     /**
      * 상한 방어. 성공만 캐시하므로 무한 증식하려면 유효 자격증명이 그만큼 있어야 하지만,
@@ -443,7 +464,7 @@ export class JmapServer {
         this.authCache.delete(oldest.value);
       }
     }
-    return { ok: true, accountId: result.accountId, email, credKind: result.credKind, cached: false };
+    return { ok: true, accountId: result.accountId, email, credKind: result.credKind, cached: false, ...(credentialExpiresAt !== undefined ? { expiresAt: credentialExpiresAt } : {}) };
   }
 
   private baseUrl(req: IncomingMessage): string {

@@ -8,6 +8,7 @@
 import * as net from "node:net";
 import * as tls from "node:tls";
 import {
+  armAuthExpiry,
   AUDIT_OUTCOME,
   AUDIT_SURFACE,
   AuthFailureThrottle,
@@ -44,7 +45,7 @@ export interface ImapBackend {
    * `credKind`는 **선택**이다 — 접근 감사 로그가 자격증명 종류를 남길 때만 쓴다.
    * 없어도 인증은 성립하므로 이 필드를 채우지 않는 백엔드(테스트 스텁 등)도 그대로 동작한다.
    */
-  authenticate(user: string, pass: string): Promise<{ accountId: string; credKind?: string | undefined } | null>;
+  authenticate(user: string, pass: string): Promise<{ accountId: string; credKind?: string | undefined; expiresAt?: number | undefined } | null>;
   /** 엔진 백엔드 요청 단일 디스패치 — 응답 kind는 요청 kind별 계약(engine.ts 참조). */
   request(accountId: string, req: ImapBackendRequest): Promise<ImapBackendResponse>;
   /**
@@ -424,6 +425,11 @@ export class ImapServer {
     let socket: net.Socket | tls.TLSSocket = rawSocket;
     const backend = this.opts.backend;
     let accountId: string | null = null;
+    /**
+     * 이 연결을 연 자격증명의 만료 시각(외부 access token, 회원 정책 E4). 지나면 **다음 명령**에서 닫는다 — 계정 정지(G2)와
+     * 같은 자리에서. 만료가 없는 자격증명(비밀번호·앱 비밀번호)은 null이다.
+     */
+    let authExpiresAt: number | null = null;
 
     socket.setTimeout(IDLE_TIMEOUT_MS);
 
@@ -628,6 +634,13 @@ export class ImapServer {
             if (meter.deadlinePassed) break;
             if (result) {
               accountId = result.accountId;
+              authExpiresAt = result.expiresAt ?? null;
+              armAuthExpiry(rawSocket, authExpiresAt, () => {
+                this.audit.record({ ts: Date.now(), surface: AUDIT_SURFACE.imap, action: "authExpired", outcome: AUDIT_OUTCOME.denied, ip: normalizeIp(rawSocket.remoteAddress), ...(accountId !== null ? { accountId } : {}) });
+                accountId = null;
+                writeText("* BYE authentication expired");
+                if (!socket.destroyed) socket.end();
+              });
               meter.authenticated(result.accountId);
               this.authThrottle.clear(ip);
             } else {
@@ -661,6 +674,14 @@ export class ImapServer {
              * 조회 실패면 이 명령만 NO로 돌린다 — 실행하지 않되(fail closed), DB가 잠깐 흔들렸다고
              * 모든 연결을 끊지는 않는다.
              */
+            if (authExpiresAt !== null && Date.now() >= authExpiresAt) {
+              // 토큰 만료 — 이 연결의 자격증명이 더 이상 유효하지 않다. 계정은 살아 있으므로 클라이언트는 새 토큰으로 다시 붙는다.
+              this.audit.record({ ts: Date.now(), surface: AUDIT_SURFACE.imap, action: "authExpired", outcome: AUDIT_OUTCOME.denied, ip: normalizeIp(socket.remoteAddress), accountId });
+              accountId = null;
+              writeText("* BYE authentication expired");
+              if (!socket.destroyed) socket.end();
+              break;
+            }
             let active: boolean | null;
             try {
               active = await backend.accountActive(accountId);

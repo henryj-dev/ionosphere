@@ -298,6 +298,29 @@ Bearer 토큰 입력 칸은 없앴다. API 키(`api-key-create`)는 REST 자동�
 - IdP에서 사용자를 정지해도 이미 열린 세션은 그대로다(IdP 철회 신호를 받지 않는다). 세션 수명 안에서 유지되고,
   ionosphere 쪽 정지·연결 해제·세션 종료는 다음 요청부터 반영된다.
 
+### 메일 클라이언트의 외부 OAuth (E4)
+
+IMAP·POP3·SMTP 제출·JMAP·ManageSieve에서 IdP가 발급한 **access token**(JWT)으로 로그인한다. 기본으로 꺼져 있다.
+
+- account 영역 OIDC 공급자에 `"mailAccessToken": { "audience", "requiredScope", "surfaces"? }`를 더한다.
+  - `audience`는 메일 전용 값이어야 하고 웹 로그인 `clientId`와 **달라야** 한다. 같으면 기동이 실패한다(ID 토큰 혼용 차단).
+  - 토큰에는 `requiredScope`가 있어야 한다(`scope` 문자열 또는 `scp`).
+- 계정은 셀프서비스와 같은 연결(`oidc-identity-link`)을 쓴다. 토큰의 email로 찾지 않는다. SASL이 말한 사용자가 연결된
+  계정 주소와 같아야 한다.
+- 순서는 로컬 자격증명(비밀번호·앱 비밀번호·자체 발급 토큰) → 외부 access token → 디렉터리다. IdP가 죽어도 로컬은 동작한다.
+- 헤더 `typ`가 `at+jwt`(RFC 9068)여야 한다. 지키지 않는 IdP만 `"requireAtJwtTyp": false`로 끈다(그러면 ID 토큰 차단의 근거가 aud 하나뿐이다).
+- 토큰 수명은 **5분까지만** 받는다(exp − iat와 exp − 지금 둘 다, 시계 오차 없이). `"maxLifetimeSec"`로 더 짧게만 바꿀 수 있다.
+- `azp`(토큰을 요청한 메일 앱)는 보지 않는다 — access token에서는 aud와 다른 것이 정상이다.
+- 낯선 kid로 JWKS를 다시 받는 것은 공급자당 60초에 한 번이다(위조 토큰으로 IdP 요청을 증폭하지 못하게).
+- JWT 모양의 값은 실패해도 디렉터리(LDAP) bind로 넘기지 않는다.
+- **토큰 만료 = 연결 종료**(2026-10-18 이 창 사용자 결정): 외부 토큰으로 연 IMAP·POP3·ManageSieve·SMTP 제출 연결과
+  JMAP EventSource는 토큰 exp에 닫힌다. 명령이 없어도 닫는다(타이머). JMAP 인증 캐시도 exp를 넘지 않는다.
+  계정 정지는 별개로, 열린 연결의 다음 명령에서 막힌다(G2).
+- **제품 예외(E4 전용, 2026-10-18 사용자 결정 "수명 상한을 낮추고 예외로 수용")**: introspection이 없어 토큰 수명 안의
+  철회는 반영되지 않는다. 그 지연은 **최대 5분**(수명 상한)이다. 이 예외는 ionosphere E4(메일 클라이언트 외부 토큰)에만
+  해당하고, 공통 정책의 "다음 보호 요청부터 반영" 기준과 다른 서비스에는 적용하지 않는다. IdP가 쓸 만한 introspection·철회
+  신호를 주게 되면 다시 검토한다.
+
 ## 9. 운영에서 반복해서 틀리는 것
 
 - **리스너가 떠 있는 것과 닿는 것은 다른 사실이다.** 방화벽이 별도 계층이면 `ss`로 확인한

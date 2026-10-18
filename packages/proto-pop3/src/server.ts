@@ -6,6 +6,7 @@
 import * as net from "node:net";
 import * as tls from "node:tls";
 import {
+  armAuthExpiry,
   AUDIT_OUTCOME,
   AUDIT_SURFACE,
   AuthFailureThrottle,
@@ -44,7 +45,7 @@ export interface Pop3Backend {
   /** SCRAM 증명 통과 뒤 계정 상태 확인 — 증명했어도 정지 계정이면 들여보내지 않는다. */
   scramAuthorize?(user: string): Promise<{ accountId: string; credKind?: string } | null>;
   /** `credKind`는 선택 — 접근 감사 로그가 자격증명 종류를 남길 때만 쓴다(IMAP과 같은 계약). */
-  authenticate(user: string, pass: string): Promise<{ accountId: string; credKind?: string | undefined } | null>;
+  authenticate(user: string, pass: string): Promise<{ accountId: string; credKind?: string | undefined; expiresAt?: number | undefined } | null>;
   /**
    * ★계약: **예외로 끝나면 잠금을 쥐고 있지 않아야 한다**(잡았다면 스스로 풀고 던진다).
    * 어댑터는 예외를 받았을 때 잠금 여부를 알 수 없고, `releaseMaildrop`은 계정 단위라 추측으로
@@ -286,6 +287,11 @@ export class Pop3Server {
     });
     const backend = this.backend;
     let accountId: string | null = null;
+    /**
+     * 이 연결을 연 자격증명의 만료 시각(외부 access token, 회원 정책 E4). 지나면 **다음 명령**에서 닫는다 — 계정 정지(G2)와
+     * 같은 자리에서. 만료가 없는 자격증명(비밀번호·앱 비밀번호)은 null이다.
+     */
+    let authExpiresAt: number | null = null;
     let sessionMessages: readonly Pop3MaildropMessage[] = [];
     let released = false;
     let ended = false;
@@ -365,6 +371,13 @@ export class Pop3Server {
      * false면 호출자는 그 명령을 진행하지 않는다.
      */
     const stillActive = async (id: string): Promise<boolean> => {
+      if (authExpiresAt !== null && Date.now() >= authExpiresAt) {
+        // 토큰 만료(E4) — 삭제를 커밋하지 않고 닫는다(정지와 같은 처분).
+        audit("authExpired", AUDIT_OUTCOME.denied);
+        writeText("-ERR [AUTH] authentication expired");
+        await finish();
+        return false;
+      }
       if (await backend.accountActive(id)) return true;
       audit("accountInactive", AUDIT_OUTCOME.denied);
       writeText("-ERR [AUTH] account unavailable");
@@ -480,6 +493,12 @@ export class Pop3Server {
             if (meter.deadlinePassed) break;
             if (result) {
               accountId = result.accountId;
+              authExpiresAt = result.expiresAt ?? null;
+              armAuthExpiry(rawSocket, authExpiresAt, () => {
+                audit("authExpired", AUDIT_OUTCOME.denied);
+                writeText("-ERR [AUTH] authentication expired");
+                void finish();
+              });
               this.authThrottle.clear(ip);
             } else {
               meter.authFailed();

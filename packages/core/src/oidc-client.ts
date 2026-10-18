@@ -13,7 +13,7 @@
  *    lodestar는 현재 ID 토큰에 amr이 없고 acr에 신뢰 기기가 섞여 계약을 충족할 수 없다(orc 경유 보고, 2026-10-18).
  */
 import { createHash, randomBytes } from "node:crypto";
-import { JwtError, verifyJwt, type Jwk, type JwtClaims } from "./jose.ts";
+import { decodeJwt, JwtError, verifyJwt, type Jwk, type JwtClaims } from "./jose.ts";
 
 /** 공급자별 MFA 증거 계약. 생략하면 IdP MFA를 인정하지 않는다(로컬 TOTP 필수). */
 export interface MfaEvidenceContract {
@@ -121,6 +121,20 @@ export function newOpaque(): string {
 const JWKS_TTL_MS = 10 * 60 * 1000;
 /** discovery 캐시 수명 — IdP가 엔드포인트를 바꾸면 이만큼 뒤에 반영된다(영구 캐시는 재시작을 요구한다). */
 const DISCOVERY_TTL_MS = 60 * 60 * 1000;
+/**
+ * 낯선 kid로 JWKS를 강제로 다시 받는 최소 간격. 무인증 IMAP·SMTP에서 임의 kid를 단 JWT 모양 문자열을 보내면 시도마다
+ * IdP로 요청이 나가 DoS 증폭기가 된다(2026-10-18 검토). 간격 안의 낯선 kid는 받지 않고 바로 거절한다.
+ */
+const JWKS_FORCED_REFRESH_MIN_MS = 60 * 1000;
+/**
+ * access token 수명 상한 — **5분**(2026-10-18 사용자 결정, orc 경유: "수명 상한을 낮추고 예외로 수용").
+ *
+ * introspection이 없어 철회 수단이 exp뿐이다. 그래서 상한이 곧 "수명 안의 철회가 반영되지 않는 최대 시간"이고, 그 지연만
+ * ionosphere E4 전용 제품 예외로 수용됐다(공통 정책의 "다음 보호 요청부터 반영"과 다른 서비스에는 적용하지 않는다).
+ * lodestar access TTL 기본값과 같다. 설정은 이보다 **짧게만** 바꿀 수 있다(oidc-config.ts가 기동 전에 막는다).
+ * introspection 같은 공급자 보강이 생기면 다시 검토한다.
+ */
+export const MAX_ACCESS_TOKEN_LIFETIME_SEC = 5 * 60;
 
 export class OidcClient {
   readonly provider: OidcProviderConfig;
@@ -128,6 +142,9 @@ export class OidcClient {
   private discovery: { doc: OidcDiscovery; fetchedAt: number } | null = null;
   private readonly issuerIsLoopback: boolean;
   private jwks: { keys: Jwk[]; fetchedAt: number } | null = null;
+  /** 진행 중인 JWKS 요청 — 동시에 온 요청이 같은 것을 기다린다(single-flight). */
+  private jwksInFlight: Promise<Jwk[]> | null = null;
+  private lastForcedRefreshAt = 0;
 
   constructor(provider: OidcProviderConfig, fetchJson: OidcFetch = defaultFetch) {
     this.issuerIsLoopback = isLoopbackHost(new URL(provider.issuer).hostname);
@@ -155,12 +172,79 @@ export class OidcClient {
 
   private async keys(force: boolean): Promise<Jwk[]> {
     if (!force && this.jwks && Date.now() - this.jwks.fetchedAt < JWKS_TTL_MS) return this.jwks.keys;
+    if (force) {
+      // 최근에 이미 강제로 받았다면 다시 받지 않는다 — 가진 키로 판정하게 해 "unknown_key"로 끝난다.
+      if (Date.now() - this.lastForcedRefreshAt < JWKS_FORCED_REFRESH_MIN_MS && this.jwks) return this.jwks.keys;
+      this.lastForcedRefreshAt = Date.now();
+    }
+    this.jwksInFlight ??= this.fetchKeys().finally(() => {
+      this.jwksInFlight = null;
+    });
+    return await this.jwksInFlight;
+  }
+
+  private async fetchKeys(): Promise<Jwk[]> {
     const d = await this.discover();
     const { status, json } = await this.fetchJson(d.jwks_uri);
     const keys = (json as { keys?: unknown } | null)?.keys;
     if (status !== 200 || !Array.isArray(keys)) throw new OidcError("jwks_failed");
     this.jwks = { keys: keys.filter((k): k is Jwk => k !== null && typeof k === "object" && typeof (k as Jwk).kty === "string"), fetchedAt: Date.now() };
     return this.jwks.keys;
+  }
+
+  /**
+   * 메일 클라이언트용 **access token** 검증(회원 정책 E4) — JWT(RFC 9068 형식)를 이 IdP의 키로 검증한다.
+   *
+   * ★ID 토큰과 섞지 않는다: audience는 **메일 전용 값**이어야 하고(설정이 웹 로그인 clientId와 같으면 기동 시 거부),
+   * 메일 scope가 있어야 한다. ID 토큰은 aud가 clientId라 여기서 통과할 수 없다.
+   * introspection은 하지 않는다 — 철회는 토큰의 exp까지 반영되지 않는다(지원 제한, 호출자 문서 참조).
+   */
+  async verifyAccessToken(
+    token: string,
+    req: { audience: string; requiredScope: string; nowMs?: number; requireAtJwtTyp?: boolean; maxLifetimeSec?: number },
+  ): Promise<{ sub: string; claims: JwtClaims }> {
+    const nowMs = req.nowMs ?? Date.now();
+    const claimReq = { issuer: this.provider.issuer, audience: req.audience, nowMs, requireExp: true, checkAzp: false };
+    // ★RFC 9068 typ — ID 토큰을 access token으로 받지 않는 두 번째 근거(첫째는 aud). 지키지 않는 IdP는 설정으로 끈다.
+    if (req.requireAtJwtTyp ?? true) {
+      let typ: string | undefined;
+      try {
+        typ = decodeJwt(token).header.typ?.toLowerCase();
+      } catch {
+        throw new OidcError("access_token_malformed");
+      }
+      if (typ !== "at+jwt" && typ !== "application/at+jwt") throw new OidcError("access_token_bad_typ");
+    }
+    // 설정값이 상한보다 길어도 상한을 넘지 않는다(이중 방어 — 설정 검사가 먼저 막는다).
+    const maxLifetime = Math.min(req.maxLifetimeSec ?? MAX_ACCESS_TOKEN_LIFETIME_SEC, MAX_ACCESS_TOKEN_LIFETIME_SEC) * 1000;
+    const check = (claims: JwtClaims): void => {
+      if (!scopesOf(claims).includes(req.requiredScope)) throw new OidcError("access_token_missing_scope");
+      const exp = Number(claims.exp) * 1000;
+      // 메일 경로에서는 exp에 시계 오차를 주지 않는다 — 막 만료된 토큰이 AUTH를 통과한 직후 바로 끊기는 혼란을 없앤다.
+      if (exp <= nowMs) throw new OidcError("access_token_expired");
+      const iat = typeof claims.iat === "number" ? claims.iat * 1000 : nowMs;
+      // ★두 가지를 다 본다: 발급 수명(exp − iat)과 남은 수명(exp − 지금). iat를 과거로 꾸며도, 비워도 상한을 넘지 못한다.
+      // 시계 오차는 주지 않는다 — 상한은 "철회가 늦을 수 있는 최대 시간"이라 넘으면 바로 그 약속이 깨진다.
+      if (exp - iat > maxLifetime || exp - nowMs > maxLifetime) throw new OidcError("access_token_lifetime_too_long");
+    };
+    try {
+      const r = verifyJwt(token, await this.keys(false), claimReq);
+      check(r.claims);
+      return { sub: r.sub, claims: r.claims };
+    } catch (err) {
+      if (err instanceof JwtError && err.reason === "unknown_key") {
+        try {
+          const r = verifyJwt(token, await this.keys(true), claimReq);
+          check(r.claims);
+          return { sub: r.sub, claims: r.claims };
+        } catch (err2) {
+          if (err2 instanceof OidcError) throw err2;
+          throw new OidcError(err2 instanceof JwtError ? `access_token_${err2.reason}` : "access_token_invalid");
+        }
+      }
+      if (err instanceof OidcError) throw err;
+      throw new OidcError(err instanceof JwtError ? `access_token_${err.reason}` : "access_token_invalid");
+    }
   }
 
   /** 인가 요청 URL. MFA 계약이 있으면 max_age를 싣는다(요청일 뿐 — 판정은 응답으로 한다). */
@@ -211,6 +295,18 @@ export class OidcClient {
       throw new OidcError(err instanceof JwtError ? `id_token_${err.reason}` : "id_token_invalid");
     }
   }
+}
+
+/**
+ * access token의 scope 클레임 — RFC 9068은 `scope`(공백 구분 문자열), 일부 IdP는 `scp`(배열·문자열)를 쓴다. 둘 다 읽는다.
+ */
+function scopesOf(claims: JwtClaims): string[] {
+  const out: string[] = [];
+  for (const v of [claims.scope, claims.scp]) {
+    if (typeof v === "string") out.push(...v.split(/\s+/).filter(Boolean));
+    else if (Array.isArray(v)) out.push(...v.filter((x): x is string => typeof x === "string"));
+  }
+  return out;
 }
 
 /**
