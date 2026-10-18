@@ -351,7 +351,7 @@ SPF+DKIM pass · From 도메인 정렬(SPF 또는 DKIM) · DMARC p=none 이상 �
 | 시도 제한 | 실패만 셈, 60초 창, IP 프리픽스 10회 + 계정 20회, 프로세스 로컬 | `core/auth-throttle.ts` |
 | 정지 | `account-suspend` — 새 인증·제출·수신 차단, 데이터 보존, 되돌릴 수 있음 | — |
 | 삭제 | `account-delete` — 되돌릴 수 없는 드레인, 끝날 때까지 주소 재등록 차단 | SCHEMA §7-7 |
-| 반영 지연 | 새 인증은 즉시. **JMAP은 인증 캐시로 최대 30초**. 제출(SMTP)은 메시지마다 상태를 다시 본다. 이미 열린 IMAP·POP3 연결에서 계정 상태를 다시 보는 경로는 확인되지 않았다(미결 — 장기 연결 계약으로 따로 정한다) | `jmap-server.ts`, `backend.ts` |
+| 반영 지연 | 새 인증은 즉시. **JMAP은 인증 캐시로 최대 30초**. 제출(SMTP)은 메시지마다 상태를 다시 본다. 열린 IMAP·POP3·ManageSieve 연결은 **다음 명령에서** 계정 상태를 다시 본다(G2) | `jmap-server.ts`, `backend.ts`, `proto-*/server.ts` |
 | 디렉터리 로그인 | 기본 꺼짐. 로컬 실패 뒤 폴백, 관리자가 연결한 불변 키만. **표면 제한을 거치지 않는다** | `shared-mailbox-runtime.ts` |
 | 관리 주체 | `api_keys`(테넌트, read/write/admin) + 정적 `rootToken`. 메일 계정과 별개 | `api/server.ts` |
 
