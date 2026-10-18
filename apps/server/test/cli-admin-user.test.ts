@@ -6,7 +6,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { afterAll, beforeAll, describe, expect, test } from "@ionosphere/testkit";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,9 +19,9 @@ const PASSWORD = "bootstrap-admin-password";
 let dir: string;
 let dbPath: string;
 
-function run(cliArgs: string[], stdin?: string): { stdout: string; stderr: string; code: number } {
+function run(cliArgs: string[], stdin?: string, extraEnv: Record<string, string> = {}): { stdout: string; stderr: string; code: number } {
   const p = spawnSync(process.execPath, [cli, ...cliArgs], {
-    env: { ...process.env, IONOSPHERE_DB: dbPath, IONOSPHERE_BLOBS: join(dir, "blobs"), IONOSPHERE_CLI_SECRET: "" },
+    env: { ...process.env, IONOSPHERE_DB: dbPath, IONOSPHERE_BLOBS: join(dir, "blobs"), IONOSPHERE_CLI_SECRET: "", ...extraEnv },
     ...(stdin !== undefined ? { input: stdin } : {}),
   });
   return { stdout: p.stdout?.toString() ?? "", stderr: p.stderr?.toString() ?? "", code: p.status ?? 0 };
@@ -62,5 +62,31 @@ describe("admin-user-create (CLI)", () => {
   test("도움말은 비밀번호가 stdin 전용이라고 실제 동작대로 안내한다", () => {
     const res = run(["help", "admin-user-create"]);
     expect(res.stdout + res.stderr).toContain("--password\t비밀번호 (필수) ※ stdin 또는 환경변수로만 받는다");
+  });
+});
+
+describe("CLI 실행 감사(회원 정책 D4)", () => {
+  test("★IONOSPHERE_AUDIT=1이면 실행마다 cli 표면 이벤트가 남고, 인자 값(비밀번호)은 남지 않는다", () => {
+    const auditDir = join(dir, "audit");
+    const env = { IONOSPHERE_AUDIT: "1", IONOSPHERE_AUDIT_DIR: auditDir };
+    expect(run(["admin-user-create", "--username=audited@ionosphere.test", "--role=admin"], PASSWORD + "\n", env).code).toBe(0);
+    expect(run(["admin-user-suspend", "--admin=nobody@ionosphere.test"], undefined, env).code).toBe(1);
+    expect(existsSync(auditDir)).toBe(true);
+    const text = readdirSync(auditDir).map((f) => readFileSync(join(auditDir, f), "utf8")).join("");
+    const events = text.split("\n").filter((l) => l.trim() !== "").map((l) => JSON.parse(l) as Record<string, unknown>);
+    const create = events.find((e) => e.action === "admin-user-create");
+    const suspend = events.find((e) => e.action === "admin-user-suspend");
+    expect(create?.surface).toBe("cli");
+    expect(create?.outcome).toBe("ok");
+    expect(suspend?.outcome).toBe("fail");
+    expect((suspend?.detail as Record<string, unknown>).failure).toBe("notFound");
+    expect(text).not.toContain(PASSWORD);
+    expect(text).not.toContain("audited@ionosphere.test"); // 인자 값은 남기지 않는다
+  });
+
+  test("IONOSPHERE_AUDIT가 없으면 아무것도 쓰지 않는다(서버와 같은 설정)", () => {
+    const auditDir = join(dir, "audit-off");
+    expect(run(["admin-user-list"], undefined, { IONOSPHERE_AUDIT_DIR: auditDir }).code).toBe(0);
+    expect(existsSync(auditDir)).toBe(false);
   });
 });

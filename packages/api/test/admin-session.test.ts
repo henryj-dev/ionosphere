@@ -10,7 +10,7 @@
  */
 import { afterEach, describe, expect, test } from "@ionosphere/testkit";
 import { base32Decode, hotp, totpStep } from "@ionosphere/core";
-import { AuthFailureThrottle } from "@ionosphere/core";
+import { AuthFailureThrottle, type AuditEvent } from "@ionosphere/core";
 import { allMigrations, migrate, openSqlite, type DbDriver } from "@ionosphere/db";
 import { Store } from "@ionosphere/store";
 import { AdminApiServer, type AdminApiDeps } from "../src/server.ts";
@@ -363,5 +363,17 @@ describe("복구 코드·MFA 초기화(2026-10-18 사용자 결정)", () => {
     const lost = await login(f, "lost@ionosphere.test");
     expect(lost.json.mfaEnrolled).toBe(false);
     expect((await req(f, "POST", "/admin/session/mfa/enroll", { session: lost.session, body: { enrollCode: code } })).status).toBe(200);
+  });
+});
+
+describe("rootToken은 부트스트랩 전용(회원 정책 D4)", () => {
+  test("활성 운영자 owner가 생긴 뒤의 rootToken 사용은 감사 줄에 표시된다(거부는 하지 않는다)", async () => {
+    const events: AuditEvent[] = [];
+    const f = await setup({ audit: { record: (e) => void events.push(e) } });
+    await rootCommand(f, "admin-user-list", {});
+    expect(events.at(-1)?.detail?.rootAfterBootstrap).toBeUndefined();
+    await createAdmin(f, "ops@ionosphere.test");
+    await rootCommand(f, "admin-user-list", {});
+    expect(events.at(-1)?.detail?.rootAfterBootstrap).toBe(1);
   });
 });

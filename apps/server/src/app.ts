@@ -32,7 +32,7 @@ import { MtaWorker, type MxRecord, type RateLimitConfig, type SmarthostOptions }
 import { createGuardedFetch, WebhookWorker } from "@ionosphere/webhook";
 import { parseCidrList, type DnsResolver } from "@ionosphere/mail-auth";
 import type { DnsblZone, GreylistOptions, SpamScoreOptions, VirusScanner, VirusScanOptions } from "@ionosphere/spam";
-import { AdminApiServer, type TlsAdmin } from "@ionosphere/api";
+import { AdminApiServer, hasActiveOperatorOwner, type TlsAdmin } from "@ionosphere/api";
 import { AutoconfigServer } from "@ionosphere/autoconfig";
 import { createIonosphereMetrics, MetricsServer, type IonosphereMetrics } from "@ionosphere/metrics";
 import { IonosphereLmtpBackend, IonospherePop3Backend, IonosphereSmtpBackend, StoreDkimHook, type IonosphereSmtpBackendOptions } from "./backend.ts";
@@ -1753,6 +1753,10 @@ export class IonosphereApp {
       // 평문 포트는 443 프론트의 upstream이다 — 공개할 이유가 없어 항상 루프백이다.
       // (토큰 스로틀이 x-forwarded-for를 루프백 상대에게만 신뢰하는 것과도 짝이 맞는다.)
       this.adminPort = await this.admin.listen(adminListener.port, adminListener.host);
+      // D4: 부트스트랩이 끝났는데 rootToken이 설정돼 있으면 기동 때 한 번 알린다(쓰일 때는 API가 따로 경고한다).
+      if (this.opts.adminRootToken && (await hasActiveOperatorOwner(this.db))) {
+        ctx.log.warn("IONOSPHERE_ADMIN_TOKEN이 설정돼 있다 — 활성 운영자 owner가 있으므로 부트스트랩 전용 토큰을 제거할 것(회원 정책 D4)", {});
+      }
       if (adminListener.host !== undefined) this.adminHost = adminListener.host;
     }
 

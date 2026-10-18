@@ -1,5 +1,5 @@
 // @ionosphere/api — 관리 REST API(HTTP 어댑터). 관리 로직 자체는 @ionosphere/admin-cmd가 소유한다.
-export { AdminApiServer, type AdminApiDeps, type TlsAdmin } from "./server.ts";
+export { AdminApiServer, hasActiveOperatorOwner, type AdminApiDeps, type TlsAdmin } from "./server.ts";
 /**
  * 도메인 프로비저닝은 **@ionosphere/admin-cmd로 이사했다**(GUI·API·CLI가 같은 명령을 쓰게 하려면
  * 명령 계층이 api보다 아래에 있어야 한다 — api를 의존하면 순환이다).

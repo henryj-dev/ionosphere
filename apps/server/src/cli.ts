@@ -40,7 +40,9 @@ import {
 import { allMigrations, describeDbSpec, migrate, openDatabase } from "@ionosphere/db";
 import { SMARTHOST_PRESETS } from "./smarthost.ts";
 import { Store } from "@ionosphere/store";
-import { applyLegacyEnvAliases } from "@ionosphere/core";
+import { applyLegacyEnvAliases, AUDIT_OUTCOME, AUDIT_SURFACE, type AuditOutcome } from "@ionosphere/core";
+import { userInfo, hostname } from "node:os";
+import { AuditFileSink } from "./audit-sink.ts";
 // ★구 `IONOSPHERE_*` env를 새 이름으로 넘긴다 — env를 처음 읽기 전에(packages/core/src/env-legacy.ts).
 applyLegacyEnvAliases();
 
@@ -360,9 +362,55 @@ const ctx: CommandContext = {
   masterKey: process.env.IONOSPHERE_MASTER_KEY,
 };
 
+/**
+ * ★CLI 실행 감사(회원 정책 결정 D4). 호스트 CLI는 DB에 직접 붙고 MFA를 거치지 않는 비상 경로다. 그 예외의 조건이
+ * "실행할 때마다 감사 기록"이라, 서버와 **같은 설정**(`IONOSPHERE_AUDIT=1`, `IONOSPHERE_AUDIT_DIR`)으로 같은 파일에 남긴다.
+ * 서버가 이관(S3)할 때 함께 실려 간다.
+ *
+ * 인자 **값은 남기지 않는다** — 비밀번호·토큰·키가 들어 있다. 명령 이름, 결과, 누가(OS 사용자), 어디서(호스트)만 남긴다.
+ * 실패도 남긴다(거절된 시도가 오히려 중요한 흔적이다).
+ */
+const cliAudit = process.env.IONOSPHERE_AUDIT === "1" ? new AuditFileSink({ dir: process.env.IONOSPHERE_AUDIT_DIR ?? "/var/lib/ionosphere/audit" }) : null;
+async function recordCliRun(outcome: AuditOutcome, failure?: string): Promise<void> {
+  if (!cliAudit) return;
+  let osUser = "unknown";
+  try {
+    osUser = userInfo().username;
+  } catch {
+    /* 컨테이너 등에서 사용자 이름이 없을 수 있다 — unknown으로 남긴다 */
+  }
+  cliAudit.record({
+    ts: Date.now(),
+    surface: AUDIT_SURFACE.cli,
+    action: resolvedName,
+    outcome,
+    ip: "local",
+    user: osUser,
+    ...(ctx.tenantId ? { tenantId: ctx.tenantId } : {}),
+    detail: {
+      host: hostname(),
+      readOnly: cmd!.spec.readOnly ? 1 : 0,
+      destructive: cmd!.spec.destructive === true ? 1 : 0,
+      ...(failure ? { failure } : {}),
+    },
+  });
+  // CLI는 곧 끝나므로 주기 flush를 기다리지 않고 바로 내린다.
+  await cliAudit.stop();
+}
+
 try {
   const args = await collectArgs();
-  const result = await runCommand(registry, ctx, resolvedName, args);
+  let result;
+  try {
+    result = await runCommand(registry, ctx, resolvedName, args);
+  } catch (err) {
+    await recordCliRun(
+      err instanceof CommandError && err.kind === "denied" ? AUDIT_OUTCOME.denied : AUDIT_OUTCOME.fail,
+      err instanceof CommandError ? err.kind : "error",
+    );
+    throw err;
+  }
+  await recordCliRun(AUDIT_OUTCOME.ok);
 
   if (result.rows) printRows(result.rows, cmd.spec);
   if (result.message) console.log(result.message);
