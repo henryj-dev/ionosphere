@@ -687,7 +687,7 @@ export class IonosphereApp {
     const local = await authenticate(this.db, user, pass, surface);
     if (local) return { accountId: local.accountId, ...(local.credKind ? { credKind: local.credKind } : {}) };
     if (this.opts.directoryLogin !== true) return null;
-    return await this.sharedMailboxRuntime?.authenticate(user, pass) ?? null;
+    return await this.sharedMailboxRuntime?.authenticate(user, pass, surface) ?? null;
   }
 
   /**

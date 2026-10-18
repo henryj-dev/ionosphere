@@ -130,6 +130,12 @@ IONOSPHERE_DIRECTORIES=[{"provider":"corp-ad","tenantId":"tenant-id","transport"
 `upn`, `samAccountName`, `mail`, `displayName`, `groupMember`를 바꾼다. 설정 오류 로그에는 bind
 password를 싣지 않는다.
 
+`surfaces`는 그 provider로 디렉터리 로그인을 허용할 표면 목록이다. 이름은 앱 비밀번호의
+`scopes`와 같다(`imap`, `pop3`, `submission`, `jmap`, `sieve`). 예를 들어 `"surfaces":["imap","jmap"]`
+이면 그 provider의 계정은 IMAP·JMAP으로만 디렉터리 비밀번호 로그인이 된다. 다른 표면에서는
+LDAP bind도 하지 않고 인증 실패로 응답한다. **생략하면 전부 허용**한다(기존 동작). 모르는 이름이나
+빈 배열은 기동 전에 실패한다. provider를 끄려면 배열에서 항목을 뺀다.
+
 운영 적용은 다음 순서다.
 
 1. `IONOSPHERE_DIRECTORY_LOGIN`을 비운 채 provider 설정만 배포한다.

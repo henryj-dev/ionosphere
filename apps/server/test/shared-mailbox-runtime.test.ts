@@ -50,8 +50,8 @@ describe("shared mailbox runtime", () => {
     expect((await runtime.sync(tenantId, "ad")).data?.identities).toBe(1);
     await db.batch([{ sql: "UPDATE directory_identities SET account_id = ? WHERE tenant_id = ? AND provider = ? AND external_key = ?", params: [account.accountId, tenantId, "ad", "guid:runtime"] }]);
     await runtime.sync(tenantId, "ad");
-    expect(await runtime.authenticate("runtime", "directory-secret")).toEqual({ accountId: account.accountId, credKind: "directory:ad" });
-    expect(await runtime.authenticate("runtime", "wrong")).toBe(null);
+    expect(await runtime.authenticate("runtime", "directory-secret", "imap")).toEqual({ accountId: account.accountId, credKind: "directory:ad" });
+    expect(await runtime.authenticate("runtime", "wrong", "imap")).toBe(null);
     expect((await db.query({ sql: "SELECT COUNT(*) AS n FROM directory_identities WHERE tenant_id = ? AND provider = ?", params: [tenantId, "ad"] })).rows[0]?.n).toBe(1);
     expect((await runtime.rebuildHeaders(10)).data?.processed).toBe(1);
     expect((await db.query({ sql: "SELECT display_value FROM message_header_projection WHERE name = ?", params: ["subject"] })).rows[0]?.display_value).toBe("projected");
@@ -97,7 +97,48 @@ describe("shared mailbox runtime", () => {
       params: [accountB.accountId, tenantB.tenantId, "ad", "guid:shared"],
     }]);
 
-    expect(await runtime.authenticate("shared", "tenant-a-secret")).toBe(null);
+    expect(await runtime.authenticate("shared", "tenant-a-secret", "imap")).toBe(null);
+    await runtime.close();
+    await db.close();
+  });
+
+  test("provider 허용 표면 밖에서는 bind 없이 거절하고, 안에서는 들어온다", async () => {
+    const db = await openSqlite(":memory:");
+    await migrate(db, allMigrations);
+    const blobs = new FsBlobStore(mkdtempSync(join(tmpdir(), "ion-shared-runtime-")));
+    const store = new Store(db);
+    const { tenantId } = await store.createTenant("surfaces");
+    const account = await store.createAccount({ tenantId, email: "only-imap@ionosphere.test" });
+    let binds = 0;
+    const runtime = new SharedMailboxRuntime({
+      db,
+      blobs,
+      listingCache: new ListingCache<JmapEmailQueryResult>({ ttlMs: 5000 }),
+      directorySources: {
+        ad: {
+          surfaces: ["imap"],
+          authenticate: async (_tenantId, loginName, password) => {
+            binds++;
+            return loginName === "only-imap" && password === "directory-secret"
+              ? { externalKey: "guid:only-imap", loginNames: ["only-imap"], email: "only-imap@ionosphere.test", displayName: null }
+              : null;
+          },
+          read: async () => ({
+            identities: [{ externalKey: "guid:only-imap", loginNames: ["only-imap"], email: "only-imap@ionosphere.test", displayName: null, groupExternalKeys: [] }],
+            groups: [],
+          }),
+        },
+      },
+    });
+    await runtime.sync(tenantId, "ad");
+    await db.batch([{ sql: "UPDATE directory_identities SET account_id = ? WHERE tenant_id = ? AND provider = ?", params: [account.accountId, tenantId, "ad"] }]);
+
+    expect(await runtime.authenticate("only-imap", "directory-secret", "imap")).toEqual({ accountId: account.accountId, credKind: "directory:ad" });
+    expect(binds).toBe(1);
+    // ★허용하지 않는 표면에서는 LDAP에 비밀번호를 보내지도 않는다.
+    expect(await runtime.authenticate("only-imap", "directory-secret", "submission")).toBe(null);
+    expect(await runtime.authenticate("only-imap", "directory-secret", "pop3")).toBe(null);
+    expect(binds).toBe(1);
     await runtime.close();
     await db.close();
   });

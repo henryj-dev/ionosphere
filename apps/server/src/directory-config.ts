@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { DIRECTORY_TRANSPORT, type DirectoryConfig } from "@ionosphere/core";
+import { AUTH_SURFACES, type AuthSurface } from "@ionosphere/store";
 import type { DirectoryLdapAttributeMap, DirectoryLdapClientOptions, LdapSearchFilter } from "./directory-ldap.ts";
 import { LdapDirectorySource } from "./directory-source.ts";
 import type { DirectorySnapshotSource } from "./shared-mailbox-runtime.ts";
@@ -23,6 +24,7 @@ interface RawDirectoryConfig {
   maxEntries?: unknown;
   nestedGroupMaxDepth?: unknown;
   attributes?: unknown;
+  surfaces?: unknown;
 }
 
 function required(value: unknown, field: string, index: number): string {
@@ -61,6 +63,25 @@ function attributes(value: unknown, index: number): Partial<DirectoryLdapAttribu
   return out;
 }
 
+/**
+ * 디렉터리 로그인 허용 표면. 없으면 undefined(전부 허용 — 기존 동작).
+ *
+ * ★모르는 이름과 빈 배열은 **기동 전에 거부한다.** 오타가 섞인 채로 뜨면 그 표면이 조용히 닫혀
+ * "비밀번호는 맞는데 안 된다"가 되고, 빈 배열은 "전부 금지"인지 "제한 없음"인지 읽는 사람마다
+ * 다르다. provider를 끄려면 항목을 빼면 된다.
+ */
+function surfaces(value: unknown, index: number): readonly AuthSurface[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0) throw new Error(`IONOSPHERE_DIRECTORIES[${index}].surfaces는 비어 있지 않은 배열이어야 함`);
+  const known: readonly string[] = AUTH_SURFACES;
+  const out: AuthSurface[] = [];
+  for (const item of value) {
+    if (typeof item !== "string" || !known.includes(item)) throw new Error(`IONOSPHERE_DIRECTORIES[${index}].surfaces에 알 수 없는 표면 (가능: ${AUTH_SURFACES.join(", ")})`);
+    if (!out.includes(item as AuthSurface)) out.push(item as AuthSurface);
+  }
+  return out;
+}
+
 /** JSON 하나를 정본으로 써 provider 여러 개의 부분 env 조합 사고를 막는다. 오류에는 비밀값을 싣지 않는다. */
 export function directorySourcesFromJson(raw: string | undefined): Readonly<Record<string, DirectorySnapshotSource>> | undefined {
   if (raw === undefined || raw.trim() === "") return undefined;
@@ -86,6 +107,7 @@ export function directorySourcesFromJson(raw: string | undefined): Readonly<Reco
     const maxEntries = optionalInteger(item.maxEntries, "maxEntries", index);
     const nestedGroupMaxDepth = optionalInteger(item.nestedGroupMaxDepth, "nestedGroupMaxDepth", index);
     const attributeMap = attributes(item.attributes, index);
+    const allowedSurfaces = surfaces(item.surfaces, index);
     const config: DirectoryConfig = {
       transport,
       url: required(item.url, "url", index),
@@ -106,7 +128,12 @@ export function directorySourcesFromJson(raw: string | undefined): Readonly<Reco
       ...(nestedGroupMaxDepth !== undefined ? { nestedGroupMaxDepth } : {}),
       ...(attributeMap ? { attributes: attributeMap } : {}),
     };
-    sources[provider] = new LdapDirectorySource({ tenantId: required(item.tenantId, "tenantId", index), config, ldap });
+    sources[provider] = new LdapDirectorySource({
+      tenantId: required(item.tenantId, "tenantId", index),
+      config,
+      ldap,
+      ...(allowedSurfaces ? { surfaces: allowedSurfaces } : {}),
+    });
   }
   return sources;
 }

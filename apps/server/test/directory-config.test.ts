@@ -35,4 +35,12 @@ describe("directory config", () => {
       expect(String(error)).not.toContain(secret);
     }
   });
+
+  test("surfaces — 생략하면 제한 없음, 지정하면 그 표면만, 모르는 이름·빈 배열은 기동 전에 거부", () => {
+    expect(directorySourcesFromJson(config())?.["corp-ad"]?.surfaces).toBeUndefined();
+    expect(directorySourcesFromJson(config({ surfaces: ["imap", "jmap", "imap"] }))?.["corp-ad"]?.surfaces).toEqual(["imap", "jmap"]);
+    expect(() => directorySourcesFromJson(config({ surfaces: ["imapp"] }))).toThrow(/알 수 없는 표면/);
+    expect(() => directorySourcesFromJson(config({ surfaces: [] }))).toThrow(/비어 있지 않은 배열/);
+    expect(() => directorySourcesFromJson(config({ surfaces: "imap" }))).toThrow(/비어 있지 않은 배열/);
+  });
 });
