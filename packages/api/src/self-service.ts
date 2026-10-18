@@ -264,7 +264,7 @@ export class SelfServiceServer {
         this.requireFreshMfa(s);
         // 현재 비밀번호도 확인한다 — 잠깐 비운 자리에 남은 세션 하나로 비밀번호를 바꾸지 못하게.
         if (!(await verifyAccountPrimaryPassword(this.deps.db, s.account.email, current))) {
-          this.throttle.recordFailure({ ip, account: s.account.email });
+          await this.throttle.recordFailure({ ip, account: s.account.email });
           throw new HttpError(401, "current password is wrong", "invalid_password");
         }
         // 사용자가 직접 정하는 값이라 최소 길이를 둔다. ⚠ 수치는 임시다(공통 비밀번호 규칙 미확정).
@@ -322,7 +322,7 @@ export class SelfServiceServer {
     audit.user = email;
     const subject = { ip, account: email };
     const now = Date.now();
-    const retryAfter = this.throttle.retryAfterSeconds(subject, now);
+    const retryAfter = await this.throttle.retryAfterSeconds(subject, now);
     if (retryAfter > 0) return sendJson(res, 429, { error: "too many failed auth attempts" }, { "Retry-After": String(retryAfter) });
 
     const account = email && password ? await verifyAccountPrimaryPassword(this.deps.db, email, password) : null;
@@ -340,11 +340,11 @@ export class SelfServiceServer {
       (!account.mfaEnrolled || recovered !== null || (checksTotp && (await verifySecondFactorTotp(this.deps.db, ACCOUNT_REALM, account.accountId, totp, this.deps.masterKey, now))));
     if (!checksTotp) await burnTotpCost(this.deps.masterKey);
     if (!account || !ok) {
-      this.throttle.recordFailure(subject, now);
+      await this.throttle.recordFailure(subject, now);
       return sendJson(res, 401, { error: "invalid credentials" });
     }
     // 계정 축만 지운다 — IP 축까지 지우면 자기 계정 하나로 같은 IP의 IMAP 대입 기록을 초기화할 수 있다(2026-10-18 검토).
-    this.throttle.clear({ account: email });
+    await this.throttle.clear({ account: email });
     const previous = await resolveAccountSession(this.deps.db, readCookie(req, ACCOUNT_SESSION_COOKIE) ?? "", this.deps.sessionPolicy ?? PROVISIONAL_WEB_SESSION_POLICY, now);
     if (previous) await revokeWebSession(this.deps.db, ACCOUNT_REALM, previous.sessionId, now);
     const enrolledNow = account.mfaEnrolled && recovered === null;
@@ -378,11 +378,11 @@ export class SelfServiceServer {
     if (method === "GET" && path === "/account/session/oidc/start") {
       const providerId = new URL(req.url ?? "/", "http://localhost").searchParams.get("provider") ?? "";
       // 무인증 시작 요청도 IP 축 스로틀을 본다 — 반복으로 인가 상태 행을 쌓지 못하게(2026-10-18 검토).
-      if (this.throttle.retryAfterSeconds(ip, Date.now()) > 0) return sendJson(res, 429, { error: "too many attempts" });
+      if ((await this.throttle.retryAfterSeconds(ip, Date.now())) > 0) return sendJson(res, 429, { error: "too many attempts" });
       const started = await flow.start(providerId);
       if (started === "busy") return sendJson(res, 503, { error: "busy, retry shortly" }, { "Retry-After": "5" });
       if (!started) {
-        this.throttle.recordFailure(ip, Date.now());
+        await this.throttle.recordFailure(ip, Date.now());
         return sendJson(res, 404, { error: "unknown provider" });
       }
       audit.detail.oidcProvider = providerId;
@@ -394,11 +394,12 @@ export class SelfServiceServer {
       const now = Date.now();
       const fail = (reason: string): void => {
         audit.detail.oidcFailure = reason;
-        this.throttle.recordFailure(ip, now);
+        // 응답을 기다리게 하지 않는다 — recordFailure는 저장소 실패를 안에서 삼키므로 거부되지 않는다.
+        void this.throttle.recordFailure(ip, now);
         res.writeHead(302, { Location: "/account?sso=failed", "Set-Cookie": flow.clearStateCookie(), "Cache-Control": "no-store" });
         res.end();
       };
-      if (this.throttle.retryAfterSeconds(ip, now) > 0) return fail("throttled");
+      if ((await this.throttle.retryAfterSeconds(ip, now)) > 0) return fail("throttled");
       let result;
       try {
         result = await flow.callback(req, new URL(req.url ?? "/", "http://localhost"));
@@ -433,14 +434,14 @@ export class SelfServiceServer {
     const body = asRecord(await readBody(req));
     const subject = { ip, account: s.account.email };
     const now = Date.now();
-    if (this.throttle.retryAfterSeconds(subject, now) > 0) throw new HttpError(429, "too many failed auth attempts");
+    if ((await this.throttle.retryAfterSeconds(subject, now)) > 0) throw new HttpError(429, "too many failed auth attempts");
     const id = s.account.accountId;
     if (path === "/account/session/mfa/enroll") {
       if (await mfaEnrolled(this.deps.db, ACCOUNT_REALM, id)) throw new HttpError(409, "mfa already enrolled");
       const enrollCode = typeof body.enrollCode === "string" ? body.enrollCode : "";
       const secret = await beginTotpEnrollment(this.deps.db, ACCOUNT_REALM, id, enrollCode, this.deps.masterKey, now);
       if (!secret) {
-        this.throttle.recordFailure(subject, now);
+        await this.throttle.recordFailure(subject, now);
         throw new HttpError(401, "invalid or expired enrollment code", "invalid_enroll_code");
       }
       return sendJson(res, 200, { secret, uri: totpUri(secret, this.deps.totpIssuer ?? "ionosphere", s.account.email) }, { "Cache-Control": "no-store" });
@@ -450,10 +451,10 @@ export class SelfServiceServer {
       const recoveryCodes = path === "/account/session/mfa/confirm" ? await confirmTotpEnrollment(this.deps.db, ACCOUNT_REALM, id, code, this.deps.masterKey, now) : null;
       const ok = recoveryCodes !== null || (path === "/account/session/mfa/verify" && (await verifySecondFactorTotp(this.deps.db, ACCOUNT_REALM, id, code, this.deps.masterKey, now)));
       if (!ok) {
-        this.throttle.recordFailure(subject, now);
+        await this.throttle.recordFailure(subject, now);
         throw new HttpError(401, "invalid code", "invalid_code");
       }
-      this.throttle.clear(subject);
+      await this.throttle.clear(subject);
       await markWebSessionMfa(this.deps.db, ACCOUNT_REALM, s.sessionId, now);
       return sendJson(res, 200, { ok: true, mfaAt: now, ...(recoveryCodes ? { recoveryCodes } : {}) }, { "Cache-Control": "no-store" });
     }

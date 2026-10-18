@@ -114,7 +114,7 @@ describe("IMAP SCRAM — 대입 스로틀", () => {
   test("★틀린 증명이 스로틀에 세어진다 — 예전에는 무제한이었다", async () => {
     const keys = (await deriveScramKeys(PASS, { iterations: 4096 })) as ScramStoredKeys;
     // 한도를 3으로 낮춰 테스트를 빠르게 — 기본 10을 쓰면 같은 것을 열 번 확인한다.
-    const throttle = new AuthFailureThrottle({ limit: 3, windowMs: 60_000 });
+    const throttle = new AuthFailureThrottle({ freeFailures: 3, baseDelayMs: 60_000 });
     const server = new ImapServer({
       hostname: "imap.test",
       backend: backendWith(keys),
@@ -132,12 +132,12 @@ describe("IMAP SCRAM — 대입 스로틀", () => {
      * ★네 번째는 **차단**이어야 한다. 여기가 결함의 핵심이었다 — 실패가 세어지지 않으면
      * 이 값이 영원히 false이고, 공격자는 초당 수십 번 SCRAM 교환을 돌릴 수 있다.
      */
-    expect(throttle.blocked("127.0.0.1")).toBe(true);
+    expect(await throttle.blocked("127.0.0.1")).toBe(true);
   });
 
   test("성공 경로를 막지 않는다 — 스로틀 발동 전에는 교환이 정상 진행된다", async () => {
     const keys = (await deriveScramKeys(PASS, { iterations: 4096 })) as ScramStoredKeys;
-    const throttle = new AuthFailureThrottle({ limit: 3, windowMs: 60_000 });
+    const throttle = new AuthFailureThrottle({ freeFailures: 3, baseDelayMs: 60_000 });
     const server = new ImapServer({
       hostname: "imap.test",
       backend: backendWith(keys),
@@ -149,14 +149,14 @@ describe("IMAP SCRAM — 대입 스로틀", () => {
 
     // 한 번 틀려도 아직 차단은 아니다 — 오타 한 번에 잠기면 안 된다.
     await oneBadAttempt(port, "nonce-single");
-    expect(throttle.blocked("127.0.0.1")).toBe(false);
+    expect(await throttle.blocked("127.0.0.1")).toBe(false);
   });
 
   test("★없는 계정에 대한 대입도 세어진다 — 열거 방어가 스로틀 우회로 쓰이면 안 된다", async () => {
     // 없는 계정은 가짜 salt로 교환이 끝까지 진행된다(열거 방어). 그 갈래가 무기록·무계수면
     // 공격자는 존재하지 않는 사용자명으로 한도를 소진 없이 서버를 계속 두드릴 수 있다.
     const keys = (await deriveScramKeys(PASS, { iterations: 4096 })) as ScramStoredKeys;
-    const throttle = new AuthFailureThrottle({ limit: 2, windowMs: 60_000 });
+    const throttle = new AuthFailureThrottle({ freeFailures: 2, baseDelayMs: 60_000 });
     const server = new ImapServer({
       hostname: "imap.test",
       backend: backendWith(keys),
@@ -181,6 +181,6 @@ describe("IMAP SCRAM — 대입 스로틀", () => {
       await c.read((l) => l.startsWith("a1 "));
     }
 
-    expect(throttle.blocked("127.0.0.1")).toBe(true);
+    expect(await throttle.blocked("127.0.0.1")).toBe(true);
   });
 });

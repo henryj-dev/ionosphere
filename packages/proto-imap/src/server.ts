@@ -564,10 +564,10 @@ export class ImapServer {
             if (ok) {
               accountId = ok.accountId;
               meter.authenticated(ok.accountId);
-              this.authThrottle.clear(ip);
+              await this.authThrottle.clear(ip);
             } else {
               meter.authFailed();
-              this.authThrottle.recordFailure(ip);
+              await this.authThrottle.recordFailure(ip);
             }
             this.audit.record({
               ts: Date.now(),
@@ -594,7 +594,7 @@ export class ImapServer {
             const ip = normalizeIp(socket.remoteAddress);
             meter.attempted(action.user);
             meter.authFailed();
-            this.authThrottle.recordFailure(ip);
+            await this.authThrottle.recordFailure(ip);
             this.audit.record({
               ts: Date.now(),
               surface: AUDIT_SURFACE.imap,
@@ -610,7 +610,7 @@ export class ImapServer {
             const ip = normalizeIp(socket.remoteAddress);
             meter.attempted(action.user);
             // 차단 중이면 백엔드를 부르지 않는다 — 실패마다 scrypt가 도는 걸 막는 게 요점.
-            if (this.authThrottle.blocked(ip)) {
+            if (await this.authThrottle.blocked(ip)) {
               /**
                * ★차단도 **기록한다**. 예전에는 이 갈래가 백엔드를 부르지 않고 조기 반환해서
                * 로그가 한 줄도 남지 않았다 — 공격 활동이 가장 잘 드러나는 갈래가 무기록이었다.
@@ -642,10 +642,10 @@ export class ImapServer {
                 if (!socket.destroyed) socket.end();
               });
               meter.authenticated(result.accountId);
-              this.authThrottle.clear(ip);
+              await this.authThrottle.clear(ip);
             } else {
               meter.authFailed();
-              this.authThrottle.recordFailure(ip);
+              await this.authThrottle.recordFailure(ip);
             }
             this.audit.record({
               ts: Date.now(),

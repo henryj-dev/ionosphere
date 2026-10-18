@@ -53,6 +53,11 @@ export { hardenHttpListener, type HardenableHttpServer } from "./http-listener.t
 export { buildReceivedHeader, headerSafeToken, rfc5322Date, type ReceivedInfo, type ReceivedTransport } from "./received.ts";
 export {
   AuthFailureThrottle,
+  AUTH_THROTTLE_BASE_DELAY_MS,
+  AUTH_THROTTLE_FREE_FAILURES,
+  AUTH_THROTTLE_MAX_DELAY_MS,
+  AUTH_THROTTLE_RESET_AFTER_MS,
+  blockedUntil,
   clientIpOf,
   normalizeIp,
   throttleKeyOf,
@@ -60,6 +65,9 @@ export {
   type AuthSubject,
   type AuthThrottleOptions,
   type AuthThrottleSubject,
+  type SharedThrottleStore,
+  type ThrottleCounter,
+  type ThrottlePolicy,
   type PeerTrustPolicy,
 } from "./auth-throttle.ts";
 export {

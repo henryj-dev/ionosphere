@@ -206,7 +206,7 @@ describe("셀프서비스", () => {
   test("★스로틀은 메일 프로토콜과 같은 계정 키를 쓴다 — IMAP 대입이 웹 대입 한도를 함께 쓴다", async () => {
     const throttle = new AuthFailureThrottle();
     const f = await setup({ authThrottle: throttle });
-    for (let i = 0; i < 30; i++) throttle.recordFailure({ account: EMAIL });
+    for (let i = 0; i < 30; i++) await throttle.recordFailure({ account: EMAIL });
     expect((await login(f)).status).toBe(429);
   });
 

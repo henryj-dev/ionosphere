@@ -328,7 +328,7 @@ export class JmapServer {
           ...extra,
         });
       };
-      const retryAfter = this.authThrottle.retryAfterSeconds(ip);
+      const retryAfter = await this.authThrottle.retryAfterSeconds(ip);
       if (retryAfter > 0) {
         // 차단도 기록한다(소켓 프로토콜 넷과 같은 이유) — 공격 활동이 가장 잘 드러나는 갈래다.
         auditRequest(AUDIT_OUTCOME.throttled);
@@ -341,7 +341,7 @@ export class JmapServer {
         // **자격증명을 제시한 실패만** 센다. Authorization 헤더가 없는 요청은 공격이 아니라
         // 401을 받고 자격증명을 붙이는 표준 브라우저 흐름이고, NAT/CGNAT 뒤에서는 평범한
         // 요청 몇 개만으로 그 출구 IP 전체가 연쇄 차단됐다.
-        if (auth.presented) this.authThrottle.recordFailure({ ip, ...(auth.user !== undefined ? { account: auth.user } : {}) });
+        if (auth.presented) await this.authThrottle.recordFailure({ ip, ...(auth.user !== undefined ? { account: auth.user } : {}) });
         /**
          * `presented`를 detail에 남긴다 — 자격증명 **미제시**(401을 받고 붙이는 표준 브라우저
          * 흐름)와 **오류**를 감사 로그에서도 가를 수 있어야 한다. 스로틀이 이 둘을 구분하는
@@ -355,7 +355,7 @@ export class JmapServer {
         res.end(JSON.stringify({ type: "about:blank", status: 401, detail: "authentication required" }));
         return;
       }
-      this.authThrottle.clear({ ip, account: auth.email });
+      await this.authThrottle.clear({ ip, account: auth.email });
       // 인증된 요청 한 줄. **캐시 히트도 여기로 들어온다**(그게 이 자리에 훅을 건 이유다).
       auditRequest(AUDIT_OUTCOME.ok, {
         user: auth.email,

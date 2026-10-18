@@ -375,7 +375,7 @@ export class SmtpServer {
       const ip = normalizeIp(rawSocket.remoteAddress);
       // 차단 중이면 **백엔드를 아예 부르지 않는다**. 실패마다 scrypt가 도는 게 브루트포스를
       // 곧 CPU 소모 공격으로 만들던 자리라, 값을 검사하기 전에 끊는 것이 요점이다.
-      if (this.authThrottle.blocked(ip)) {
+      if (await this.authThrottle.blocked(ip)) {
         // 차단도 기록한다(다른 세 표면과 같은 이유) — 공격 활동이 가장 잘 드러나는 갈래다.
         this.audit.record({ ts: Date.now(), surface: this.auditSurface, action: "auth", outcome: AUDIT_OUTCOME.throttled, ip, user });
         applyActions(engine.authResult(false));
@@ -387,8 +387,8 @@ export class SmtpServer {
       } catch {
         result = { ok: false };
       }
-      if (result.ok) this.authThrottle.clear(ip);
-      else this.authThrottle.recordFailure(ip);
+      if (result.ok) await this.authThrottle.clear(ip);
+      else await this.authThrottle.recordFailure(ip);
       // 토큰 만료에 연결을 닫는다(E4) — 제출 세션이 만료된 토큰으로 계속 메일을 보내지 못하게.
       if (result.ok) {
         armAuthExpiry(rawSocket, result.expiresAt, () => {
@@ -469,7 +469,8 @@ export class SmtpServer {
      */
     const recordEngineAuthFailure = (user: string | undefined, mechanism: string): void => {
       const ip = normalizeIp(rawSocket.remoteAddress);
-      this.authThrottle.recordFailure(ip);
+      // 응답을 기다리게 하지 않는다 — recordFailure는 저장소 실패를 안에서 삼키므로 거부되지 않는다.
+      void this.authThrottle.recordFailure(ip);
       this.audit.record({
         ts: Date.now(),
         surface: this.auditSurface,

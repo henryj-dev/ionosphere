@@ -103,8 +103,8 @@ describe("JMAP — 자격증명 없는 요청은 실패로 세지 않는다 (M-5
 
 describe("리스너들이 스로틀 인스턴스를 공유한다 (M-4)", () => {
   test("JMAP에서 소진한 한도가 관리 API에도 그대로 적용된다", async () => {
-    // 기본 한도는 IP당 10회. 자격증명을 **제시한** 실패라 이번엔 센다.
-    for (let i = 0; i < 10; i++) {
+    // 기본은 무료 실패 5회(공통 수치). 자격증명을 **제시한** 실패라 이번엔 센다.
+    for (let i = 0; i < 5; i++) {
       const res = await fetch(`${jmapBase}/jmap/session`, { headers: { authorization: basic("wrong") } });
       expect(res.status).toBe(401);
     }
@@ -117,7 +117,7 @@ describe("리스너들이 스로틀 인스턴스를 공유한다 (M-4)", () => {
     expect(admin.headers.get("retry-after")).toBeTruthy();
 
     // 뒷 테스트에 영향이 없도록 정리(성공 인증이 하는 일과 같다).
-    app.authThrottle.clear({ ip: "127.0.0.1" });
+    await app.authThrottle.clear({ ip: "127.0.0.1" });
   });
 
   /**
@@ -130,10 +130,10 @@ describe("리스너들이 스로틀 인스턴스를 공유한다 (M-4)", () => {
    * 있으면 그 절반이 다시 갈라져도 통과한다.
    */
   test("submission(587)에서 소진한 IP 한도가 JMAP에도 적용된다", async () => {
-    app.authThrottle.clear({ ip: "127.0.0.1" });
+    await app.authThrottle.clear({ ip: "127.0.0.1" });
 
     // 587에서 IP 축을 소진시킨다(자격증명을 제시한 실패라 카운트된다).
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 5; i++) {
       expect(await smtpAuth(app.submissionPort, USER, "wrong-password")).toStartWith("535");
     }
 
@@ -141,18 +141,18 @@ describe("리스너들이 스로틀 인스턴스를 공유한다 (M-4)", () => {
     const res = await fetch(`${jmapBase}/jmap/session`, { headers: { authorization: basic("wrong") } });
     expect(res.status).toBe(429);
 
-    app.authThrottle.clear({ ip: "127.0.0.1" });
+    await app.authThrottle.clear({ ip: "127.0.0.1" });
   });
 });
 
 describe("submission(587) 계정 축 (M-6)", () => {
   test("계정 축이 소진되면 비밀번호가 맞아도 인증이 실패한다(scrypt를 돌리기 전에 막는다)", async () => {
     // 서로 다른 20개 IP에서 같은 계정을 두드린 상황 — IP 축은 어디에도 걸리지 않는다.
-    for (let i = 0; i < 20; i++) app.authThrottle.recordFailure({ ip: `2001:db8:${i}::1`, account: USER });
+    for (let i = 0; i < 20; i++) await app.authThrottle.recordFailure({ ip: `2001:db8:${i}::1`, account: USER });
 
     expect(await smtpAuth(app.submissionPort, USER, PASS)).toStartWith("535");
 
-    app.authThrottle.clear({ account: USER });
+    await app.authThrottle.clear({ account: USER });
     expect(await smtpAuth(app.submissionPort, USER, PASS)).toStartWith("235");
   });
 });
