@@ -126,8 +126,15 @@ const DISCOVERY_TTL_MS = 60 * 60 * 1000;
  * IdP로 요청이 나가 DoS 증폭기가 된다(2026-10-18 검토). 간격 안의 낯선 kid는 받지 않고 바로 거절한다.
  */
 const JWKS_FORCED_REFRESH_MIN_MS = 60 * 1000;
-/** access token 수명 상한(exp − iat). 철회 수단이 exp뿐이라 너무 긴 토큰은 받지 않는다. ⚠ 임시값. */
-export const PROVISIONAL_MAX_ACCESS_TOKEN_LIFETIME_SEC = 60 * 60;
+/**
+ * access token 수명 상한 — **5분**(2026-10-18 사용자 결정, orc 경유: "수명 상한을 낮추고 예외로 수용").
+ *
+ * introspection이 없어 철회 수단이 exp뿐이다. 그래서 상한이 곧 "수명 안의 철회가 반영되지 않는 최대 시간"이고, 그 지연만
+ * ionosphere E4 전용 제품 예외로 수용됐다(공통 정책의 "다음 보호 요청부터 반영"과 다른 서비스에는 적용하지 않는다).
+ * lodestar access TTL 기본값과 같다. 설정은 이보다 **짧게만** 바꿀 수 있다(oidc-config.ts가 기동 전에 막는다).
+ * introspection 같은 공급자 보강이 생기면 다시 검토한다.
+ */
+export const MAX_ACCESS_TOKEN_LIFETIME_SEC = 5 * 60;
 
 export class OidcClient {
   readonly provider: OidcProviderConfig;
@@ -208,14 +215,17 @@ export class OidcClient {
       }
       if (typ !== "at+jwt" && typ !== "application/at+jwt") throw new OidcError("access_token_bad_typ");
     }
-    const maxLifetime = (req.maxLifetimeSec ?? PROVISIONAL_MAX_ACCESS_TOKEN_LIFETIME_SEC) * 1000;
+    // 설정값이 상한보다 길어도 상한을 넘지 않는다(이중 방어 — 설정 검사가 먼저 막는다).
+    const maxLifetime = Math.min(req.maxLifetimeSec ?? MAX_ACCESS_TOKEN_LIFETIME_SEC, MAX_ACCESS_TOKEN_LIFETIME_SEC) * 1000;
     const check = (claims: JwtClaims): void => {
       if (!scopesOf(claims).includes(req.requiredScope)) throw new OidcError("access_token_missing_scope");
       const exp = Number(claims.exp) * 1000;
       // 메일 경로에서는 exp에 시계 오차를 주지 않는다 — 막 만료된 토큰이 AUTH를 통과한 직후 바로 끊기는 혼란을 없앤다.
       if (exp <= nowMs) throw new OidcError("access_token_expired");
       const iat = typeof claims.iat === "number" ? claims.iat * 1000 : nowMs;
-      if (exp - iat > maxLifetime) throw new OidcError("access_token_lifetime_too_long");
+      // ★두 가지를 다 본다: 발급 수명(exp − iat)과 남은 수명(exp − 지금). iat를 과거로 꾸며도, 비워도 상한을 넘지 못한다.
+      // 시계 오차는 주지 않는다 — 상한은 "철회가 늦을 수 있는 최대 시간"이라 넘으면 바로 그 약속이 깨진다.
+      if (exp - iat > maxLifetime || exp - nowMs > maxLifetime) throw new OidcError("access_token_lifetime_too_long");
     };
     try {
       const r = verifyJwt(token, await this.keys(false), claimReq);

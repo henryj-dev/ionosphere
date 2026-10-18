@@ -247,11 +247,21 @@ describe("보안 검토 반영(2026-10-18)", () => {
     await f.db.close();
   });
 
-  test("수명이 상한(임시 1시간)을 넘는 토큰은 거절한다", async () => {
+  test("★수명 상한 5분(사용자 결정): 넘으면 거절, iat를 비우거나 과거로 꾸며도 통하지 않는다", async () => {
     const f = await fixture();
     const now = Math.floor(Date.now() / 1000);
-    expect(await f.v.authenticate("alice@acme.test", token(mailClaims("sub-alice", { iat: now, exp: now + 7200 })), "imap")).toBeNull();
+    expect((await f.v.authenticate("alice@acme.test", token(mailClaims("sub-alice", { iat: now, exp: now + 299 })), "imap"))?.accountId).toBe(f.accountId);
+    expect(await f.v.authenticate("alice@acme.test", token(mailClaims("sub-alice", { iat: now, exp: now + 301 })), "imap")).toBeNull();
+    expect(await f.v.authenticate("alice@acme.test", token(mailClaims("sub-alice", { iat: undefined, exp: now + 600 })), "imap")).toBeNull();
+    // 발급은 오래전으로 꾸미고 수명은 짧아 보이게 해도, 남은 수명(exp − 지금)이 상한을 넘으면 거절한다.
+    expect(await f.v.authenticate("alice@acme.test", token(mailClaims("sub-alice", { iat: now + 500, exp: now + 600 })), "imap")).toBeNull();
     await f.db.close();
+  });
+
+  test("설정으로 수명 상한을 5분보다 길게 바꿀 수 없다", () => {
+    const base = { id: "corp", realm: "account", tenantId: "t", issuer, clientId: "web-client", clientSecret: "x" };
+    expect(() => oidcProvidersFromJson(JSON.stringify([{ ...base, mailAccessToken: { audience: "m", requiredScope: "mail", maxLifetimeSec: 3600 } }]))).toThrow(/300초 이하/);
+    expect(oidcProvidersFromJson(JSON.stringify([{ ...base, mailAccessToken: { audience: "m", requiredScope: "mail", maxLifetimeSec: 120 } }]))[0]!.mailAccessToken?.maxLifetimeSec).toBe(120);
   });
 
   test("★위조 kid를 여러 번 보내도 JWKS 강제 재요청은 간격당 한 번뿐이다", async () => {

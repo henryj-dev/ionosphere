@@ -8,7 +8,7 @@
  *
  * 오류 메시지에 clientSecret을 싣지 않는다.
  */
-import { OidcClient, type MfaEvidenceContract, type OidcProviderConfig } from "@ionosphere/core";
+import { MAX_ACCESS_TOKEN_LIFETIME_SEC, OidcClient, type MfaEvidenceContract, type OidcProviderConfig } from "@ionosphere/core";
 import { AUTH_SURFACES, type AuthSurface } from "@ionosphere/store";
 
 /**
@@ -24,7 +24,7 @@ export interface MailAccessTokenConfig {
   surfaces?: readonly AuthSurface[];
   /** 헤더 typ=at+jwt(RFC 9068)를 요구한다. 기본 true — 지키지 않는 IdP만 false로 끈다(ID 토큰 차단의 근거가 aud 하나로 줄어든다). */
   requireAtJwtTyp?: boolean;
-  /** access token 수명 상한(초). 기본은 임시 1시간. */
+  /** access token 수명 상한(초). 기본·최대 300(5분, 사용자 결정) — 더 **짧게만** 바꿀 수 있다. */
   maxLifetimeSec?: number;
 }
 
@@ -103,6 +103,10 @@ export function oidcProvidersFromJson(raw: string | undefined): ParsedOidcProvid
       if (m.requireAtJwtTyp !== undefined && typeof m.requireAtJwtTyp !== "boolean") throw new Error(`IONOSPHERE_OIDC_PROVIDERS[${i}].mailAccessToken.requireAtJwtTyp는 boolean`);
       if (m.maxLifetimeSec !== undefined && (typeof m.maxLifetimeSec !== "number" || !Number.isInteger(m.maxLifetimeSec) || m.maxLifetimeSec <= 0)) {
         throw new Error(`IONOSPHERE_OIDC_PROVIDERS[${i}].mailAccessToken.maxLifetimeSec는 양의 정수`);
+      }
+      // 상한(5분)보다 길게는 못 바꾼다 — 그 상한이 수용된 철회 지연의 최대치다(사용자 결정, 2026-10-18).
+      if (typeof m.maxLifetimeSec === "number" && m.maxLifetimeSec > MAX_ACCESS_TOKEN_LIFETIME_SEC) {
+        throw new Error(`IONOSPHERE_OIDC_PROVIDERS[${i}].mailAccessToken.maxLifetimeSec는 ${MAX_ACCESS_TOKEN_LIFETIME_SEC}초 이하(수용된 철회 지연 상한)`);
       }
       mailAccessToken = {
         audience,
