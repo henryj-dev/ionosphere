@@ -217,6 +217,35 @@ export type AccountStatusName = keyof typeof ACCOUNT_STATUS;
 export type AccountStatus = (typeof ACCOUNT_STATUS)[AccountStatusName];
 
 /**
+ * `admin_users.role` — 관리 콘솔 사람 주체의 역할 (마이그레이션 025).
+ *
+ * api_keys의 scopes(admin ⊇ write ⊇ read)와 **같은 축**이다. 사람과 서비스 토큰이 같은 명령 계층을
+ * 부르므로 권한 판단도 하나여야 한다 — 축이 둘이면 한쪽만 고친 권한이 조용히 갈라진다.
+ * `owner`만 다른 관리자를 만들고 역할을 바꿀 수 있다(관리자 관리는 테넌트 관리보다 한 단계 위다).
+ */
+export const ADMIN_ROLE = {
+  /** 관리자 관리 + admin의 전부. */
+  owner: 0,
+  /** 쓰기 명령 전부(api_keys `admin`/`write`에 해당). */
+  admin: 1,
+  /** 조회 명령만(api_keys `read`). */
+  readonly: 2,
+} as const;
+export type AdminRoleName = keyof typeof ADMIN_ROLE;
+export type AdminRole = (typeof ADMIN_ROLE)[AdminRoleName];
+export function isAdminRole(v: number): v is AdminRole {
+  return v === ADMIN_ROLE.owner || v === ADMIN_ROLE.admin || v === ADMIN_ROLE.readonly;
+}
+
+/** `admin_users.status`. 정지는 다음 보호 요청부터 반영된다(세션 해석이 매번 본다). */
+export const ADMIN_STATUS = {
+  suspended: 0,
+  active: 1,
+} as const;
+export type AdminStatusName = keyof typeof ADMIN_STATUS;
+export type AdminStatus = (typeof ADMIN_STATUS)[AdminStatusName];
+
+/**
  * `domains.status` — 도메인 검증 상태 (SCHEMA.md §4).
  *
  * 콘솔이 `0`/`1`만 알고 `2`를 몰라 비활성 도메인이 생 숫자로 보였다(위 `ACCOUNT_STATUS`와 같은

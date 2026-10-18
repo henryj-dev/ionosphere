@@ -135,3 +135,23 @@ export {
   type PushSubscriptionInput,
   type PushSubscriptionRow,
 } from "./push-store.ts";
+// 관리 콘솔 사람 주체(마이그레이션 025, 회원 정책 E1) — 메일 계정 인증과 분리된 정본.
+export {
+  beginAdminTotpEnrollment,
+  confirmAdminTotpEnrollment,
+  createAdminSession,
+  createAdminUser,
+  getAdminUser,
+  markAdminSessionMfa,
+  resetAdminTotpAndRevokeSessions,
+  resolveAdminSession,
+  revokeAdminSession,
+  revokeAdminSessions,
+  setAdminPasswordAndRevokeSessions,
+  verifyAdminPassword,
+  verifyAdminTotp,
+  PROVISIONAL_ADMIN_SESSION_POLICY,
+  type AdminSessionPolicy,
+  type AdminUser,
+  type ResolvedAdminSession,
+} from "./admin-auth.ts";
