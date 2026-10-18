@@ -57,6 +57,8 @@ export const ROUTES: readonly RouteSpec[] = [
   // 정지·재활성 — 새 라우트. POST를 쓰는 이유는 상태 전이라서다(멱등이지만 리소스 생성이 아니다).
   { method: "POST", pattern: /^\/v1\/accounts\/([^/]+)\/suspend$/, params: ["account"], command: "account-suspend", shape: dataOnly },
   { method: "POST", pattern: /^\/v1\/accounts\/([^/]+)\/activate$/, params: ["account"], command: "account-activate", shape: dataOnly },
+  // 기본 비밀번호 교체 — 정지·재활성과 같이 POST(상태 전이, 리소스 생성 아님).
+  { method: "POST", pattern: /^\/v1\/accounts\/([^/]+)\/password$/, params: ["account"], command: "account-password-set", shape: dataOnly },
   // 앱 비밀번호 — 발급 응답의 평문은 `password` 키로 유지(기존 계약).
   {
     method: "POST",

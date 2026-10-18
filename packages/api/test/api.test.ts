@@ -727,6 +727,50 @@ describe("AdminApiServer", () => {
     expect(await afterRes.json()).toEqual([]);
   });
 
+  test("비밀번호 변경 — 옛 비밀번호 무효, 앱 비밀번호 유지, 남의 테넌트는 404", async () => {
+    const f = await setup();
+    const { apiKey } = await bootstrapTenant(f);
+    const { apiKey: otherKey } = await bootstrapTenant(f);
+    const accountId = await createAccount(f, apiKey, "pw@acme.test", "old-pw");
+    const app = (await (
+      await fetch(`${f.baseUrl}/v1/accounts/${accountId}/app-passwords`, {
+        method: "POST",
+        headers: { ...authHeader(apiKey), "content-type": "application/json" },
+        body: JSON.stringify({ label: "phone" }),
+      })
+    ).json()) as { password: string };
+
+    // 남의 테넌트 키로는 계정이 보이지 않아야 한다(존재 자체를 흘리지 않는다).
+    const foreign = await fetch(`${f.baseUrl}/v1/accounts/${accountId}/password`, {
+      method: "POST",
+      headers: { ...authHeader(otherKey), "content-type": "application/json" },
+      body: JSON.stringify({ password: "hijack" }),
+    });
+    expect(foreign.status).toBe(404);
+
+    const res = await fetch(`${f.baseUrl}/v1/accounts/${accountId}/password`, {
+      method: "POST",
+      headers: { ...authHeader(apiKey), "content-type": "application/json" },
+      body: JSON.stringify({ password: "new-pw" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ accountId });
+
+    expect(await authenticate(f.db, "pw@acme.test", "old-pw", "imap")).toBeNull();
+    expect(await authenticate(f.db, "pw@acme.test", "hijack", "imap")).toBeNull();
+    expect((await authenticate(f.db, "pw@acme.test", "new-pw", "imap"))?.accountId).toBe(accountId);
+    expect((await authenticate(f.db, "pw@acme.test", app.password, "imap"))?.accountId).toBe(accountId);
+
+    // 빈 비밀번호는 저장하지 않는다.
+    const empty = await fetch(`${f.baseUrl}/v1/accounts/${accountId}/password`, {
+      method: "POST",
+      headers: { ...authHeader(apiKey), "content-type": "application/json" },
+      body: JSON.stringify({ password: "" }),
+    });
+    expect(empty.status).toBe(400);
+    expect((await authenticate(f.db, "pw@acme.test", "new-pw", "imap"))?.accountId).toBe(accountId);
+  });
+
   test("앱 비밀번호 — 테넌트 격리: 남의 계정에 발급/조회/폐기 불가(404)", async () => {
     const f = await setup();
     const { apiKey: keyA } = await bootstrapTenant(f);
