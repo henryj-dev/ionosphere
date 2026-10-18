@@ -383,7 +383,7 @@ export const domainCommands: readonly Command[] = [
   },
   {
     spec: {
-      name: "alias-add",
+      name: "alias-add", sensitive: true,
       group: "알리아스",
       label: "알리아스 추가",
       summary: "주소를 로컬 계정(여럿 가능) 또는 외부 주소로 라우팅한다. localpart '*'는 캐치올.",

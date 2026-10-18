@@ -36,6 +36,18 @@ export {
   type SaslOAuthCreds,
 } from "./sasl.ts";
 export { open, openAsync, seal } from "./secretbox.ts";
+export {
+  base32Decode,
+  base32Encode,
+  generateTotpSecret,
+  hotp,
+  totpStep,
+  totpUri,
+  verifyTotp,
+  TOTP_DIGITS,
+  TOTP_PERIOD_SECONDS,
+  TOTP_SKEW_STEPS,
+} from "./totp.ts";
 export { trackListener, type ListenerShutdown } from "./listener-shutdown.ts";
 export { hardenHttpListener, type HardenableHttpServer } from "./http-listener.ts";
 export { buildReceivedHeader, headerSafeToken, rfc5322Date, type ReceivedInfo, type ReceivedTransport } from "./received.ts";

@@ -533,6 +533,7 @@ const app = new IonosphereApp({
   // 관리 API — 포트 지정 시에만 리슨
   ...namedPort("adminPort", process.env.IONOSPHERE_ADMIN_PORT),
   ...(process.env.IONOSPHERE_ADMIN_TOKEN ? { adminRootToken: process.env.IONOSPHERE_ADMIN_TOKEN } : {}),
+  ...(process.env.IONOSPHERE_ADMIN_ORIGIN ? { adminOrigin: process.env.IONOSPHERE_ADMIN_ORIGIN } : {}),
   /**
    * 관리 콘솔을 얹을 Host 접두사(예: `admin.`). **미지정 시 관리 콘솔에 원격으로 닿을 수 없다**
    * — 평문 `IONOSPHERE_ADMIN_PORT`는 항상 루프백에만 붙는다. (예전의 8443은 걷어냈다.)

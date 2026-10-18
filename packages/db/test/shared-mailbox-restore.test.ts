@@ -25,7 +25,8 @@ describe("shared mailbox migration restore", () => {
       await copyFile(sourcePath, backupPath);
       await copyFile(backupPath, restoredPath);
       const restored = await openSqlite(restoredPath);
-      expect(await migrate(restored, allMigrations)).toBe(2);
+      // 이 테스트의 범위는 020~024다 — 뒤에 마이그레이션이 늘어도 세는 대상이 바뀌지 않게 범위를 고정한다.
+      expect(await migrate(restored, allMigrations.filter((migration) => migration.version <= 24))).toBe(2);
       const acl = await restored.query({ sql: "SELECT rights FROM mailbox_acl WHERE mailbox_id = ?", params: ["mailbox-restore"] });
       const account = await restored.query({ sql: "SELECT permissions_version FROM accounts WHERE id = ?", params: ["account-restore"] });
       const header = await restored.query({ sql: "SELECT display_value FROM message_header_projection WHERE message_id = ?", params: ["message-restore"] });

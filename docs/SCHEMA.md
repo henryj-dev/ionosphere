@@ -313,6 +313,60 @@ CREATE TABLE directory_group_members (
 024의 두 번째 UNIQUE 인덱스는 같은 provider에서 로컬 account 하나가 둘 이상의 외부 identity에
 연결되는 TOCTOU를 DB에서 막는다. `account_id IS NULL`인 미연결 identity는 여러 행을 허용한다.
 
+### 4-3. 관리 콘솔 사람 주체·세션 (마이그레이션 025)
+
+```sql
+CREATE TABLE admin_users (
+  id                  VARCHAR(26) PRIMARY KEY,
+  tenant_id           VARCHAR(26),                  -- NULL = 운영자(전 테넌트)
+  username            VARCHAR(255) NOT NULL,        -- 소문자 정규화, 전역 유일
+  display_name        VARCHAR(255),
+  role                SMALLINT NOT NULL,            -- ADMIN_ROLE: 0 owner / 1 admin / 2 readonly
+  status              SMALLINT NOT NULL DEFAULT 1,  -- ADMIN_STATUS: 1 active / 0 suspended
+  password_hash       TEXT,                         -- scrypt. NULL = 로컬 로그인 없음(OIDC 연결 전용)
+  totp_secret         TEXT,                         -- secretbox 봉인(마스터 키 필수). NULL = MFA 미등록
+  totp_pending_secret TEXT,                         -- 등록 확정 전 대기 비밀
+  totp_last_step      BIGINT,                       -- 마지막으로 쓴 TOTP 스텝(재사용 방지)
+  totp_failures       INTEGER NOT NULL DEFAULT 0,   -- 연속 TOTP 실패 수(성공하면 0)
+  totp_locked_until   BIGINT,                       -- 이 시각까지 TOTP를 검사하지 않고 거절(지수 잠금)
+  enroll_code_hash    VARCHAR(64),                  -- 일회용 TOTP 등록 코드의 sha256(생성·초기화 때 발급)
+  enroll_code_expires_at BIGINT,                    -- 등록 코드 만료(임시 24시간)
+  created_at          BIGINT NOT NULL,
+  updated_at          BIGINT NOT NULL
+);
+CREATE UNIQUE INDEX ux_admin_users_username ON admin_users(username);
+CREATE INDEX ix_admin_users_tenant ON admin_users(tenant_id);
+
+CREATE TABLE admin_sessions (
+  id             VARCHAR(64) PRIMARY KEY,           -- sha256hex(세션 토큰). 원문은 저장하지 않는다
+  admin_user_id  VARCHAR(26) NOT NULL,
+  csrf_hash      VARCHAR(64) NOT NULL,              -- sha256hex(CSRF 토큰)
+  created_at     BIGINT NOT NULL,                   -- 절대 만료 기준
+  last_seen_at   BIGINT NOT NULL,                   -- idle 만료 기준(60초 단위로 갱신)
+  mfa_at         BIGINT,                            -- 이 세션의 마지막 MFA 통과 시각(step-up)
+  revoked_at     BIGINT
+);
+CREATE INDEX ix_admin_sessions_user ON admin_sessions(admin_user_id);
+
+CREATE TABLE admin_recovery_codes (
+  admin_user_id  VARCHAR(26) NOT NULL,
+  code_hash      VARCHAR(64) NOT NULL,              -- sha256(정규화한 코드)
+  created_at     BIGINT NOT NULL,
+  used_at        BIGINT,                            -- 쓴 시각. 지우지 않는다(감사 근거)
+  PRIMARY KEY (admin_user_id, code_hash)
+);
+```
+
+첫 TOTP 등록(새 관리자·MFA 초기화·복구 코드 사용 뒤)에는 **일회용 등록 코드**가 필요하다. 비밀번호만으로
+등록할 수 있으면, 비밀번호를 아는 사람이 본인보다 먼저 MFA를 차지한다(2026-10-18 사용자 결정으로 막음).
+복구 코드는 등록을 확정할 때 새로 발급되고 한 번만 보인다.
+
+메일 계정(`accounts`)과 분리한다(회원 정책 결정 D1). 메일 비밀번호는 클라이언트마다 저장돼 새기 쉬운
+자격증명이라 그것이 곧 관리 권한이면 안 되고, 메일 계정을 정지·삭제해도 관리자 접근이 끊기지 않아야 한다.
+세션은 서버에 둔다 — 보호 요청마다 세션 행과 관리자의 **현재** 상태·역할을 함께 읽어 로그아웃·정지·역할 하향을
+다음 요청부터 반영한다. 인증 결과를 캐시하지 않는다(JMAP 30초 캐시와 다른 계약).
+세션 수명 기본값(idle 30분·절대 12시간)은 **임시**다 — 서비스 공통 회원정책 수치가 확정되면 바꾼다.
+
 ## 5. DDL — 메일 스토어 코어
 
 ### 5-1. mailboxes
