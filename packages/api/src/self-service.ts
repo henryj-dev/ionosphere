@@ -50,6 +50,7 @@ import {
   Store,
   verifyAccountPrimaryPassword,
   verifySecondFactorTotp,
+  accountByOidcIdentity,
   type ResolvedAccountSession,
   type WebSessionPolicy,
 } from "@ionosphere/store";
@@ -57,6 +58,8 @@ import { CommandError, createRegistry, runCommand, type CommandContext, type Com
 import { ACCOUNT_SESSION_COOKIE, clearedSessionCookie, csrfMatches, originAllowed, PROVISIONAL_STEP_UP_MS, readCookie, sessionCookie } from "./admin-session.ts";
 import { asRecord, clientIp, HttpError, readBody, sendJson } from "./http-util.ts";
 import { SELF_SERVICE_UI_HTML } from "./self-service-ui.ts";
+import type { OidcLoginFlow } from "./oidc-login.ts";
+import { OidcError } from "@ionosphere/core";
 import { ADMIN_UI_SECURITY_HEADERS } from "./admin-ui.ts";
 
 export interface SelfServiceDeps {
@@ -73,6 +76,8 @@ export interface SelfServiceDeps {
   /** 셀프서비스 화면의 정확한 오리진. 없으면 Origin host를 요청 Host와 비교한다. */
   origin?: string;
   totpIssuer?: string;
+  /** 외부 OIDC 로그인(E3). 공급자는 메일 계정 영역(테넌트 고정)이다. */
+  oidc?: OidcLoginFlow;
 }
 
 /** 셀프서비스가 부를 수 있는 명령과, 그 명령이 민감 작업인가. 이 표 밖의 명령은 부를 수 없다. */
@@ -196,6 +201,8 @@ export class SelfServiceServer {
           this.loginsInFlight--;
         }
       }
+
+      if (path.startsWith("/account/session/oidc/")) return await this.oidc(req, res, method, path, ip, audit);
 
       const { token, s } = await this.session(req);
       if (method === "POST" && path === "/account/session/logout") {
@@ -351,6 +358,73 @@ export class SelfServiceServer {
       { csrfToken: session.csrfToken, email: account.email, mfaEnrolled: enrolledNow, ...(recovered ? { enrollCode: recovered.enrollCode } : {}) },
       { "Set-Cookie": sessionCookie(session.token, ACCOUNT_SESSION_COOKIE), "Cache-Control": "no-store" },
     );
+  }
+
+  /**
+   * 외부 OIDC 로그인(E3) — 연결된 메일 계정만(자동 연결·JIT 없음). IdP MFA 계약을 충족하고 로컬 TOTP가 등록된 계정이면
+   * IdP 인증 시각을 MFA 시각으로 쓴다. 아니면 MFA 시각 없이 열린다 — 목록만 보고, 민감 작업 때 로컬 TOTP를 묻는다.
+   */
+  private async oidc(
+    req: IncomingMessage,
+    res: ServerResponse,
+    method: string,
+    path: string,
+    ip: string,
+    audit: { accountId?: string; tenantId?: string; user?: string; detail: Record<string, string | number> },
+  ): Promise<void> {
+    const flow = this.deps.oidc;
+    if (method === "GET" && path === "/account/session/oidc/providers") return sendJson(res, 200, { providers: flow?.providerIds() ?? [] });
+    if (!flow) return sendJson(res, 404, { error: "oidc not configured" });
+    if (method === "GET" && path === "/account/session/oidc/start") {
+      const providerId = new URL(req.url ?? "/", "http://localhost").searchParams.get("provider") ?? "";
+      // 무인증 시작 요청도 IP 축 스로틀을 본다 — 반복으로 인가 상태 행을 쌓지 못하게(2026-10-18 검토).
+      if (this.throttle.retryAfterSeconds(ip, Date.now()) > 0) return sendJson(res, 429, { error: "too many attempts" });
+      const started = await flow.start(providerId);
+      if (started === "busy") return sendJson(res, 503, { error: "busy, retry shortly" }, { "Retry-After": "5" });
+      if (!started) {
+        this.throttle.recordFailure(ip, Date.now());
+        return sendJson(res, 404, { error: "unknown provider" });
+      }
+      audit.detail.oidcProvider = providerId;
+      res.writeHead(302, { Location: started.location, "Set-Cookie": started.setCookie, "Cache-Control": "no-store" });
+      res.end();
+      return;
+    }
+    if (method === "GET" && path === "/account/session/oidc/callback") {
+      const now = Date.now();
+      const fail = (reason: string): void => {
+        audit.detail.oidcFailure = reason;
+        this.throttle.recordFailure(ip, now);
+        res.writeHead(302, { Location: "/account?sso=failed", "Set-Cookie": flow.clearStateCookie(), "Cache-Control": "no-store" });
+        res.end();
+      };
+      if (this.throttle.retryAfterSeconds(ip, now) > 0) return fail("throttled");
+      let result;
+      try {
+        result = await flow.callback(req, new URL(req.url ?? "/", "http://localhost"));
+      } catch (err) {
+        return fail(err instanceof OidcError ? err.reason : "error");
+      }
+      audit.detail.oidcProvider = result.providerId;
+      if (result.tenantId === undefined) return fail("provider_without_tenant");
+      const accountId = await accountByOidcIdentity(this.deps.db, result.tenantId, result.providerId, result.sub);
+      if (!accountId) {
+        audit.detail.oidcUnlinkedSub = result.sub.slice(0, 255);
+        return fail("not_linked");
+      }
+      const enrolled = await mfaEnrolled(this.deps.db, ACCOUNT_REALM, accountId);
+      const previous = await resolveAccountSession(this.deps.db, readCookie(req, ACCOUNT_SESSION_COOKIE) ?? "", this.deps.sessionPolicy ?? PROVISIONAL_WEB_SESSION_POLICY, now);
+      if (previous) await revokeWebSession(this.deps.db, ACCOUNT_REALM, previous.sessionId, now);
+      const mfaAt = enrolled && result.idpMfaAt !== null ? result.idpMfaAt : null;
+      if (mfaAt !== null) audit.detail.idpMfa = 1;
+      const session = await createWebSession(this.deps.db, ACCOUNT_REALM, accountId, mfaAt, now);
+      audit.accountId = accountId;
+      audit.tenantId = result.tenantId;
+      res.writeHead(302, { Location: "/account", "Set-Cookie": [sessionCookie(session.token, ACCOUNT_SESSION_COOKIE), flow.clearStateCookie()], "Cache-Control": "no-store" });
+      res.end();
+      return;
+    }
+    return sendJson(res, 404, { error: "not found" });
   }
 
   /** MFA 등록(일회용 등록 코드 필요)·확정(복구 코드 발급)·step-up. */

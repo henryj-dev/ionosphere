@@ -15,8 +15,9 @@ import { CommandRegistry } from "./dispatch.ts";
 import type { Command } from "./types.ts";
 import { sharedMailboxCommands } from "./shared-mailbox.ts";
 import { adminUserCommands } from "./admin-users.ts";
+import { oidcCommands } from "./oidc-cmd.ts";
 
-export const ALL_COMMANDS: readonly Command[] = [...opsCommands, ...accountCommands, ...domainCommands, ...sharedMailboxCommands, ...adminUserCommands];
+export const ALL_COMMANDS: readonly Command[] = [...opsCommands, ...accountCommands, ...domainCommands, ...sharedMailboxCommands, ...adminUserCommands, ...oidcCommands];
 
 /** 기본 레지스트리. 테스트가 부분집합으로 만들 수 있게 인자를 열어 둔다. */
 export function createRegistry(commands: readonly Command[] = ALL_COMMANDS): CommandRegistry {

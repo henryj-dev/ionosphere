@@ -114,6 +114,14 @@ export const ADMIN_UI_HTML = `<!doctype html>
     <button id="signin">로그인</button>
     <span id="loginStatus" class="muted"></span>
   </div>
+  <div class="row" id="ssoButtons"></div>
+</div>
+<div class="card hidden" id="verify">
+  <p>외부 로그인(SSO)으로 들어왔습니다. 이 콘솔은 인증 앱(TOTP) 확인을 한 번 더 요구합니다.</p>
+  <div class="row">
+    <label class="field"><span>인증 앱의 6자리</span><input id="verifyCode" inputmode="numeric" autocomplete="one-time-code" size="8"></label>
+    <button id="verifyGo">확인</button>
+  </div>
 </div>
 <div class="card hidden" id="enroll">
   <p>이 관리자는 아직 TOTP를 등록하지 않았습니다. 등록해야 다른 화면을 쓸 수 있습니다.</p>
@@ -186,6 +194,24 @@ $("#signin").onclick = async () => {
   } catch (e) {
     $("#loginStatus").textContent = e.message;
   }
+};
+/** SSO 버튼 — 설정된 공급자만 그린다. 이동은 서버가 만든 인가 요청으로(화면이 URL을 조립하지 않는다). */
+async function renderSso() {
+  try {
+    const res = await api("GET", "/admin/session/oidc/providers");
+    $("#ssoButtons").innerHTML = (res.providers || []).map((p) => '<button class="ghost" data-sso="' + esc(p) + '">' + esc(p) + " 로 로그인</button>").join("");
+    $("#ssoButtons").querySelectorAll("button[data-sso]").forEach((b) => (b.onclick = () => {
+      location.href = "/admin/session/oidc/start?provider=" + encodeURIComponent(b.dataset.sso);
+    }));
+  } catch (e) { $("#ssoButtons").innerHTML = ""; }
+  if (new URLSearchParams(location.search).get("sso") === "failed") $("#loginStatus").textContent = "외부 로그인에 실패했습니다. 연결된 계정인지 관리자에게 확인하십시오.";
+}
+$("#verifyGo").onclick = async () => {
+  try {
+    await api("POST", "/admin/session/mfa/verify", { code: $("#verifyCode").value.trim() });
+    $("#verifyCode").value = "";
+    await boot();
+  } catch (e) { toast(e.message, "err"); }
 };
 $("#signout").onclick = async () => {
   try { await api("POST", "/admin/session/logout"); } catch (e) { /* 이미 끝난 세션이어도 화면은 로그인으로 */ }
@@ -570,7 +596,8 @@ function renderTabs() {
 function showPanel(which) {
   $("#login").className = "card" + (which === "login" ? "" : " hidden");
   $("#enroll").className = "card" + (which === "enroll" ? "" : " hidden");
-  $("#who").className = "card" + (which === "app" || which === "enroll" ? "" : " hidden");
+  $("#verify").className = "card" + (which === "verify" ? "" : " hidden");
+  $("#who").className = "card" + (which === "app" || which === "enroll" || which === "verify" ? "" : " hidden");
   if (which !== "app") { $("#tabs").innerHTML = ""; $("#view").innerHTML = ""; }
 }
 
@@ -581,11 +608,13 @@ async function boot() {
   } catch (e) {
     state.csrf = "";
     showPanel("login");
+    await renderSso();
     return;
   }
   state.csrf = me.csrfToken || "";
   $("#whoami").textContent = me.username + (me.tenantId ? " · 테넌트 " + me.tenantId : " · 운영자");
-  if (!me.mfaEnrolled || me.mfaAt === null) { showPanel("enroll"); return; }
+  if (!me.mfaEnrolled) { showPanel("enroll"); return; }
+  if (me.mfaAt === null) { showPanel("verify"); return; }
   showPanel("app");
   try {
     const meta = await api("GET", "/v1/commands");

@@ -37,7 +37,9 @@ import {
   burnTotpCost,
   confirmAdminTotpEnrollment,
   csrfTokenFor,
+  adminByIdentity,
   createAdminSession,
+  getAdminUser,
   markAdminSessionMfa,
   PROVISIONAL_ADMIN_SESSION_POLICY,
   resolveAdminSession,
@@ -77,6 +79,8 @@ import {
 } from "@ionosphere/admin-cmd";
 import { matchRoute } from "./routes.ts";
 import { asRecord, clientIp, HttpError, readBody, sendJson } from "./http-util.ts";
+import type { OidcLoginFlow } from "./oidc-login.ts";
+import { OidcError } from "@ionosphere/core";
 import { ADMIN_UI_HTML, ADMIN_UI_SECURITY_HEADERS } from "./admin-ui.ts";
 
 export interface AdminApiDeps {
@@ -127,6 +131,11 @@ export interface AdminApiDeps {
   adminOrigin?: string;
   /** TOTP 등록 URI의 issuer — 인증 앱에 보이는 이름. 생략하면 "ionosphere". */
   totpIssuer?: string;
+  /** 외부 OIDC 로그인(E3). 설정된 공급자가 없으면 생략 — 로그인 화면에 SSO 버튼이 없다. */
+  oidc?: OidcLoginFlow;
+  /** 연결 명령이 받을 수 있는 공급자 목록(설정의 사본 — 명령이 설정을 직접 읽지 않게). */
+  oidcAccountProviders?: readonly { id: string; tenantId: string }[];
+  oidcAdminProviders?: readonly string[];
 }
 
 /** 서버 전역 TLS 관리 인터페이스(root 전용). upload는 sealed 모드에서만 제공. */
@@ -459,6 +468,11 @@ export class AdminApiServer {
     if (!pathname.startsWith("/admin/session")) return false;
     const now = Date.now();
 
+    if (pathname.startsWith("/admin/session/oidc/")) {
+      await this.handleOidc(req, res, method, pathname, ip, auditSubject);
+      return true;
+    }
+
     if (method === "POST" && pathname === "/admin/session/login") {
       // 로그인 CSRF(남의 세션으로 로그인시키기)도 막는다 — 쿠키가 없을 때라 Origin만 본다.
       if (!originAllowed(req, this.adminOrigin)) throw new HttpError(403, "csrf check failed", "csrf");
@@ -618,6 +632,79 @@ export class AdminApiServer {
       this.lastRootWarnAt = now;
       this.log.warn("rootToken 사용 — 활성 운영자 owner가 있으므로 부트스트랩 전용 토큰을 쓰지 말 것(IONOSPHERE_ADMIN_TOKEN 제거 권장)", {});
     }
+  }
+
+  /**
+   * 외부 OIDC 로그인(E3). 연결된 관리자만 들어온다(자동 연결·JIT 없음).
+   *
+   * MFA(2026-10-18 사용자 결정 "IdP MFA 증거 계약부터"): 공급자 계약을 충족한 응답이고 **로컬 TOTP도 등록된** 관리자면
+   * IdP 인증 시각을 이 세션의 MFA 시각으로 쓴다. 아니면 MFA 시각 없이 열리고 콘솔이 로컬 TOTP를 묻는다(생략·폴백 없음).
+   * ⚠ 민감 작업의 step-up은 언제나 로컬 TOTP다 — IdP 재인증으로 step-up하는 흐름은 없다(지원 제한). 그래서 로컬 TOTP
+   * 미등록 관리자는 IdP 계약을 충족해도 콘솔을 쓸 수 없다(등록 코드로 먼저 등록).
+   */
+  private async handleOidc(
+    req: IncomingMessage,
+    res: ServerResponse,
+    method: string,
+    pathname: string,
+    ip: string,
+    auditSubject: { tenantId?: string; detail: Record<string, string | number> },
+  ): Promise<void> {
+    const flow = this.deps.oidc;
+    if (method === "GET" && pathname === "/admin/session/oidc/providers") return sendJson(res, 200, { providers: flow?.providerIds() ?? [] });
+    if (!flow) return sendJson(res, 404, { error: "oidc not configured" });
+    if (method === "GET" && pathname === "/admin/session/oidc/start") {
+      const providerId = new URL(req.url ?? "/", "http://localhost").searchParams.get("provider") ?? "";
+      // 무인증 시작 요청도 IP 축 스로틀을 본다 — 반복으로 인가 상태 행을 쌓지 못하게(2026-10-18 검토).
+      if (this.throttle.retryAfterSeconds(ip, Date.now()) > 0) return sendJson(res, 429, { error: "too many attempts" });
+      const started = await flow.start(providerId);
+      if (started === "busy") return sendJson(res, 503, { error: "busy, retry shortly" }, { "Retry-After": "5" });
+      if (!started) {
+        this.throttle.recordFailure(ip, Date.now());
+        return sendJson(res, 404, { error: "unknown provider" });
+      }
+      auditSubject.detail.oidcProvider = providerId;
+      res.writeHead(302, { Location: started.location, "Set-Cookie": started.setCookie, "Cache-Control": "no-store" });
+      res.end();
+      return;
+    }
+    if (method === "GET" && pathname === "/admin/session/oidc/callback") {
+      const now = Date.now();
+      const fail = (reason: string): void => {
+        auditSubject.detail.oidcFailure = reason;
+        this.throttle.recordFailure(ip, now);
+        res.writeHead(302, { Location: "/admin?sso=failed", "Set-Cookie": flow.clearStateCookie(), "Cache-Control": "no-store" });
+        res.end();
+      };
+      if (this.throttle.retryAfterSeconds(ip, now) > 0) return fail("throttled");
+      let result;
+      try {
+        result = await flow.callback(req, new URL(req.url ?? "/", "http://localhost"));
+      } catch (err) {
+        return fail(err instanceof OidcError ? err.reason : "error");
+      }
+      auditSubject.detail.oidcProvider = result.providerId;
+      const adminUserId = await adminByIdentity(this.deps.db, result.providerId, result.sub);
+      if (!adminUserId) {
+        // 연결하려는 운영자가 sub를 찾을 수 있게 감사에 남긴다(식별자일 뿐 비밀이 아니다).
+        auditSubject.detail.oidcUnlinkedSub = result.sub.slice(0, 255);
+        return fail("not_linked");
+      }
+      const user = await getAdminUser(this.deps.db, adminUserId);
+      if (!user) return fail("not_active");
+      this.throttle.clear(ip);
+      const previousAuth = await this.authenticateSession(readCookie(req, ADMIN_SESSION_COOKIE) ?? "");
+      if (previousAuth) await revokeAdminSession(this.deps.db, previousAuth.sessionId, now);
+      const mfaAt = user.mfaEnrolled && result.idpMfaAt !== null ? result.idpMfaAt : null;
+      if (mfaAt !== null) auditSubject.detail.idpMfa = 1;
+      const session = await createAdminSession(this.deps.db, user.id, mfaAt, now);
+      auditSubject.detail.adminUserId = user.id;
+      if (user.tenantId !== null) auditSubject.tenantId = user.tenantId;
+      res.writeHead(302, { Location: "/admin", "Set-Cookie": [sessionCookie(session.token), flow.clearStateCookie()], "Cache-Control": "no-store" });
+      res.end();
+      return;
+    }
+    return sendJson(res, 404, { error: "not found" });
   }
 
   private async mfaEnrolled(adminUserId: string): Promise<boolean> {
@@ -882,6 +969,8 @@ export class AdminApiServer {
       resolveMx: this.deps.resolveMx,
       ...(this.deps.sharedMailbox ? { sharedMailbox: this.deps.sharedMailbox } : {}),
       ...(this.deps.observer ? { observer: this.deps.observer } : {}),
+      ...(this.deps.oidcAccountProviders ? { oidcAccountProviders: this.deps.oidcAccountProviders } : {}),
+      ...(this.deps.oidcAdminProviders ? { oidcAdminProviders: this.deps.oidcAdminProviders } : {}),
       ...(this.deps.tls ? { tls: toTlsPort(this.deps.tls) } : {}),
     };
   }

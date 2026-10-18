@@ -40,6 +40,8 @@ export const sharedMailboxCommands: readonly Command[] = [
   {
     spec: { name: "directory-identity-link", group: "공유 메일함", label: "디렉터리 identity 연결", summary: "immutable external key를 같은 테넌트의 로컬 account에 연결한다.", readOnly: false, destructive: true, args: [{ name: "provider", label: "provider", type: "string", required: true }, { name: "externalKey", label: "external key", type: "string", required: true }, { name: "accountId", label: "account id", type: "string", required: true }] },
     async run(ctx, args) {
+      // OIDC 연결 행(`oidc:` 접두)은 OIDC 명령만 다룬다 — 여기서 바꾸면 그 명령의 공급자·충돌 검사를 우회한다(2026-10-18 검토).
+      if ((args.provider ?? "").startsWith("oidc:")) throw new CommandError("invalid", "oidc: 공급자는 oidc-identity-link/unlink로 다루십시오");
       const scope = tenantId(ctx);
       const identity = await ctx.db.query({ sql: "SELECT account_id, display_name FROM directory_identities WHERE tenant_id = ? AND provider = ? AND external_key = ? AND status = 1", params: [scope, args.provider, args.externalKey] });
       if (identity.rows.length !== 1) throw new CommandError("notFound", "directory identity를 찾을 수 없습니다");
@@ -70,6 +72,8 @@ export const sharedMailboxCommands: readonly Command[] = [
   {
     spec: { name: "directory-identity-unlink", group: "공유 메일함", label: "디렉터리 identity 연결 해제", summary: "directory 로그인을 끊고 provider group membership을 회수한다.", readOnly: false, destructive: true, args: [{ name: "provider", label: "provider", type: "string", required: true }, { name: "externalKey", label: "external key", type: "string", required: true }] },
     async run(ctx, args) {
+      // OIDC 연결 행(`oidc:` 접두)은 OIDC 명령만 다룬다 — 여기서 바꾸면 그 명령의 공급자·충돌 검사를 우회한다(2026-10-18 검토).
+      if ((args.provider ?? "").startsWith("oidc:")) throw new CommandError("invalid", "oidc: 공급자는 oidc-identity-link/unlink로 다루십시오");
       const scope = tenantId(ctx);
       const identity = await ctx.db.query({ sql: "SELECT account_id FROM directory_identities WHERE tenant_id = ? AND provider = ? AND external_key = ?", params: [scope, args.provider, args.externalKey] });
       const accountId = identity.rows[0]?.account_id == null ? null : String(identity.rows[0]?.account_id);

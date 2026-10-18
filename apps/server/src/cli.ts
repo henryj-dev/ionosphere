@@ -43,6 +43,7 @@ import { Store } from "@ionosphere/store";
 import { applyLegacyEnvAliases, AUDIT_OUTCOME, AUDIT_SURFACE, type AuditOutcome } from "@ionosphere/core";
 import { userInfo, hostname } from "node:os";
 import { AuditFileSink } from "./audit-sink.ts";
+import { oidcProvidersFromJson } from "./oidc-config.ts";
 // ★구 `IONOSPHERE_*` env를 새 이름으로 넘긴다 — env를 처음 읽기 전에(packages/core/src/env-legacy.ts).
 applyLegacyEnvAliases();
 
@@ -360,6 +361,14 @@ const ctx: CommandContext = {
   // CLI는 로컬 셸 접근이 전제라 전권이다 — root 전용 명령(테넌트 목록·TLS)도 쓸 수 있어야 한다.
   isRoot: true,
   masterKey: process.env.IONOSPHERE_MASTER_KEY,
+  // OIDC 연결 명령이 받을 공급자 — 서버와 같은 설정을 읽는다(같은 env가 정본).
+  ...((): Pick<CommandContext, "oidcAccountProviders" | "oidcAdminProviders"> => {
+    const providers = oidcProvidersFromJson(process.env.IONOSPHERE_OIDC_PROVIDERS);
+    return {
+      oidcAccountProviders: providers.filter((p) => p.realm === "account" && p.tenantId).map((p) => ({ id: p.config.id, tenantId: p.tenantId! })),
+      oidcAdminProviders: providers.filter((p) => p.realm === "admin").map((p) => p.config.id),
+    };
+  })(),
 };
 
 /**

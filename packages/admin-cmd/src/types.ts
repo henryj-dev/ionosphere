@@ -170,6 +170,13 @@ export interface CommandContext {
   sharedMailbox?: SharedMailboxAdminPort | undefined;
   /** 입력값을 기록하지 않는 운영 관측 포트. */
   observer?: AdminObserver | undefined;
+  /**
+   * 설정된 메일 계정 영역 OIDC 공급자(id·테넌트, 회원 정책 E3). 연결 명령은 이 목록에 있는 공급자만 받는다 —
+   * 없으면(설정이 없는 표면) 연결 명령이 거절한다. 관리자 영역 공급자는 rootOnly 명령이 다루므로 여기 없다.
+   */
+  oidcAccountProviders?: readonly { id: string; tenantId: string }[] | undefined;
+  /** 설정된 관리자 영역 OIDC 공급자 id. */
+  oidcAdminProviders?: readonly string[] | undefined;
 }
 
 export interface SharedMailboxAdminPort {
