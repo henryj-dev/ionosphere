@@ -32,7 +32,9 @@ import { MtaWorker, type MxRecord, type RateLimitConfig, type SmarthostOptions }
 import { createGuardedFetch, WebhookWorker } from "@ionosphere/webhook";
 import { parseCidrList, type DnsResolver } from "@ionosphere/mail-auth";
 import type { DnsblZone, GreylistOptions, SpamScoreOptions, VirusScanner, VirusScanOptions } from "@ionosphere/spam";
-import { AdminApiServer, hasActiveOperatorOwner, SelfServiceServer, type TlsAdmin } from "@ionosphere/api";
+import { AdminApiServer, hasActiveOperatorOwner, OidcLoginFlow, SelfServiceServer, type OidcRealmProvider, type TlsAdmin } from "@ionosphere/api";
+import { OidcClient } from "@ionosphere/core";
+import type { ParsedOidcProvider } from "./oidc-config.ts";
 import { AutoconfigServer } from "@ionosphere/autoconfig";
 import { createIonosphereMetrics, MetricsServer, type IonosphereMetrics } from "@ionosphere/metrics";
 import { IonosphereLmtpBackend, IonospherePop3Backend, IonosphereSmtpBackend, StoreDkimHook, type IonosphereSmtpBackendOptions } from "./backend.ts";
@@ -428,6 +430,8 @@ export interface IonosphereAppOptions {
   selfServicePort?: number;
   /** 셀프서비스 화면의 정확한 오리진. 없으면 Origin host를 요청 Host와 비교한다. IONOSPHERE_SELF_SERVICE_ORIGIN. */
   selfServiceOrigin?: string;
+  /** 외부 OIDC 공급자(E3, `oidc-config.ts`). 영역별로 그 영역의 오리진이 있어야 한다(redirect_uri를 Host로 만들지 않는다). */
+  oidcProviders?: readonly ParsedOidcProvider[];
   /**
    * 클라이언트 자동설정 HTTP 포트(Thunderbird/Outlook/Apple). 미지정 시 리슨 안 함.
    * ⚠ 평문 HTTP — 실운영은 TLS 종단 프록시 뒤에 두고 autoconfig./autodiscover. 호스트로 라우팅.
@@ -1735,6 +1739,21 @@ export class IonosphereApp {
     return LOOPBACK;
   }
 
+  /**
+   * 영역별 OIDC 로그인 흐름(E3). 그 영역의 공급자가 없으면 undefined.
+   * ★redirect_uri는 **설정된 오리진**으로만 만든다 — 없으면 기동을 멈춘다. 요청 Host로 만들면 공격자가 고른 이름으로
+   * 인가 code가 간다(Host 헤더는 클라이언트 값이다).
+   */
+  private oidcFlow(realm: "admin" | "account", origin: string | undefined, callbackPath: string): OidcLoginFlow | undefined {
+    const mine = (this.opts.oidcProviders ?? []).filter((p) => p.realm === realm);
+    if (mine.length === 0) return undefined;
+    if (!origin) throw new Error(`OIDC ${realm} 공급자가 있는데 오리진이 없다 — ${realm === "admin" ? "IONOSPHERE_ADMIN_ORIGIN" : "IONOSPHERE_SELF_SERVICE_ORIGIN"}을 설정할 것`);
+    const providers = new Map<string, OidcRealmProvider>(
+      mine.map((p) => [p.config.id, { client: new OidcClient(p.config), ...(p.tenantId ? { tenantId: p.tenantId } : {}) }]),
+    );
+    return new OidcLoginFlow({ db: this.db, realm, providers, callbackUrl: new URL(callbackPath, new URL(origin).origin).toString() });
+  }
+
   /** 관리·부가 표면: 관리 REST API · 클라이언트 자동설정 · 메트릭 노출 · 443 HTTPS 프론트. */
   private async startManagement(ctx: StartContext): Promise<void> {
     const adminListener = this.listener("admin", this.opts.adminPort, () =>
@@ -1756,6 +1775,12 @@ export class IonosphereApp {
         ...(this.opts.adminRootToken ? { rootToken: this.opts.adminRootToken } : {}),
         ...(this.opts.masterKey ? { masterKey: this.opts.masterKey } : {}),
         ...(this.opts.adminOrigin ? { adminOrigin: this.opts.adminOrigin } : {}),
+        ...((): { oidc?: OidcLoginFlow } => {
+          const flow = this.oidcFlow("admin", this.opts.adminOrigin, "/admin/session/oidc/callback");
+          return flow ? { oidc: flow } : {};
+        })(),
+        oidcAccountProviders: (this.opts.oidcProviders ?? []).filter((p) => p.realm === "account" && p.tenantId).map((p) => ({ id: p.config.id, tenantId: p.tenantId! })),
+        oidcAdminProviders: (this.opts.oidcProviders ?? []).filter((p) => p.realm === "admin").map((p) => p.config.id),
         // 인증 앱에 보이는 이름 — 같은 앱에 여러 서버를 넣었을 때 구분되게 호스트 이름을 쓴다.
         totpIssuer: `ionosphere (${this.opts.hostname})`,
         ...(tlsAdmin ? { tls: tlsAdmin } : {}),
@@ -1784,6 +1809,10 @@ export class IonosphereApp {
         audit: this.audit,
         ...(this.opts.masterKey ? { masterKey: this.opts.masterKey } : {}),
         ...(this.opts.selfServiceOrigin ? { origin: this.opts.selfServiceOrigin } : {}),
+        ...((): { oidc?: OidcLoginFlow } => {
+          const flow = this.oidcFlow("account", this.opts.selfServiceOrigin, "/account/session/oidc/callback");
+          return flow ? { oidc: flow } : {};
+        })(),
         totpIssuer: `ionosphere (${this.opts.hostname})`,
       });
       this.selfServicePort = await this.selfService.listen(selfServiceListener.port, selfServiceListener.host);

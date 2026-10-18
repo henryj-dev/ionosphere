@@ -15,6 +15,7 @@ import { dnsProviderFromConfig } from "./cf-dns.ts";
 import { FsBlobStore, isBlobGcMode, S3BlobStore, type BlobGcMode, type BlobStore } from "@ionosphere/store";
 import { HTTP_SERVICES, IonosphereApp, type AppAuditOptions, type HttpServiceName, type ServiceHosts, type TlsListenerName } from "./app.ts";
 import { directorySourcesFromJson } from "./directory-config.ts";
+import { oidcProvidersFromJson } from "./oidc-config.ts";
 
 // ★구 `IONOSPHERE_*` env를 새 이름으로 넘긴다 — 반드시 env를 처음 읽기 **전에**.
 // 코드 배포와 `/etc/*.env` 교체를 따로 할 수 있게 하는 전환 장치다(packages/core/src/env-legacy.ts).
@@ -536,6 +537,8 @@ const app = new IonosphereApp({
   ...(process.env.IONOSPHERE_ADMIN_ORIGIN ? { adminOrigin: process.env.IONOSPHERE_ADMIN_ORIGIN } : {}),
   // 메일 계정 셀프서비스(회원 정책 E2) — 포트 지정 시에만 리슨. 443의 `account.` 라우트(IONOSPHERE_HOST_ACCOUNT)가 받는다.
   ...namedPort("selfServicePort", process.env.IONOSPHERE_SELF_SERVICE_PORT),
+  // 외부 OIDC 공급자(회원 정책 E3) — JSON 배열 하나가 정본(oidc-config.ts). 형식 오류는 기동 전에 실패한다.
+  ...(process.env.IONOSPHERE_OIDC_PROVIDERS ? { oidcProviders: oidcProvidersFromJson(process.env.IONOSPHERE_OIDC_PROVIDERS) } : {}),
   ...(process.env.IONOSPHERE_SELF_SERVICE_ORIGIN ? { selfServiceOrigin: process.env.IONOSPHERE_SELF_SERVICE_ORIGIN } : {}),
   /**
    * 관리 콘솔을 얹을 Host 접두사(예: `admin.`). **미지정 시 관리 콘솔에 원격으로 닿을 수 없다**

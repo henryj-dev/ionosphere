@@ -140,3 +140,6 @@ export {
 export { compileRegex, execRegex, regexMatch, RegexSyntaxError, type CompiledRegex, type RegexMatch } from "./regex.ts";
 // Web Push 암호화(RFC 8291) — JMAP PushSubscription이 쓴다. 중계자가 남이라 암호화가 필수다.
 export { encryptWebPush, type EncryptResult, type WebPushKeys } from "./webpush.ts";
+// JWT 검증(E3 OIDC ID 토큰·E4 메일용 access token 공용)과 OIDC RP 클라이언트.
+export { ACCEPTED_JWS_ALGS, decodeJwt, JwtError, verifyJwt, verifyJwtClaims, verifyJwtSignature, type ClaimRequirements, type Jwk, type JwtClaims, type JwtHeader } from "./jose.ts";
+export { mfaSatisfiedAt, newOpaque, newPkce, OidcClient, OidcError, type MfaEvidenceContract, type OidcDiscovery, type OidcFetch, type OidcProviderConfig } from "./oidc-client.ts";

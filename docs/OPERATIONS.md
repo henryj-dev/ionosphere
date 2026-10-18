@@ -273,6 +273,31 @@ Bearer 토큰 입력 칸은 없앴다. API 키(`api-key-create`)는 REST 자동�
 - 새 비밀번호는 10자 이상이어야 한다. 동시 로그인은 8개까지 처리하고 넘치면 503을 돌려준다(공개 표면의 CPU 보호).
 - 감사 로그 표면은 `selfservice`다. 세션 수명·step-up·잠금·최소 길이 수치는 관리 콘솔과 같은 **임시 기본값**이다.
 
+### 외부 OIDC 로그인 (E3)
+
+관리 콘솔과 셀프서비스에 "IdP로 로그인" 버튼을 얹는다. 기본으로 꺼져 있다.
+
+- 설정: `IONOSPHERE_OIDC_PROVIDERS` JSON 배열. 원소는
+  `{ "id", "realm": "admin"|"account", "issuer", "clientId", "clientSecret", "tenantId"?, "scopes"?, "mfaContract"? }`이다.
+  `realm=account`는 `tenantId`가 필수다. 형식 오류·평문 issuer(루프백 제외)·중복 id는 기동 전에 실패한다.
+- 콜백 주소는 **설정된 오리진**으로만 만든다. admin 공급자가 있으면 `IONOSPHERE_ADMIN_ORIGIN`, account 공급자가 있으면
+  `IONOSPHERE_SELF_SERVICE_ORIGIN`이 필요하다. IdP에는 다음 주소를 redirect URI로 등록한다.
+  - `<오리진>/admin/session/oidc/callback`
+  - `<오리진>/account/session/oidc/callback`
+- 연결은 관리자가 한다. 자동 연결·JIT는 없고, 이메일로 찾지 않는다. 키는 언제나 sub다.
+  - 관리자: `admin-identity-link --admin=... --provider=<id> --subject=<sub>`
+  - 메일 계정: `oidc-identity-link --account=... --provider=<id> --subject=<sub>`(그 공급자의 테넌트 안에서)
+  - 처음 로그인을 시도했다 실패하면 감사 로그의 `oidcUnlinkedSub`에 sub가 남는다.
+- **MFA 증거 계약**(`mfaContract`): `{ "acceptAcr"?: [...], "requireAmrAll"?: [...], "maxAgeSec": N }`.
+  - 응답의 acr이 목록에 있거나 amr에 지정한 값이 모두 있고, `auth_time`이 N초 안이면 그 로그인을 MFA로 인정한다.
+  - 요청한 값(acr_values·max_age)이 아니라 **응답의 클레임**으로만 판정한다.
+  - 계약이 없거나 응답이 충족하지 못하면 로컬 TOTP를 묻는다(생략·폴백 없음).
+  - ⚠ lodestar는 지금 ID 토큰에 amr이 없고 acr에 신뢰 기기가 섞여, TOTP 계약을 적을 수 없다. 계약 없이 쓰고 로컬 TOTP를 요구한다.
+- 지원 제한: 민감 작업의 재확인(step-up)은 언제나 **로컬 TOTP**다(IdP 재인증 step-up은 없다). 그래서 관리 콘솔 관리자는
+  IdP 계약을 충족해도 로컬 TOTP를 먼저 등록해야 한다. 셀프서비스는 미등록이면 목록만 볼 수 있다(D3).
+- IdP에서 사용자를 정지해도 이미 열린 세션은 그대로다(IdP 철회 신호를 받지 않는다). 세션 수명 안에서 유지되고,
+  ionosphere 쪽 정지·연결 해제·세션 종료는 다음 요청부터 반영된다.
+
 ## 9. 운영에서 반복해서 틀리는 것
 
 - **리스너가 떠 있는 것과 닿는 것은 다른 사실이다.** 방화벽이 별도 계층이면 `ss`로 확인한

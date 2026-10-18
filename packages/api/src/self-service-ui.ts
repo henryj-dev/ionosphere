@@ -45,6 +45,7 @@ export const SELF_SERVICE_UI_HTML = `<!doctype html>
     <label class="field"><span>복구 코드</span><input id="recovery" autocomplete="off" size="12" placeholder="앱을 잃었다면"></label>
     <button id="signin">로그인</button>
   </div>
+  <div class="row" id="ssoButtons"></div>
   <p id="loginStatus" class="err"></p>
 </div>
 <div class="card hidden" id="app">
@@ -142,6 +143,7 @@ async function boot() {
     state.csrf = "";
     $("#login").className = "card";
     $("#app").className = "card hidden";
+    await renderSso();
     return;
   }
   state.csrf = state.me.csrfToken || "";
@@ -151,6 +153,17 @@ async function boot() {
   $("#enroll").className = state.me.mfaEnrolled ? "hidden" : "";
   showSecret();
   await renderApps();
+}
+
+async function renderSso() {
+  try {
+    const res = await api("GET", "/account/session/oidc/providers");
+    $("#ssoButtons").innerHTML = (res.providers || []).map((p) => '<button class="ghost" data-sso="' + esc(p) + '">' + esc(p) + " 로 로그인</button>").join("");
+    $("#ssoButtons").querySelectorAll("button[data-sso]").forEach((b) => (b.onclick = () => {
+      location.href = "/account/session/oidc/start?provider=" + encodeURIComponent(b.dataset.sso);
+    }));
+  } catch (e) { $("#ssoButtons").innerHTML = ""; }
+  if (new URLSearchParams(location.search).get("sso") === "failed") $("#loginStatus").textContent = "외부 로그인에 실패했습니다. 연결된 계정인지 관리자에게 확인하십시오.";
 }
 
 $("#signin").onclick = async () => {

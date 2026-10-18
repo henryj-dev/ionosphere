@@ -186,3 +186,19 @@ export {
 } from "./web-mfa.ts";
 // 메일 계정 셀프서비스(회원 정책 E2).
 export { resolveAccountSession, verifyAccountPrimaryPassword, type ResolvedAccountSession, type SelfServiceAccount } from "./account-web.ts";
+// 외부 OIDC 로그인(회원 정책 E3) — 인가 상태와 외부 신원 연결.
+export {
+  accountByOidcIdentity,
+  accountOidcProvider,
+  adminByIdentity,
+  linkAccountOidcIdentity,
+  linkAdminIdentity,
+  listAdminIdentities,
+  MAX_PENDING_OIDC_STATES,
+  OIDC_STATE_TTL_MS,
+  saveOidcLoginState,
+  takeOidcLoginState,
+  unlinkAccountOidcIdentity,
+  unlinkAdminIdentity,
+  type OidcRealm,
+} from "./oidc.ts";

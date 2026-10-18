@@ -24,3 +24,4 @@ export {
   type ProvisionDomainInput,
 } from "@ionosphere/admin-cmd";
 export { SelfServiceServer, type SelfServiceDeps } from "./self-service.ts";
+export { OidcLoginFlow, type OidcCallbackResult, type OidcRealmProvider } from "./oidc-login.ts";
