@@ -32,7 +32,7 @@ import { MtaWorker, type MxRecord, type RateLimitConfig, type SmarthostOptions }
 import { createGuardedFetch, WebhookWorker } from "@ionosphere/webhook";
 import { parseCidrList, type DnsResolver } from "@ionosphere/mail-auth";
 import type { DnsblZone, GreylistOptions, SpamScoreOptions, VirusScanner, VirusScanOptions } from "@ionosphere/spam";
-import { AdminApiServer, hasActiveOperatorOwner, type TlsAdmin } from "@ionosphere/api";
+import { AdminApiServer, hasActiveOperatorOwner, SelfServiceServer, type TlsAdmin } from "@ionosphere/api";
 import { AutoconfigServer } from "@ionosphere/autoconfig";
 import { createIonosphereMetrics, MetricsServer, type IonosphereMetrics } from "@ionosphere/metrics";
 import { IonosphereLmtpBackend, IonospherePop3Backend, IonosphereSmtpBackend, StoreDkimHook, type IonosphereSmtpBackendOptions } from "./backend.ts";
@@ -117,6 +117,8 @@ export const HTTP_SERVICES = {
   autoconfig: { defaultHost: "autoconfig.localhost", env: "AUTOCONFIG" },
   autodiscover: { defaultHost: "autodiscover.localhost", env: "AUTODISCOVER" },
   admin: { defaultHost: "admin.localhost", env: "ADMIN" },
+  /** 메일 계정 셀프서비스(회원 정책 E2). 사용자가 인터넷에서 오므로 공개 라우트다. */
+  account: { defaultHost: "account.localhost", env: "ACCOUNT" },
   jmap: { defaultHost: "jmap.localhost", env: "JMAP" },
   metrics: { defaultHost: "metrics.localhost", env: "METRICS" },
 } as const;
@@ -422,6 +424,10 @@ export interface IonosphereAppOptions {
    * 없으면 Origin의 host와 요청 Host를 비교한다 — 443 프론트가 원본 Host를 넘기므로 그것으로도 동작한다.
    */
   adminOrigin?: string;
+  /** 메일 계정 셀프서비스 upstream 포트(E2). 지정했을 때만 뜬다. IONOSPHERE_SELF_SERVICE_PORT. */
+  selfServicePort?: number;
+  /** 셀프서비스 화면의 정확한 오리진. 없으면 Origin host를 요청 Host와 비교한다. IONOSPHERE_SELF_SERVICE_ORIGIN. */
+  selfServiceOrigin?: string;
   /**
    * 클라이언트 자동설정 HTTP 포트(Thunderbird/Outlook/Apple). 미지정 시 리슨 안 함.
    * ⚠ 평문 HTTP — 실운영은 TLS 종단 프록시 뒤에 두고 autoconfig./autodiscover. 호스트로 라우팅.
@@ -599,6 +605,10 @@ export class IonosphereApp {
   /** 관리 콘솔 전용 TLS 종단(443과 분리 — 방화벽으로 막을 수 있게). */
   admin?: AdminApiServer;
   adminPort = 0;
+  /** 메일 계정 셀프서비스(E2) — 443 프론트의 `account.` 라우트 upstream. */
+  selfService?: SelfServiceServer;
+  selfServicePort = 0;
+  selfServiceHost?: string;
   /** 관리 API upstream의 실제 바인딩 주소 — autoconfigHost와 같은 이유(위 주석). */
   adminHost?: string;
   autoconfig?: AutoconfigServer;
@@ -1760,6 +1770,26 @@ export class IonosphereApp {
       if (adminListener.host !== undefined) this.adminHost = adminListener.host;
     }
 
+    // 메일 계정 셀프서비스(E2) — 평문 upstream은 관리 API와 같이 루프백, 443 프론트가 `account.`로 얹는다.
+    const selfServiceListener = this.listener("selfService", this.opts.selfServicePort, () =>
+      this.plaintextHost(this.opts.httpsFrontPort !== undefined, "selfService", ctx.log),
+    );
+    if (selfServiceListener) {
+      this.selfService = new SelfServiceServer({
+        db: this.db,
+        store: this.store,
+        logger: ctx.log,
+        // ★메일 프로토콜과 **같은 스로틀** — 같은 기본 비밀번호의 대입 한도가 표면마다 따로 생기지 않게.
+        authThrottle: this.authThrottle,
+        audit: this.audit,
+        ...(this.opts.masterKey ? { masterKey: this.opts.masterKey } : {}),
+        ...(this.opts.selfServiceOrigin ? { origin: this.opts.selfServiceOrigin } : {}),
+        totpIssuer: `ionosphere (${this.opts.hostname})`,
+      });
+      this.selfServicePort = await this.selfService.listen(selfServiceListener.port, selfServiceListener.host);
+      if (selfServiceListener.host !== undefined) this.selfServiceHost = selfServiceListener.host;
+    }
+
     // 클라이언트 자동설정 — 광고 포트는 공개 TLS 포트(993/465 기본)
     const autoconfigListener = this.listener("autoconfig", this.opts.autoconfigPort, () =>
       this.plaintextHost(this.opts.httpsFrontPort !== undefined, "autoconfig", ctx.log),
@@ -1876,6 +1906,19 @@ export class IonosphereApp {
        * 흘렀다(기본 upstream). 그래서 아무 Host나 붙여도 응답했고, 우리가 서빙하는 이름
        * 목록이 코드 어디에도 없었다. 지금은 목록에 없으면 404다.
        */
+      /**
+       * 셀프서비스는 **공개** 라우트다 — 메일 사용자는 인터넷에서 온다. 그래서 그 뒤의 방어가 전부다:
+       * 기본 비밀번호만 받고, 메일 프로토콜과 같은 스로틀, 민감 작업은 TOTP step-up(self-service.ts 머리말).
+       * 인증서는 443 기본 인증서를 쓴다 — `account.` 이름이 그 인증서에 들어 있어야 한다.
+       */
+      if (this.selfServicePort) {
+        routes.push({
+          hosts: hostsFor(this.opts.serviceHosts, "account"),
+          port: this.selfServicePort,
+          ...(this.selfServiceHost ? { host: this.selfServiceHost } : {}),
+          exposure: ROUTE_EXPOSURE.public,
+        });
+      }
       if (this.jmapPort) {
         routes.push({
           hosts: hostsFor(this.opts.serviceHosts, "jmap"),
@@ -1986,6 +2029,7 @@ export class IonosphereApp {
     if (this.metricsServer) await this.metricsServer.close();
     if (this.autoconfig) await this.autoconfig.close();
     if (this.admin) await this.admin.close();
+    if (this.selfService) await this.selfService.close();
     if (this.jmap) await this.jmap.close();
     if (this.managesieve) await this.managesieve.close();
     if (this.smtps) await this.smtps.close();

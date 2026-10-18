@@ -8,7 +8,7 @@
  * 마이그레이션 006이 인덱스로 의도를 증언하는데 정리 코드가 없던 것과 같은 모양의 구멍이다.
  */
 import { CREDENTIAL_KIND, ACCOUNT_STATUS, type DbDriver } from "@ionosphere/db";
-import { AUTH_SURFACES, createAppPassword, createCredential, createOAuthToken, listCredentials, revokeCredential, setPrimaryPassword } from "@ionosphere/store";
+import { ACCOUNT_REALM, AUTH_SURFACES, createAppPassword, createCredential, createOAuthToken, listCredentials, resetTotpAndRevokeSessions, revokeCredential, revokeWebSessions, setPrimaryPassword } from "@ionosphere/store";
 import { CommandError, type Command, type CommandContext } from "./types.ts";
 
 /** 이 명령이 작용할 테넌트. root가 지정하지 않으면 대상이 정해지지 않는다 — 추측하지 않는다. */
@@ -255,10 +255,44 @@ export const accountCommands: readonly Command[] = [
       if (!(await setPrimaryPassword(ctx.db, acc.id, password))) {
         throw new CommandError("conflict", `계정 상태가 바뀌어 비밀번호를 바꾸지 못했습니다: ${acc.email}`);
       }
+      // 셀프서비스 웹 세션은 끊는다 — 옛 비밀번호로 열린 웹 세션이 살아 있으면 교체가 아무것도 막지 못한다.
+      // 메일 클라이언트(앱 비밀번호·토큰)는 끊지 않는다(위 주석).
+      await revokeWebSessions(ctx.db, ACCOUNT_REALM, acc.id);
       return {
         data: { accountId: acc.id },
         // JMAP은 인증 결과를 30초 캐시한다 — 옛 비밀번호가 그동안 JMAP에서만 통한다는 사실을 알린다.
-        message: `비밀번호 변경됨: ${acc.email} (앱 비밀번호·OAuth 토큰 유지, JMAP 반영은 최대 30초)`,
+        message: `비밀번호 변경됨: ${acc.email} (앱 비밀번호·OAuth 토큰 유지, 셀프서비스 웹 세션 종료, JMAP 반영은 최대 30초)`,
+      };
+    },
+  },
+  {
+    /**
+     * 셀프서비스 MFA 등록 코드 발급 — 첫 등록과 분실 복구(초기화)를 겸한다(회원 정책 E2, 결정 D3).
+     *
+     * 셀프서비스의 민감 작업(비밀번호 변경·앱 비밀번호 발급·철회)은 TOTP가 있어야 한다. 첫 등록에는 이 일회용 코드가
+     * 필요하다 — 비밀번호만으로 등록할 수 있으면 비밀번호를 아는 사람이 본인보다 먼저 MFA를 차지한다.
+     * 이미 등록된 계정에 부르면 TOTP·복구 코드를 지우고 셀프서비스 세션을 끊는다(복구 코드까지 잃었을 때의 보조 경로).
+     * 메일 클라이언트 연결·앱 비밀번호는 건드리지 않는다.
+     */
+    spec: {
+      name: "account-mfa-reset",
+      group: "계정",
+      label: "셀프서비스 MFA 등록 코드 발급",
+      summary: "셀프서비스 TOTP를 초기화하고 일회용 등록 코드를 발급한다. 메일 클라이언트는 영향 없음.",
+      readOnly: false,
+      destructive: true,
+      args: [{ name: "account", label: "계정(주소 또는 id)", type: "string", required: true }],
+    },
+    async run(ctx, args) {
+      const tenantId = requireTenant(ctx);
+      const acc = await resolveAccount(ctx.db, tenantId, args.account!);
+      if (acc.status !== ACCOUNT_STATUS.active) throw new CommandError("conflict", `활성 계정이 아닙니다: ${acc.email}`);
+      const code = await resetTotpAndRevokeSessions(ctx.db, ACCOUNT_REALM, acc.id);
+      if (code === null) throw new CommandError("conflict", `등록 코드를 발급하지 못했습니다: ${acc.email}`);
+      return {
+        data: { accountId: acc.id },
+        secret: { label: `셀프서비스 TOTP 등록 코드 (${acc.email})`, value: code, hint: "본인에게 따로 전달하십시오. 24시간 안에 한 번만 쓸 수 있습니다." },
+        message: `셀프서비스 MFA 초기화·등록 코드 발급: ${acc.email}`,
       };
     },
   },

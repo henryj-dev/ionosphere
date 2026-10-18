@@ -163,3 +163,26 @@ export {
   type AdminUser,
   type ResolvedAdminSession,
 } from "./admin-auth.ts";
+// 웹 로그인의 두 번째 요소·세션 공용 정본(관리자·셀프서비스) — 영역(realm)을 받는다.
+export {
+  ACCOUNT_REALM,
+  ADMIN_REALM,
+  beginTotpEnrollment,
+  confirmTotpEnrollment,
+  createWebSession,
+  csrfTokenForRealm,
+  issueEnrollCode,
+  markWebSessionMfa,
+  mfaEnrolled,
+  PROVISIONAL_WEB_SESSION_POLICY,
+  redeemRecoveryCode,
+  remainingRecoveryCodes,
+  resetTotpAndRevokeSessions,
+  revokeWebSession,
+  revokeWebSessions,
+  verifySecondFactorTotp,
+  type MfaRealm,
+  type WebSessionPolicy,
+} from "./web-mfa.ts";
+// 메일 계정 셀프서비스(회원 정책 E2).
+export { resolveAccountSession, verifyAccountPrimaryPassword, type ResolvedAccountSession, type SelfServiceAccount } from "./account-web.ts";

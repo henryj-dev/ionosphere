@@ -23,3 +23,4 @@ export {
   type DomainProvision,
   type ProvisionDomainInput,
 } from "@ionosphere/admin-cmd";
+export { SelfServiceServer, type SelfServiceDeps } from "./self-service.ts";
