@@ -5,12 +5,21 @@ import {
   backfillHeaderProjection,
   directorySyncInputFromSnapshot,
   syncDirectorySnapshot,
+  type AuthSurface,
   type BlobStore,
   type JmapEmailQueryResult,
   type ListingCache,
 } from "@ionosphere/store";
 
 export interface DirectorySnapshotSource {
+  /**
+   * 이 provider로 디렉터리 로그인을 허용할 표면. **없으면 전부 허용**(기존 동작 — 2026-10-18 결정 G4).
+   *
+   * ★로컬 자격증명은 `credentials.scopes`로 표면을 좁히는데 디렉터리 로그인은 그 관문을 지나지
+   * 않았다 — "IMAP 전용" 정책을 걸 방법이 디렉터리 계정에만 없었다. provider 단위로 같은 이름
+   * (`AUTH_SURFACES`)을 쓴다.
+   */
+  readonly surfaces?: readonly AuthSurface[];
   read(tenantId: string): Promise<DirectorySnapshot>;
   authenticate?(tenantId: string, loginName: string, password: string): Promise<DirectoryIdentity | null>;
   close?(): Promise<void>;
@@ -30,7 +39,7 @@ export class SharedMailboxRuntime implements SharedMailboxAdminPort {
   constructor(opts: SharedMailboxRuntimeOptions) { this.opts = opts; }
 
   /** local credential 실패 뒤에만 호출한다. immutable key가 기존 link와 일치해야 계정을 반환한다. */
-  async authenticate(loginName: string, password: string): Promise<{ accountId: string; credKind: string } | null> {
+  async authenticate(loginName: string, password: string, surface: AuthSurface): Promise<{ accountId: string; credKind: string } | null> {
     if (password.length === 0) return null;
     const normalized = loginName.toLowerCase();
     const candidates = await this.opts.db.query({
@@ -45,6 +54,9 @@ export class SharedMailboxRuntime implements SharedMailboxAdminPort {
       const provider = String(row.provider);
       const source = this.opts.directorySources?.[provider];
       if (!source?.authenticate) continue;
+      // ★표면 관문은 bind **전에** 본다 — 허용하지 않는 표면에서 LDAP에 비밀번호를 보낼 이유가 없다.
+      // 거절은 비밀번호 실패와 같은 null이다(로컬 scopes 관문과 같은 규율 — 응답으로 구분되지 않게).
+      if (source.surfaces !== undefined && !source.surfaces.includes(surface)) continue;
       const identity = await source.authenticate(String(row.tenant_id), loginName, password);
       if (identity?.externalKey !== String(row.external_key)) continue;
       const account = await this.opts.db.query({ sql: "SELECT id FROM accounts WHERE id = ? AND status = 1", params: [row.account_id] });

@@ -1,15 +1,19 @@
 import { DirectoryError, type DirectoryConfig, type DirectoryIdentity } from "@ionosphere/core";
 import { directoryProvider, directorySnapshotReader, type DirectoryLdapClientOptions } from "./directory-ldap.ts";
+import type { AuthSurface } from "@ionosphere/store";
 import type { DirectorySnapshotSource } from "./shared-mailbox-runtime.ts";
 
 export interface LdapDirectorySourceOptions {
   tenantId: string;
   config: DirectoryConfig;
   ldap: DirectoryLdapClientOptions;
+  /** 디렉터리 로그인 허용 표면 — 없으면 전부(`DirectorySnapshotSource.surfaces`). */
+  surfaces?: readonly AuthSurface[];
 }
 
 /** 한 provider를 한 tenant에 고정해 관리 명령의 tenant 인자로 다른 directory를 읽지 못하게 한다. */
 export class LdapDirectorySource implements DirectorySnapshotSource {
+  readonly surfaces?: readonly AuthSurface[];
   private readonly tenantId: string;
   private readonly config: DirectoryConfig;
   private readonly ldap: DirectoryLdapClientOptions;
@@ -18,6 +22,7 @@ export class LdapDirectorySource implements DirectorySnapshotSource {
   constructor(options: LdapDirectorySourceOptions) {
     if (!options.tenantId) throw new DirectoryError("directory tenantId가 비어 있음");
     this.tenantId = options.tenantId;
+    if (options.surfaces !== undefined) this.surfaces = options.surfaces;
     this.config = options.config;
     this.ldap = options.ldap;
     this.reader = directorySnapshotReader(options.config, options.ldap);
