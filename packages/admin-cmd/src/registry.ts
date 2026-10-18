@@ -10,12 +10,13 @@
 import { accountCommands } from "./accounts.ts";
 import { domainCommands } from "./domains-cmd.ts";
 import { opsCommands } from "./ops.ts";
-import { ACCOUNT_STATUS, DOMAIN_STATUS, MTA_QUEUE_STATUS, SUPPRESSION_REASON } from "@ionosphere/db";
+import { ACCOUNT_STATUS, ADMIN_ROLE, ADMIN_STATUS, DOMAIN_STATUS, MTA_QUEUE_STATUS, SUPPRESSION_REASON } from "@ionosphere/db";
 import { CommandRegistry } from "./dispatch.ts";
 import type { Command } from "./types.ts";
 import { sharedMailboxCommands } from "./shared-mailbox.ts";
+import { adminUserCommands } from "./admin-users.ts";
 
-export const ALL_COMMANDS: readonly Command[] = [...opsCommands, ...accountCommands, ...domainCommands, ...sharedMailboxCommands];
+export const ALL_COMMANDS: readonly Command[] = [...opsCommands, ...accountCommands, ...domainCommands, ...sharedMailboxCommands, ...adminUserCommands];
 
 /** 기본 레지스트리. 테스트가 부분집합으로 만들 수 있게 인자를 열어 둔다. */
 export function createRegistry(commands: readonly Command[] = ALL_COMMANDS): CommandRegistry {
@@ -37,6 +38,14 @@ export const COMMAND_ENCODINGS = {
   accountStatus: {
     values: ACCOUNT_STATUS,
     labels: { suspended: "정지", active: "활성", deleting: "삭제 중" },
+  },
+  adminRole: {
+    values: ADMIN_ROLE,
+    labels: { owner: "소유자", admin: "관리자", readonly: "조회 전용" },
+  },
+  adminStatus: {
+    values: ADMIN_STATUS,
+    labels: { suspended: "정지", active: "활성" },
   },
   domainStatus: {
     values: DOMAIN_STATUS,

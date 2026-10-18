@@ -327,6 +327,8 @@ CREATE TABLE admin_users (
   totp_secret         TEXT,                         -- secretbox 봉인(마스터 키 필수). NULL = MFA 미등록
   totp_pending_secret TEXT,                         -- 등록 확정 전 대기 비밀
   totp_last_step      BIGINT,                       -- 마지막으로 쓴 TOTP 스텝(재사용 방지)
+  totp_failures       INTEGER NOT NULL DEFAULT 0,   -- 연속 TOTP 실패 수(성공하면 0)
+  totp_locked_until   BIGINT,                       -- 이 시각까지 TOTP를 검사하지 않고 거절(지수 잠금)
   created_at          BIGINT NOT NULL,
   updated_at          BIGINT NOT NULL
 );

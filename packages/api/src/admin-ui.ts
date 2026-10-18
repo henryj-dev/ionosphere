@@ -14,7 +14,13 @@
  *    자동 집행에는 있는데 사람이 쓸 입구는 없던 것이 그 결과다(콘솔이 "정지를 쓰세요(현재
  *    콘솔에는 정지 버튼이 없습니다)"라고 스스로 적어 두고 있었다).
  *
- * 자기완결(인라인 CSS/JS, 외부 리소스 0 → CSP 안전). 토큰은 런타임 입력, localStorage 보관.
+ * 자기완결(인라인 CSS/JS, 외부 리소스 0 → CSP 안전).
+ *
+ * ★인증은 **사람 세션**이다(회원 정책 E1, 결정 D2 — 2026-10-18). 예전엔 Bearer 토큰(rootToken·api-key)을
+ * 입력받아 localStorage에 두었는데, 그러면 XSS 한 번이 토큰 탈취로 이어지고 MFA를 걸 자리도 없었다.
+ * 지금은 사용자명·비밀번호·TOTP로 로그인하고 세션은 HttpOnly 쿠키로만 다닌다(스크립트가 읽을 수 없다).
+ * CSRF 토큰은 메모리에만 둔다. 서버가 세션 토큰에서 유도하므로 새 탭·새로고침마다 `GET /admin/session`이 다시 준다.
+ * API 키는 REST 자동화 전용으로 남는다(이 화면은 받지 않는다).
  * ⚠ 이 페이지 자체엔 시크릿이 없다. admin 포트 노출 정책은 조립층 소관이다.
  *
  * 이 파일의 HTML/JS는 TS 템플릿 리터럴 안에 있다 — 내부에서 백틱과 `\${`를 쓰지 말 것
@@ -27,10 +33,10 @@
 /**
  * 관리 콘솔 HTML 응답에 붙는 보안 헤더 — 페이지 바로 옆에 둔다.
  *
- * 왜(감사 5차 L-12): 이 페이지는 응답 헤더가 `content-type` 하나뿐이었다. 지금은 XSS가 없지만
- * 이 화면은 **root 토큰을 localStorage에 보관**한다 — 장래에 보간 한 군데가 새면 그 대가가
- * 전 테넌트 장악이다. 헤더를 여기 두는 이유는 응집도다: 페이지에 외부 스크립트를 붙이는
- * 사람이 CSP를 같은 파일에서 보게 된다.
+ * 왜(감사 5차 L-12): 이 페이지는 응답 헤더가 `content-type` 하나뿐이었다. 지금은 XSS가 없고
+ * 세션도 HttpOnly 쿠키라 스크립트가 읽지 못하지만, XSS가 생기면 **세션을 쥔 채 명령을 부를 수 있다** —
+ * 장래에 보간 한 군데가 새면 그 대가가 관리 권한이다. 헤더를 여기 두는 이유는 응집도다: 페이지에
+ * 외부 스크립트를 붙이는 사람이 CSP를 같은 파일에서 보게 된다.
  *
  * `connect-src 'self'` — fetch 대상은 같은 오리진의 `/v1/*`뿐. 토큰이 외부로 새 나갈 수 있는
  * 유일한 통로라 여기를 좁히는 것이 실질 방어다.
@@ -99,12 +105,29 @@ export const ADMIN_UI_HTML = `<!doctype html>
 </head>
 <body>
 <h1>ionosphere 관리 콘솔</h1>
-<div class="card">
+<div class="card" id="login">
   <div class="row">
-    <label class="field"><span>Bearer 토큰</span><input id="token" type="password" placeholder="IONOSPHERE_ADMIN_TOKEN 또는 api-key" size="34"></label>
-    <label class="field"><span>tenantId (root 전용)</span><input id="tenant" placeholder="선택" size="16"></label>
-    <button id="save">저장</button>
-    <span id="status" class="muted"></span>
+    <label class="field"><span>사용자명</span><input id="username" autocomplete="username" size="24"></label>
+    <label class="field"><span>비밀번호</span><input id="password" type="password" autocomplete="current-password" size="20"></label>
+    <label class="field"><span>TOTP</span><input id="totp" inputmode="numeric" autocomplete="one-time-code" size="8" placeholder="등록했다면"></label>
+    <button id="signin">로그인</button>
+    <span id="loginStatus" class="muted"></span>
+  </div>
+</div>
+<div class="card hidden" id="enroll">
+  <p>이 관리자는 아직 TOTP를 등록하지 않았습니다. 등록해야 다른 화면을 쓸 수 있습니다.</p>
+  <div id="enrollSecret"></div>
+  <div class="row">
+    <button id="enrollStart" class="ghost">비밀 만들기</button>
+    <label class="field"><span>앱에 보이는 6자리</span><input id="enrollCode" inputmode="numeric" size="8"></label>
+    <button id="enrollConfirm">등록 확정</button>
+  </div>
+</div>
+<div class="card hidden" id="who">
+  <div class="row">
+    <span id="whoami"></span>
+    <label class="field"><span>tenantId (운영자 전용)</span><input id="tenant" placeholder="선택" size="16"></label>
+    <button id="signout" class="ghost">로그아웃</button>
   </div>
 </div>
 
@@ -114,9 +137,17 @@ export const ADMIN_UI_HTML = `<!doctype html>
 
 <script>
 const $ = (s) => document.querySelector(s);
+/**
+ * sessionStorage 접근은 실패할 수 있다(사생활 보호 모드·저장소 차단). 실패하면 기억하지 못할 뿐이다 —
+ * 새로고침하면 다시 로그인하면 된다. 화면이 멈추면 안 된다.
+ */
+function remember(k, v) { try { if (v === null) sessionStorage.removeItem(k); else sessionStorage.setItem(k, v); } catch (e) { /* 기억 못 함 */ } }
+function recall(k) { try { return sessionStorage.getItem(k) || ""; } catch (e) { return ""; } }
+
 const state = {
-  token: localStorage.getItem("ionosphere_admin_token") || "",
-  tenant: localStorage.getItem("ionosphere_admin_tenant") || "",
+  /** CSRF 토큰 — 쿠키와 짝이다. 기동할 때마다 서버에서 받는다(저장하지 않는다). */
+  csrf: "",
+  tenant: recall("ionosphere_admin_tenant"),
   /** 서버가 준 명령 서술. **화면은 이것 말고 아는 것이 없다.** */
   commands: [],
   /** 상태 정수 → 사람 말. 서버가 준다(화면이 사본을 들면 스키마와 어긋난다 — 파일 머리말). */
@@ -126,39 +157,103 @@ const state = {
   /** 방금 발급된 평문 — 화면을 다시 그려도 살아남아야 한다(서버는 해시만 보관). */
   secret: null,
 };
-$("#token").value = state.token;
 $("#tenant").value = state.tenant;
-$("#save").onclick = () => {
-  state.token = $("#token").value.trim();
+$("#tenant").onchange = () => {
   state.tenant = $("#tenant").value.trim();
-  localStorage.setItem("ionosphere_admin_token", state.token);
-  localStorage.setItem("ionosphere_admin_tenant", state.tenant);
-  $("#status").textContent = "저장됨";
-  boot();
+  remember("ionosphere_admin_tenant", state.tenant);
+  void boot();
+};
+
+/** 로그인 — 비밀번호와 TOTP가 틀렸는지는 서버가 구분해 주지 않는다(오라클이 되지 않게). */
+$("#signin").onclick = async () => {
+  $("#loginStatus").textContent = "";
+  try {
+    const res = await api("POST", "/admin/session/login", {
+      username: $("#username").value.trim(),
+      password: $("#password").value,
+      totp: $("#totp").value.trim(),
+    });
+    $("#password").value = "";
+    $("#totp").value = "";
+    state.csrf = res.csrfToken;
+    await boot();
+  } catch (e) {
+    $("#loginStatus").textContent = e.message;
+  }
+};
+$("#signout").onclick = async () => {
+  try { await api("POST", "/admin/session/logout"); } catch (e) { /* 이미 끝난 세션이어도 화면은 로그인으로 */ }
+  state.csrf = "";
+  await boot();
+};
+$("#enrollStart").onclick = async () => {
+  try {
+    const res = await api("POST", "/admin/session/mfa/enroll");
+    // 평문 비밀은 이 화면에 한 번만 보인다 — 인증 앱에 붙여 넣거나 URI를 연다.
+    $("#enrollSecret").innerHTML = '<div class="secret"><div class="muted">인증 앱에 이 비밀을 넣으십시오</div><div class="value">' +
+      esc(res.secret) + '</div><div class="muted" style="word-break:break-all">' + esc(res.uri) + "</div></div>";
+  } catch (e) { toast(e.message, "err"); }
+};
+$("#enrollConfirm").onclick = async () => {
+  try {
+    await api("POST", "/admin/session/mfa/confirm", { code: $("#enrollCode").value.trim() });
+    $("#enrollSecret").innerHTML = "";
+    $("#enrollCode").value = "";
+    toast("TOTP 등록 완료", "ok");
+    await boot();
+  } catch (e) { toast(e.message, "err"); }
 };
 
 function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+/**
+ * 서버 호출. 쿠키는 브라우저가 싣고(same-origin), CSRF 토큰은 헤더로 싣는다.
+ * 실패는 code를 단 Error로 올린다 — 화면은 문자열이 아니라 code로 다음 행동을 고른다.
+ */
 async function api(method, path, body) {
+  const headers = {};
+  if (body !== undefined) headers["content-type"] = "application/json";
+  if (method !== "GET" && state.csrf) headers["x-csrf-token"] = state.csrf;
   const res = await fetch(path, {
     method,
-    headers: { authorization: "Bearer " + state.token, ...(body ? { "content-type": "application/json" } : {}) },
-    ...(body ? { body: JSON.stringify(body) } : {}),
+    credentials: "same-origin",
+    headers,
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
   const text = await res.text();
   let data;
   try { data = text ? JSON.parse(text) : null; } catch { data = text; }
-  if (!res.ok) throw new Error((data && data.error) || res.status + " " + res.statusText);
+  if (!res.ok) {
+    const err = new Error((data && data.error) || res.status + " " + res.statusText);
+    err.code = data && data.code ? data.code : "";
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 
-/** 명령 호출 — GUI가 서버와 나누는 **유일한 대화 방식**이다. */
+/**
+ * 명령 호출 — GUI가 서버와 나누는 **유일한 대화 방식**이다.
+ *
+ * ★파괴적 명령은 최근 MFA를 요구한다(서버가 step_up으로 거절). 그때 TOTP를 받아 재인증하고
+ * **한 번만** 다시 부른다. 몇 번이고 다시 부르면 재인증 창을 우회하는 반복이 된다.
+ */
 async function call(name, args) {
   const body = { ...args };
   if (state.tenant) body.tenantId = state.tenant;
-  return await api("POST", "/v1/commands/" + encodeURIComponent(name), body);
+  const path = "/v1/commands/" + encodeURIComponent(name);
+  try {
+    return await api("POST", path, body);
+  } catch (e) {
+    if (e.code === "no_session" || e.code === "csrf") { await boot(); throw e; }
+    if (e.code !== "step_up") throw e;
+    const code = window.prompt("민감한 작업입니다. 인증 앱의 6자리 코드를 입력하십시오.");
+    if (!code) throw e;
+    await api("POST", "/admin/session/mfa/verify", { code: code.trim() });
+    return await api("POST", path, body);
+  }
 }
 
 function toast(msg, kind) {
@@ -454,12 +549,26 @@ function renderTabs() {
  * 기동 — **명령 서술을 받아 오는 것이 전부다.** 이 요청이 실패하면 화면은 아무것도 그리지
  * 못한다(그리려야 그릴 근거가 없다). 그 사실이 그대로 보이는 것이 옳다.
  */
+function showPanel(which) {
+  $("#login").className = "card" + (which === "login" ? "" : " hidden");
+  $("#enroll").className = "card" + (which === "enroll" ? "" : " hidden");
+  $("#who").className = "card" + (which === "app" || which === "enroll" ? "" : " hidden");
+  if (which !== "app") { $("#tabs").innerHTML = ""; $("#view").innerHTML = ""; }
+}
+
 async function boot() {
-  if (!state.token) {
-    $("#tabs").innerHTML = "";
-    $("#view").innerHTML = '<p class="muted">먼저 Bearer 토큰을 입력하고 저장하세요.</p>';
+  let me;
+  try {
+    me = await api("GET", "/admin/session");
+  } catch (e) {
+    state.csrf = "";
+    showPanel("login");
     return;
   }
+  state.csrf = me.csrfToken || "";
+  $("#whoami").textContent = me.username + (me.tenantId ? " · 테넌트 " + me.tenantId : " · 운영자");
+  if (!me.mfaEnrolled || me.mfaAt === null) { showPanel("enroll"); return; }
+  showPanel("app");
   try {
     const meta = await api("GET", "/v1/commands");
     state.commands = meta.commands;

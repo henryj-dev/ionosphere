@@ -31,8 +31,33 @@ import {
   ulid,
   type Logger,
 } from "@ionosphere/core";
-import type { DbDriver } from "@ionosphere/db";
-import { Store, StoreError } from "@ionosphere/store";
+import { ADMIN_ROLE, type AdminRole, type DbDriver } from "@ionosphere/db";
+import {
+  beginAdminTotpEnrollment,
+  burnTotpCost,
+  confirmAdminTotpEnrollment,
+  csrfTokenFor,
+  createAdminSession,
+  markAdminSessionMfa,
+  PROVISIONAL_ADMIN_SESSION_POLICY,
+  resolveAdminSession,
+  revokeAdminSession,
+  Store,
+  StoreError,
+  verifyAdminPassword,
+  verifyAdminTotp,
+  type AdminSessionPolicy,
+} from "@ionosphere/store";
+import { totpUri } from "@ionosphere/core";
+import {
+  ADMIN_SESSION_COOKIE,
+  clearedSessionCookie,
+  csrfMatches,
+  originAllowed,
+  PROVISIONAL_STEP_UP_MS,
+  readCookie,
+  sessionCookie,
+} from "./admin-session.ts";
 import type { CertStatus } from "@ionosphere/tls";
 import {
   COMMAND_ENCODINGS,
@@ -88,6 +113,17 @@ export interface AdminApiDeps {
   sharedMailbox?: SharedMailboxAdminPort;
   /** 명령 계층 관측 포트. 입력값을 받지 않아 자격증명과 필터가 로그에 섞이지 않는다. */
   observer?: AdminObserver;
+  /** 사람 세션 수명 — 생략하면 임시 기본값(`PROVISIONAL_ADMIN_SESSION_POLICY`). */
+  adminSessionPolicy?: AdminSessionPolicy;
+  /** 민감 작업 전 최근 MFA 창(ms) — 생략하면 임시 기본값(`PROVISIONAL_STEP_UP_MS`). */
+  stepUpMs?: number;
+  /**
+   * 관리 콘솔의 정확한 오리진(예: `https://admin.ionosphere.test`). 있으면 쿠키 요청의 Origin을
+   * 이것과 정확히 비교하고, 없으면 Origin의 host를 요청 Host와 비교한다(`originAllowed`).
+   */
+  adminOrigin?: string;
+  /** TOTP 등록 URI의 issuer — 인증 앱에 보이는 이름. 생략하면 "ionosphere". */
+  totpIssuer?: string;
 }
 
 /** 서버 전역 TLS 관리 인터페이스(root 전용). upload는 sealed 모드에서만 제공. */
@@ -99,7 +135,44 @@ export interface TlsAdmin {
   upload?(certPem: string, keyPem: string): Promise<CertStatus>;
 }
 
-type AuthContext = { isRoot: true } | { isRoot: false; tenantId: string; apiKeyId: string; scopes: string };
+/**
+ * 인증 주체 세 갈래.
+ *
+ * - `root`: 정적 rootToken(부트스트랩 탈출구, 결정 D4 — 첫 관리자 뒤에는 쓰지 않는다).
+ * - `apiKey`: 서비스 토큰(REST 자동화). 사람 세션이 아니라 MFA·step-up 대상이 아니다.
+ * - `human`: 관리 콘솔 사람 세션(쿠키). 테넌트가 없으면 운영자(전 테넌트)다.
+ *
+ * `isRoot`는 "테넌트에 매이지 않고 rootOnly 명령을 부를 수 있는가"다. 사람 중에서는 운영자 owner만 참이다.
+ */
+type AuthContext =
+  | { kind: "root"; isRoot: true }
+  | { kind: "apiKey"; isRoot: false; tenantId: string; apiKeyId: string; scopes: string }
+  | {
+      kind: "human";
+      isRoot: boolean;
+      /** null = 운영자. */
+      tenantId: string | null;
+      adminUserId: string;
+      username: string;
+      role: AdminRole;
+      sessionId: string;
+      mfaAt: number | null;
+      scopes: string;
+      csrfHash: string;
+    };
+
+/**
+ * 스로틀 계정 키에 접두를 붙인다. 스로틀 인스턴스는 메일 프로토콜과 공유하므로, 관리자 사용자명이 메일 주소와
+ * 같으면 SMTP AUTH 실패가 콘솔 로그인을 잠그고 콘솔 로그인 성공이 메일 쪽 실패 기록을 지운다(2026-10-18 보안 검토).
+ */
+function adminThrottleAccount(username: string): string {
+  return `admin|${username.trim().toLowerCase()}`;
+}
+
+/** 사람 역할 → api_keys와 같은 스코프 축(columns.ts `ADMIN_ROLE` 주석). 권한 판단을 하나로 둔다. */
+function scopesOfRole(role: AdminRole): string {
+  return role === ADMIN_ROLE.readonly ? SCOPE_READ : SCOPE_WRITE;
+}
 
 /**
  * API 키 스코프.
@@ -141,9 +214,15 @@ function requireScope(auth: AuthContext, needed: typeof SCOPE_READ | typeof SCOP
 /** 라우트 핸들러가 의도적으로 던지는 HTTP 상태 있는 에러 — 최상위 catch가 그대로 응답한다. */
 class HttpError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  /**
+   * 기계가 읽는 사유 — 콘솔이 메시지 문자열이 아니라 이것으로 다음 행동을 고른다
+   * (`mfa_required` → 등록 화면, `step_up` → TOTP 재입력 후 재시도, `csrf` → 다시 로그인).
+   */
+  readonly code: string | undefined;
+  constructor(status: number, message: string, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -260,7 +339,7 @@ function requireString(body: Record<string, unknown>, key: string): string {
 
 /** 대상 tenantId 결정: root는 body.tenantId 또는 ?tenantId= 필요, 테넌트 키는 항상 자기 테넌트. */
 function resolveTenantId(auth: AuthContext, url: URL, body: Record<string, unknown>): string {
-  if (!auth.isRoot) return auth.tenantId;
+  if (!auth.isRoot && auth.tenantId !== null) return auth.tenantId;
   const provided = typeof body.tenantId === "string" ? body.tenantId : url.searchParams.get("tenantId");
   if (!provided) throw new HttpError(400, "tenantId required for root token");
   return provided;
@@ -312,7 +391,23 @@ export class AdminApiServer {
     // 주입이 없으면 단독 기동(테스트·단일 사용)이라 자기 것을 쓴다. 조립층은 항상 넘긴다.
     this.throttle = deps.authThrottle ?? new AuthFailureThrottle({ ...(deps.logger ? { logger: deps.logger } : {}) });
     this.audit = deps.audit ?? noopAuditSink;
+    /**
+     * 오리진은 정규화해서 쥔다. 설정값을 문자열 그대로 비교하면 끝의 `/`나 대문자 하나로 모든 로그인이 403이 된다.
+     * 해석이 안 되는 값은 기동을 멈춘다 — 조용히 무시하면 Host 비교로 떨어져 설정한 의도가 사라진다.
+     */
+    if (deps.adminOrigin !== undefined) {
+      let parsed: URL;
+      try {
+        parsed = new URL(deps.adminOrigin);
+      } catch {
+        throw new Error("adminOrigin(IONOSPHERE_ADMIN_ORIGIN)이 URL이 아니다");
+      }
+      this.adminOrigin = parsed.origin;
+    }
   }
+
+  /** 정규화한 관리 콘솔 오리진 — 없으면 Host 비교(`originAllowed`). */
+  private readonly adminOrigin: string | undefined;
 
   listen(port: number, host?: string): Promise<number> {
     return new Promise((resolve, reject) => {
@@ -355,7 +450,7 @@ export class AdminApiServer {
     const token = header.slice("Bearer ".length).trim();
     if (!token) return null;
 
-    if (this.deps.rootToken && secretEquals(token, this.deps.rootToken)) return { isRoot: true };
+    if (this.deps.rootToken && secretEquals(token, this.deps.rootToken)) return { kind: "root", isRoot: true };
 
     // api-key는 sha256hex(token)으로 조회한다 — 비교 대상이 이미 해시라 접두사 타이밍이 새더라도
     // 원본 키를 복원할 수 없다(해시 역상을 만들어야 한다). rootToken과 달리 별도 상수시간 비교 불필요.
@@ -366,7 +461,190 @@ export class AdminApiServer {
     });
     const row = rows[0];
     if (!row) return null;
-    return { isRoot: false, tenantId: String(row.tenant_id), apiKeyId: String(row.id), scopes: String(row.scopes) };
+    return { kind: "apiKey", isRoot: false, tenantId: String(row.tenant_id), apiKeyId: String(row.id), scopes: String(row.scopes) };
+  }
+
+  /**
+   * 쿠키 토큰 → 사람 주체. **매 요청 DB를 본다**(store `resolveAdminSession` 주석) — 로그아웃·정지·역할 하향이
+   * 다음 보호 요청부터 반영되는 것이 이 조회에 달려 있다. 조회가 throw하면 최상위 catch가 500으로 닫는다.
+   */
+  private async authenticateSession(token: string): Promise<Extract<AuthContext, { kind: "human" }> | null> {
+    const s = await resolveAdminSession(this.deps.db, token, this.deps.adminSessionPolicy ?? PROVISIONAL_ADMIN_SESSION_POLICY);
+    if (!s) return null;
+    return {
+      kind: "human",
+      // 운영자(테넌트 없음) owner만 rootOnly 명령을 부를 수 있다 — 테넌트 관리자는 자기 테넌트 밖을 보지 않는다.
+      isRoot: s.user.tenantId === null && s.user.role === ADMIN_ROLE.owner,
+      tenantId: s.user.tenantId,
+      adminUserId: s.user.id,
+      username: s.user.username,
+      role: s.user.role,
+      sessionId: s.sessionId,
+      // 등록되지 않은 관리자는 MFA 시각이 있을 수 없다(초기화 직후 남은 값도 무효로 본다).
+      mfaAt: s.user.mfaEnrolled ? s.mfaAt : null,
+      scopes: scopesOfRole(s.user.role),
+      csrfHash: s.csrfHash,
+    };
+  }
+
+  /**
+   * 쿠키로 인증한 **상태 변경 요청**의 출처 관문. SameSite=Strict 위에 Origin 일치 + CSRF 토큰을 겹친다.
+   * GET은 상태를 바꾸지 않는 것이 계약이라(`requireScope`가 GET=read로 고정) 여기를 지나지 않는다.
+   */
+  private requireSameOriginWrite(req: IncomingMessage, csrfHash: string): void {
+    if (!originAllowed(req, this.adminOrigin) || !csrfMatches(req, csrfHash)) {
+      throw new HttpError(403, "csrf check failed", "csrf");
+    }
+  }
+
+  /**
+   * 민감 작업 관문 — 사람 세션이 `destructive`·`sensitive` 명령을 부르려면 최근 MFA가 있어야 한다(공통 기준 4).
+   * API 키는 서비스 토큰이라 대상이 아니다(결정 D4 — 사람 로그인을 대신하는 데 쓰지 않는다).
+   */
+  private requireFreshMfa(auth: AuthContext, spec: CommandSpec): void {
+    if (auth.kind !== "human" || (spec.destructive !== true && spec.sensitive !== true)) return;
+    const window = this.deps.stepUpMs ?? PROVISIONAL_STEP_UP_MS;
+    if (auth.mfaAt === null || Date.now() - auth.mfaAt > window) {
+      throw new HttpError(403, "mfa step-up required", "step_up");
+    }
+  }
+
+  // ── 사람 세션 엔드포인트 ──────────────────────────────────────────────
+  /**
+   * `/admin/session/*` — 로그인·로그아웃·MFA 등록/확정·step-up. 처리했으면 true.
+   *
+   * ★로그인 응답은 "비밀번호 틀림"과 "TOTP 틀림/없음"을 **구분하지 않는다**. 구분하면 TOTP 칸이
+   * 비밀번호 확인 오라클이 된다. 그래서 콘솔은 TOTP 칸을 항상 보여 주고, 미등록이면 비워 둬도 된다.
+   */
+  private async handleSession(
+    req: IncomingMessage,
+    res: ServerResponse,
+    method: string,
+    pathname: string,
+    ip: string,
+    auditSubject: { tenantId?: string; detail: Record<string, string | number> },
+  ): Promise<boolean> {
+    if (!pathname.startsWith("/admin/session")) return false;
+    const now = Date.now();
+
+    if (method === "POST" && pathname === "/admin/session/login") {
+      // 로그인 CSRF(남의 세션으로 로그인시키기)도 막는다 — 쿠키가 없을 때라 Origin만 본다.
+      if (!originAllowed(req, this.adminOrigin)) throw new HttpError(403, "csrf check failed", "csrf");
+      const body = asRecord(await readBody(req));
+      const username = typeof body.username === "string" ? body.username : "";
+      const password = typeof body.password === "string" ? body.password : "";
+      const totp = typeof body.totp === "string" ? body.totp : "";
+      const subject = { ip, account: adminThrottleAccount(username) };
+      const retryAfter = this.throttle.retryAfterSeconds(subject, now);
+      if (retryAfter > 0) {
+        sendJson(res, 429, { error: "too many failed auth attempts" }, { "Retry-After": String(retryAfter) });
+        return true;
+      }
+      const user = username && password ? await verifyAdminPassword(this.deps.db, username, password) : null;
+      const checksTotp = user !== null && user.mfaEnrolled && totp !== "";
+      const mfaOk = user !== null && (!user.mfaEnrolled || (checksTotp && (await verifyAdminTotp(this.deps.db, user.id, totp, this.deps.masterKey, now))));
+      // ★TOTP를 확인하지 않은 갈래도 같은 비용(봉인 해제 scrypt)을 태운다 — 응답 시간이 "비밀번호는 맞았다"를 흘리지 않게.
+      if (!checksTotp) await burnTotpCost(this.deps.masterKey);
+      if (!user || !mfaOk) {
+        this.throttle.recordFailure(subject, now);
+        auditSubject.detail.user = username;
+        sendJson(res, 401, { error: "invalid credentials" });
+        return true;
+      }
+      this.throttle.clear(subject);
+      // 같은 브라우저의 이전 세션은 닫는다 — 쿠키는 덮이지만 서버 행은 idle 만료까지 살아 있게 된다.
+      const previous = readCookie(req, ADMIN_SESSION_COOKIE);
+      const previousAuth = previous ? await this.authenticateSession(previous) : null;
+      if (previousAuth) await revokeAdminSession(this.deps.db, previousAuth.sessionId, now);
+      const session = await createAdminSession(this.deps.db, user.id, user.mfaEnrolled ? now : null, now);
+      auditSubject.detail.adminUserId = user.id;
+      if (user.tenantId !== null) auditSubject.tenantId = user.tenantId;
+      sendJson(
+        res,
+        200,
+        { csrfToken: session.csrfToken, username: user.username, role: user.role, tenantId: user.tenantId, mfaEnrolled: user.mfaEnrolled },
+        { "Set-Cookie": sessionCookie(session.token), "Cache-Control": "no-store" },
+      );
+      return true;
+    }
+
+    const token = readCookie(req, ADMIN_SESSION_COOKIE);
+    const auth = token ? await this.authenticateSession(token) : null;
+
+    if (method === "POST" && pathname === "/admin/session/logout") {
+      if (auth) {
+        /**
+         * Origin만 본다(CSRF 토큰은 요구하지 않는다). 강제 로그아웃은 공격자가 얻는 것이 없고, 토큰이 없는 탭에서
+         * 로그아웃이 403으로 조용히 실패하면 사용자는 끊긴 줄 아는데 세션이 살아 있게 된다 — 그쪽이 더 위험하다.
+         */
+        if (!originAllowed(req, this.adminOrigin)) throw new HttpError(403, "csrf check failed", "csrf");
+        await revokeAdminSession(this.deps.db, auth.sessionId, now);
+        auditSubject.detail.adminUserId = auth.adminUserId;
+      }
+      // 세션이 이미 없어도 쿠키는 지운다 — 로그아웃은 항상 성공해야 사용자가 갇히지 않는다.
+      sendJson(res, 200, { ok: true }, { "Set-Cookie": clearedSessionCookie() });
+      return true;
+    }
+
+    if (!auth) {
+      sendJson(res, 401, { error: "no session", code: "no_session" });
+      return true;
+    }
+    auditSubject.detail.adminUserId = auth.adminUserId;
+    if (auth.tenantId !== null) auditSubject.tenantId = auth.tenantId;
+
+    if (method === "GET" && pathname === "/admin/session") {
+      sendJson(
+        res,
+        200,
+        {
+          username: auth.username,
+          role: auth.role,
+          tenantId: auth.tenantId,
+          mfaEnrolled: auth.mfaAt !== null || (await this.mfaEnrolled(auth.adminUserId)),
+          mfaAt: auth.mfaAt,
+          stepUpMs: this.deps.stepUpMs ?? PROVISIONAL_STEP_UP_MS,
+          // 세션 토큰에서 유도한 값이라 언제든 다시 줄 수 있다 — 새 탭도 쓰기를 할 수 있게(store `csrfTokenFor`).
+          csrfToken: csrfTokenFor(token!),
+        },
+        { "Cache-Control": "no-store" },
+      );
+      return true;
+    }
+
+    if (method !== "POST") throw new HttpError(404, "not found");
+    this.requireSameOriginWrite(req, auth.csrfHash);
+    const body = asRecord(await readBody(req));
+    const code = typeof body.code === "string" ? body.code : "";
+    const subject = { ip, account: adminThrottleAccount(auth.username) };
+
+    if (pathname === "/admin/session/mfa/enroll") {
+      if (await this.mfaEnrolled(auth.adminUserId)) throw new HttpError(409, "mfa already enrolled");
+      const secret = await beginAdminTotpEnrollment(this.deps.db, auth.adminUserId, this.deps.masterKey);
+      if (!secret) throw new HttpError(404, "admin user not found");
+      sendJson(res, 200, { secret, uri: totpUri(secret, this.deps.totpIssuer ?? "ionosphere", auth.username) }, { "Cache-Control": "no-store" });
+      return true;
+    }
+    if (pathname === "/admin/session/mfa/confirm" || pathname === "/admin/session/mfa/verify") {
+      if (this.throttle.retryAfterSeconds(subject, now) > 0) throw new HttpError(429, "too many failed auth attempts");
+      const ok = pathname === "/admin/session/mfa/confirm"
+        ? await confirmAdminTotpEnrollment(this.deps.db, auth.adminUserId, code, this.deps.masterKey, now)
+        : await verifyAdminTotp(this.deps.db, auth.adminUserId, code, this.deps.masterKey, now);
+      if (!ok) {
+        this.throttle.recordFailure(subject, now);
+        throw new HttpError(401, "invalid code", "invalid_code");
+      }
+      this.throttle.clear(subject);
+      await markAdminSessionMfa(this.deps.db, auth.sessionId, now);
+      sendJson(res, 200, { ok: true, mfaAt: now });
+      return true;
+    }
+    throw new HttpError(404, "not found");
+  }
+
+  private async mfaEnrolled(adminUserId: string): Promise<boolean> {
+    const { rows } = await this.deps.db.query({ sql: "SELECT totp_secret FROM admin_users WHERE id = ?", params: [adminUserId] });
+    return rows[0]?.totp_secret != null;
   }
 
   // ── 라우팅 ──────────────────────────────────────────────────────────
@@ -440,25 +718,54 @@ export class AdminApiServer {
         return sendJson(res, 429, { error: "too many failed auth attempts" }, { "Retry-After": String(retryAfter) });
       }
 
-      const auth = await this.authenticate(req);
-      if (!auth) {
-        this.throttle.recordFailure(ip, now);
-        return sendJson(res, 401, { error: "unauthorized" });
+      if (await this.handleSession(req, res, method, pathname, ip, auditSubject)) return;
+
+      /**
+       * ★Bearer가 있으면 그것만 본다(쿠키는 무시). 자동화가 브라우저 쿠키를 들고 오는 경우에도
+       * 주체가 하나로 정해져야 감사 줄이 "누가"에 답한다.
+       */
+      const sessionToken = req.headers.authorization ? null : readCookie(req, ADMIN_SESSION_COOKIE);
+      let auth: AuthContext | null;
+      if (sessionToken !== null) {
+        auth = await this.authenticateSession(sessionToken);
+        // 만료된 쿠키는 공격이 아니라 일상이다 — 스로틀에 세지 않는다(256비트 토큰은 대입할 수 없다).
+        if (!auth) return sendJson(res, 401, { error: "session expired", code: "no_session" }, { "Set-Cookie": clearedSessionCookie() });
+      } else {
+        auth = await this.authenticate(req);
+        if (!auth) {
+          this.throttle.recordFailure(ip, now);
+          return sendJson(res, 401, { error: "unauthorized" });
+        }
+        this.throttle.clear(ip);
       }
-      this.throttle.clear(ip);
+      if (auth.kind === "human") {
+        auditSubject.detail.adminUserId = auth.adminUserId;
+        if (method !== "GET") this.requireSameOriginWrite(req, auth.csrfHash);
+        // MFA 1차 필수 — 미등록 세션은 등록 엔드포인트(/admin/session/mfa/*)만 쓸 수 있다.
+        if (auth.mfaAt === null) throw new HttpError(403, "mfa enrollment required", "mfa_required");
+      }
       /**
        * 주체를 감사 줄에 채운다. **`apiKeyId`가 핵심 값이다** — 관리 API는 사람이 아니라 키가
        * 주체이고, 키는 여러 개 발급되므로 "어느 키로 계정을 지웠나"에 답할 수 있어야 폐기 결정을
        * 내릴 수 있다. root 토큰은 테넌트가 없으므로 `isRoot`로만 드러난다(cross-tenant 주체).
        */
       auditSubject.detail.isRoot = auth.isRoot ? 1 : 0;
-      if (!auth.isRoot) {
+      if (auth.kind === "apiKey") {
         auditSubject.tenantId = auth.tenantId;
         auditSubject.detail.apiKeyId = auth.apiKeyId;
+      } else if (auth.kind === "human" && auth.tenantId !== null) {
+        auditSubject.tenantId = auth.tenantId;
       }
 
-      // 스코프 관문 — 라우트마다가 아니라 여기 한 곳. 새 라우트가 자동으로 덮인다(위 주석).
-      requireScope(auth, method === "GET" ? SCOPE_READ : SCOPE_WRITE);
+      /**
+       * 스코프 관문 — 라우트마다가 아니라 여기 한 곳. 새 라우트가 자동으로 덮인다(위 주석).
+       *
+       * ★예외는 범용 명령 입구(`POST /v1/commands/:name`) 하나다. 콘솔은 조회도 POST로 부르므로 메서드로 정하면
+       * readonly 관리자·read 키가 조회조차 못 한다(2026-10-18 보안 검토). 그 경로는 아래에서 **명령 서술의
+       * readOnly**로 정한다 — 메서드보다 정확한 근거이고, 모르는 명령은 404라 판정을 건너뛸 틈이 없다.
+       */
+      const genericCommand = method === "POST" && /^\/v1\/commands\/[^/]+$/.test(pathname);
+      if (!genericCommand) requireScope(auth, method === "GET" ? SCOPE_READ : SCOPE_WRITE);
 
       /**
        * 명령 서술 — GUI가 화면을 그리는 근거다. **상태(무엇이 있는지)가 아니라 능력(무엇을 할 수
@@ -484,7 +791,9 @@ export class AdminApiServer {
         const name = decodeURIComponent(cmdMatch[1]!);
         const command = this.registry.get(name);
         if (!command) throw new HttpError(404, `unknown command: ${name}`);
+        requireScope(auth, command.spec.readOnly ? SCOPE_READ : SCOPE_WRITE);
         if (command.spec.rootOnly && !auth.isRoot) throw new HttpError(403, "root token required");
+        this.requireFreshMfa(auth, command.spec);
         const body = asRecord(await readBody(req));
         const ctx = this.commandContext(auth, url, body, command.spec.rootOnly === true);
         auditSubject.detail.command = name;
@@ -518,6 +827,7 @@ export class AdminApiServer {
         if (!cmd) throw new HttpError(500, `route references unknown command: ${route.command}`);
         // root 전용 명령은 여기서 막는다 — 판단 근거(서술)는 명령이 들고 있고 집행은 어댑터가 한다.
         if (cmd.spec.rootOnly && !auth.isRoot) throw new HttpError(403, "root token required");
+        this.requireFreshMfa(auth, cmd.spec);
 
         const ctx = this.commandContext(auth, url, body, cmd.spec.rootOnly === true);
         auditSubject.detail.command = route.command;
@@ -534,7 +844,7 @@ export class AdminApiServer {
            */
           if (route.command === "api-key-revoke" && shaped !== null && typeof shaped === "object") {
             const keyId = (result.data ?? {}).keyId;
-            (shaped as Record<string, unknown>).selfRevoked = !auth.isRoot && auth.apiKeyId === keyId;
+            (shaped as Record<string, unknown>).selfRevoked = auth.kind === "apiKey" && auth.apiKeyId === keyId;
             delete (shaped as Record<string, unknown>).keyId; // 응답 계약에 없는 내부 값
           }
           return sendJson(res, 200, shaped);
@@ -546,7 +856,7 @@ export class AdminApiServer {
 
       return sendJson(res, 404, { error: "not found" });
     } catch (err) {
-      if (err instanceof HttpError) return sendJson(res, err.status, { error: err.message });
+      if (err instanceof HttpError) return sendJson(res, err.status, { error: err.message, ...(err.code ? { code: err.code } : {}) });
       // 도메인 이름 판정은 @ionosphere/api domains.ts 소유라 HttpError를 쓸 수 없다(server.ts 전용).
       // 자기 status를 들고 오므로 여기서 그대로 옮긴다 — 400/409가 400으로 뭉개지지 않게.
       if (err instanceof DomainNameError) return sendJson(res, err.status, { error: err.message });
@@ -570,12 +880,13 @@ export class AdminApiServer {
      * 단 `rootOnly` 명령(테넌트 목록·TLS)은 테넌트에 매이지 않으므로 없어도 된다.
      */
     let tenantId: string | undefined;
-    if (auth.isRoot) {
+    const crossTenant = auth.kind === "root" || (auth.kind === "human" && auth.tenantId === null);
+    if (crossTenant) {
       const provided = typeof body.tenantId === "string" ? body.tenantId : url.searchParams.get("tenantId");
       if (provided) tenantId = provided;
       else if (!rootOnly) throw new HttpError(400, "tenantId required for root token");
     } else {
-      tenantId = auth.tenantId;
+      tenantId = auth.tenantId ?? undefined;
     }
     return {
       db: this.deps.db,

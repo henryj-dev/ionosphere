@@ -120,6 +120,12 @@ export interface CommandSpec {
   readOnly: boolean;
   destructive?: boolean;
   irreversible?: boolean;
+  /**
+   * 되돌릴 수는 있지만 **권한이나 자격증명을 새로 만드는** 명령(API 키·앱 비밀번호·관리자 생성 등).
+   * 사람 세션이 부르려면 `destructive`처럼 최근 MFA가 필요하다(step-up). 화면의 2단계 확인과는 별개다.
+   * 빠뜨리면 탈취한 오래된 세션 하나로 만료 없는 API 키를 뽑아 갈 수 있다(2026-10-18 보안 검토).
+   */
+  sensitive?: boolean;
   /** root 토큰 전용(테넌트 키로는 불가) — 서버 전역 자원을 만지는 명령. */
   rootOnly?: boolean;
   args: readonly ArgSpec[];

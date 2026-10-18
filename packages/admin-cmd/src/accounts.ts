@@ -124,7 +124,7 @@ export const accountCommands: readonly Command[] = [
   },
   {
     spec: {
-      name: "account-create",
+      name: "account-create", sensitive: true,
       group: "계정",
       label: "계정 생성",
       summary: "메일 계정을 만든다(INBOX 포함). 도메인이 검증돼 있어야 한다.",
@@ -199,7 +199,7 @@ export const accountCommands: readonly Command[] = [
   },
   {
     spec: {
-      name: "account-activate",
+      name: "account-activate", sensitive: true,
       group: "계정",
       label: "계정 재활성",
       summary: "정지된 계정을 되살린다. 신고율 자동 정지를 해제할 때도 쓴다.",
@@ -329,7 +329,7 @@ export const accountCommands: readonly Command[] = [
   },
   {
     spec: {
-      name: "app-password-create",
+      name: "app-password-create", sensitive: true,
       group: "계정",
       label: "앱 비밀번호 발급",
       summary: "클라이언트용 앱 비밀번호를 발급한다. 평문은 이때 한 번만 볼 수 있다.",
@@ -385,7 +385,7 @@ export const accountCommands: readonly Command[] = [
   {
     // CLI에만 있던 명령 — 이제 세 표면 전부에 생긴다.
     spec: {
-      name: "oauth-token-create",
+      name: "oauth-token-create", sensitive: true,
       group: "계정",
       label: "OAuth 토큰 발급",
       summary: "XOAUTH2/OAUTHBEARER의 access token으로 쓸 값을 발급한다.",

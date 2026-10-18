@@ -418,6 +418,11 @@ export interface IonosphereAppOptions {
   /** 관리 API 부트스트랩 토큰(최초 테넌트/키 생성용). IONOSPHERE_ADMIN_TOKEN. */
   adminRootToken?: string;
   /**
+   * 관리 콘솔의 정확한 오리진(예: `https://admin.ionosphere.test`). 있으면 쿠키 요청의 Origin을 정확히 비교한다.
+   * 없으면 Origin의 host와 요청 Host를 비교한다 — 443 프론트가 원본 Host를 넘기므로 그것으로도 동작한다.
+   */
+  adminOrigin?: string;
+  /**
    * 클라이언트 자동설정 HTTP 포트(Thunderbird/Outlook/Apple). 미지정 시 리슨 안 함.
    * ⚠ 평문 HTTP — 실운영은 TLS 종단 프록시 뒤에 두고 autoconfig./autodiscover. 호스트로 라우팅.
    * 광고 IMAPS/SMTPS 포트는 imapsPort/smtpsPort(기본 993/465).
@@ -1740,6 +1745,9 @@ export class IonosphereApp {
         ...(this.sharedMailboxRuntime ? { sharedMailbox: this.sharedMailboxRuntime } : {}),
         ...(this.opts.adminRootToken ? { rootToken: this.opts.adminRootToken } : {}),
         ...(this.opts.masterKey ? { masterKey: this.opts.masterKey } : {}),
+        ...(this.opts.adminOrigin ? { adminOrigin: this.opts.adminOrigin } : {}),
+        // 인증 앱에 보이는 이름 — 같은 앱에 여러 서버를 넣었을 때 구분되게 호스트 이름을 쓴다.
+        totpIssuer: `ionosphere (${this.opts.hostname})`,
         ...(tlsAdmin ? { tls: tlsAdmin } : {}),
       });
       // 평문 포트는 443 프론트의 upstream이다 — 공개할 이유가 없어 항상 루프백이다.

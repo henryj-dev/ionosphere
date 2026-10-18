@@ -26,6 +26,8 @@ export const m025AdminUsers: Migration = {
       totp_secret         TEXT,
       totp_pending_secret TEXT,
       totp_last_step      BIGINT,
+      totp_failures       INTEGER NOT NULL DEFAULT 0,
+      totp_locked_until   BIGINT,
       created_at          BIGINT NOT NULL,
       updated_at          BIGINT NOT NULL
     )`,

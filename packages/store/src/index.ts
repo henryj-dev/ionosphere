@@ -138,7 +138,9 @@ export {
 // 관리 콘솔 사람 주체(마이그레이션 025, 회원 정책 E1) — 메일 계정 인증과 분리된 정본.
 export {
   beginAdminTotpEnrollment,
+  burnTotpCost,
   confirmAdminTotpEnrollment,
+  csrfTokenFor,
   createAdminSession,
   createAdminUser,
   getAdminUser,
@@ -151,6 +153,7 @@ export {
   verifyAdminPassword,
   verifyAdminTotp,
   PROVISIONAL_ADMIN_SESSION_POLICY,
+  PROVISIONAL_TOTP_LOCK,
   type AdminSessionPolicy,
   type AdminUser,
   type ResolvedAdminSession,

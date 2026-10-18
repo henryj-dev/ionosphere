@@ -6,7 +6,7 @@
  * 실패 표현: 조회·검증은 `| null`/`false`, 저장 실패(DB 오류)는 throw. 한 파일 안에서 섞지 않는다.
  * 이름에 드러나지 않는 부수효과는 없다 — 세션을 함께 끊는 함수는 이름에 `AndRevokeSessions`가 붙는다.
  */
-import { randomBytes } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { base32Decode, generateTotpSecret, openAsync, seal, sha256hex, ulid, verifyTotp } from "@ionosphere/core";
 import { ADMIN_STATUS, BatchConflictError, isAdminRole, type AdminRole, type DbDriver } from "@ionosphere/db";
 import { hashSecret, verifySecret } from "./auth.ts";
@@ -144,17 +144,77 @@ export async function confirmAdminTotpEnrollment(db: DbDriver, id: string, code:
   });
   const pending = rows[0]?.totp_pending_secret;
   if (typeof pending !== "string") return false;
+  if (!(await claimTotpAttempt(db, id, nowMs))) return false;
   const step = verifyTotp(await openAsync(pending, key), code, nowMs, null);
   if (step === null) return false;
   const r = await db.batch([
     {
       // 조건부 — 확인과 쓰기 사이에 다른 요청이 확정했거나 대기 비밀을 바꿨으면 쓰지 않는다.
-      sql: `UPDATE admin_users SET totp_secret = totp_pending_secret, totp_pending_secret = NULL, totp_last_step = ?, updated_at = ?
+      sql: `UPDATE admin_users SET totp_secret = totp_pending_secret, totp_pending_secret = NULL, totp_last_step = ?, totp_failures = 0, totp_locked_until = NULL, updated_at = ?
             WHERE id = ? AND totp_secret IS NULL AND totp_pending_secret = ?`,
       params: [step, nowMs, id, pending],
     },
   ]);
   return (r[0]?.changes ?? 0) > 0;
+}
+
+/**
+ * TOTP 연속 실패 잠금. 계정 축 스로틀(분당 20회)만으로는 6자리 대입이 며칠이면 끝난다
+ * (하루 2.9만 회 × 3/10⁶). 그래서 **연속 실패**를 계정에 쌓고, 문턱을 넘으면 실패할 때마다 잠금을 배로 늘린다.
+ * 이 경로에 닿으려면 비밀번호가 맞아야 하므로, 비밀번호를 모르는 사람이 남의 계정을 잠그지는 못한다.
+ * ⚠ 수치는 **임시**다 — 공통 회원정책 수치가 확정되지 않았다(2026-10-18).
+ */
+export const PROVISIONAL_TOTP_LOCK = {
+  /** 이만큼 연속으로 틀리면 잠그기 시작한다. */
+  freeFailures: 5,
+  /** 첫 잠금 길이. 실패가 하나 늘 때마다 두 배. */
+  baseLockMs: 60_000,
+  /** 잠금 상한. */
+  maxLockMs: 24 * 60 * 60 * 1000,
+} as const;
+
+function lockUntilAfter(failures: number, nowMs: number): number | null {
+  const over = failures - PROVISIONAL_TOTP_LOCK.freeFailures;
+  if (over < 0) return null;
+  return nowMs + Math.min(PROVISIONAL_TOTP_LOCK.baseLockMs * 2 ** Math.min(over, 30), PROVISIONAL_TOTP_LOCK.maxLockMs);
+}
+
+/**
+ * TOTP 시도 슬롯을 **계산하기 전에** 원자적으로 차지한다 — 차지했으면 true.
+ *
+ * ★실패를 나중에 기록하면(읽고 +1 해서 쓰기) 추측 N개를 동시에 보낼 때 모두가 "아직 안 잠김"을 읽고 통과하고,
+ * 실패 수는 1만 는다(2026-10-18 보안 재검토). 그래서 순서를 뒤집는다: 시도마다 **먼저** 실패 수를 DB 안에서 +1 하고
+ * (성공하면 0으로 되돌린다), 차지 조건을 그 UPDATE의 WHERE에 넣는다. 행 갱신은 DB가 직렬화하므로
+ * 문턱 전에는 최대 `freeFailures`개, 잠금이 풀린 뒤에는 한 개만 차지한다.
+ *
+ * 잠금 해제 직후의 차지는 `totp_locked_until`을 비우고, 곧바로 아래에서 새 잠금을 건다 — 그 사이에 온 요청은
+ * "실패 수가 문턱 이상인데 잠금 시각이 없다"는 조건에 걸려 차지하지 못한다.
+ */
+async function claimTotpAttempt(db: DbDriver, id: string, nowMs: number): Promise<boolean> {
+  const r = await db.batch([
+    {
+      sql: `UPDATE admin_users SET totp_failures = totp_failures + 1, totp_locked_until = NULL
+             WHERE id = ? AND (totp_failures < ? OR (totp_locked_until IS NOT NULL AND totp_locked_until <= ?))`,
+      params: [id, PROVISIONAL_TOTP_LOCK.freeFailures, nowMs],
+    },
+  ]);
+  if ((r[0]?.changes ?? 0) === 0) return false;
+  const { rows } = await db.query({ sql: "SELECT totp_failures FROM admin_users WHERE id = ?", params: [id] });
+  const until = lockUntilAfter(Number(rows[0]?.totp_failures ?? 0), nowMs);
+  // 문턱에 닿은 시도는 결과를 보기 전에 잠금을 건다. 이 시도가 맞으면 성공 경로가 풀어 준다.
+  if (until !== null) await db.batch([{ sql: "UPDATE admin_users SET totp_locked_until = ? WHERE id = ?", params: [until, id] }]);
+  return true;
+}
+
+/**
+ * 로그인 응답 시간 평탄화. 비밀번호가 맞고 TOTP가 들어왔을 때만 봉인 해제(scrypt)가 돌면, 응답 시간만으로
+ * "비밀번호는 맞았다"가 샌다 — 응답 본문을 같게 만든 의미가 사라진다. 그 경로가 아닐 때 이걸 불러 같은 비용을 태운다.
+ */
+let dummySealed: string | null = null;
+export async function burnTotpCost(masterKey: string | undefined): Promise<void> {
+  if (!masterKey) return;
+  dummySealed ??= seal(generateTotpSecret(), masterKey).value;
+  await openAsync(dummySealed, masterKey);
 }
 
 /**
@@ -171,14 +231,19 @@ export async function verifyAdminTotp(db: DbDriver, id: string, code: string, ma
   });
   const row = rows[0];
   if (typeof row?.totp_secret !== "string") return false;
+  // 슬롯을 못 차지하면(잠김) 코드를 계산하지도 않는다 — 맞는 코드도 거절한다. 비용은 같게 태운다.
+  if (!(await claimTotpAttempt(db, id, nowMs))) {
+    await burnTotpCost(key);
+    return false;
+  }
   const last = row.totp_last_step == null ? null : Number(row.totp_last_step);
   const secret = await openAsync(row.totp_secret, key);
-  if (base32Decode(secret) === null) return false;
-  const step = verifyTotp(secret, code, nowMs, last);
+  const step = base32Decode(secret) === null ? null : verifyTotp(secret, code, nowMs, last);
+  // 실패는 이미 차지할 때 셌다 — 여기서 더 기록하지 않는다.
   if (step === null) return false;
   const r = await db.batch([
     {
-      sql: "UPDATE admin_users SET totp_last_step = ? WHERE id = ? AND (totp_last_step IS NULL OR totp_last_step < ?)",
+      sql: "UPDATE admin_users SET totp_last_step = ?, totp_failures = 0, totp_locked_until = NULL WHERE id = ? AND (totp_last_step IS NULL OR totp_last_step < ?)",
       params: [step, id, step],
     },
   ]);
@@ -189,7 +254,7 @@ export async function verifyAdminTotp(db: DbDriver, id: string, code: string, ma
 export async function resetAdminTotpAndRevokeSessions(db: DbDriver, id: string): Promise<boolean> {
   const now = Date.now();
   const r = await db.batch([
-    { sql: "UPDATE admin_users SET totp_secret = NULL, totp_pending_secret = NULL, totp_last_step = NULL, updated_at = ? WHERE id = ?", params: [now, id] },
+    { sql: "UPDATE admin_users SET totp_secret = NULL, totp_pending_secret = NULL, totp_last_step = NULL, totp_failures = 0, totp_locked_until = NULL, updated_at = ? WHERE id = ?", params: [now, id] },
     { sql: "UPDATE admin_sessions SET revoked_at = ? WHERE admin_user_id = ? AND revoked_at IS NULL", params: [now, id] },
   ]);
   return (r[0]?.changes ?? 0) > 0;
@@ -220,6 +285,17 @@ function newToken(): string {
 }
 
 /**
+ * 세션 토큰 → CSRF 토큰. **유도한다**(따로 뽑지 않는다).
+ *
+ * ★따로 뽑아 화면 저장소에 두면 새 탭에는 토큰이 없어 쓰기가 전부 막힌다. 유도하면 서버가 쿠키만 보고 언제든
+ * 다시 만들어 줄 수 있다(`GET /admin/session`). 쿠키는 HttpOnly라 스크립트가 읽지 못하고, 그 응답은 같은
+ * 오리진만 읽을 수 있으므로(CORS 미허용) 다른 사이트가 이 값을 얻을 길이 없다.
+ */
+export function csrfTokenFor(sessionToken: string): string {
+  return createHmac("sha256", sessionToken).update("ionosphere-admin-csrf").digest("base64url");
+}
+
+/**
  * 세션 생성 — 쿠키에 넣을 토큰과 CSRF 토큰을 **한 번만** 돌려준다. 둘 다 해시로만 저장한다.
  * `mfaAt`: 이 로그인에서 MFA를 통과했으면 그 시각. 미등록 관리자는 null로 열리고 등록 화면만 쓸 수 있다.
  */
@@ -230,7 +306,7 @@ export async function createAdminSession(
   nowMs: number = Date.now(),
 ): Promise<{ sessionId: string; token: string; csrfToken: string }> {
   const token = newToken();
-  const csrfToken = newToken();
+  const csrfToken = csrfTokenFor(token);
   const sessionId = sha256hex(token);
   await db.batch([
     {

@@ -15,6 +15,8 @@ import {
   setAdminPasswordAndRevokeSessions,
   verifyAdminPassword,
   verifyAdminTotp,
+  csrfTokenFor,
+  PROVISIONAL_TOTP_LOCK,
 } from "@ionosphere/store";
 
 const KEY = "test-master-key";
@@ -159,5 +161,72 @@ describe("세션", () => {
     const s = await createAdminSession(db, id, Date.now());
     await db.batch([{ sql: "UPDATE admin_users SET role = 9 WHERE id = ?", params: [id] }]);
     expect(await resolveAdminSession(db, s.token, POLICY)).toBeNull();
+  });
+});
+
+describe("TOTP 연속 실패 잠금", () => {
+  test("★문턱을 넘으면 잠기고, 잠긴 동안은 맞는 코드도 거절하며, 풀린 뒤 성공하면 초기화된다", async () => {
+    const { db, id } = await setup();
+    const t0 = 1_800_000_000_000;
+    const secret = (await beginAdminTotpEnrollment(db, id, KEY))!;
+    await confirmAdminTotpEnrollment(db, id, codeAt(secret, t0), KEY, t0);
+    let t = t0 + 30_000;
+    for (let i = 0; i < PROVISIONAL_TOTP_LOCK.freeFailures; i++) expect(await verifyAdminTotp(db, id, "000000", KEY, t)).toBe(false);
+    // 문턱에 닿은 직후부터 잠긴다 — 맞는 코드도 통하지 않는다.
+    expect(await verifyAdminTotp(db, id, codeAt(secret, t), KEY, t)).toBe(false);
+    const { rows } = await db.query({ sql: "SELECT totp_failures, totp_locked_until FROM admin_users WHERE id = ?", params: [id] });
+    expect(Number(rows[0]!.totp_failures)).toBe(PROVISIONAL_TOTP_LOCK.freeFailures);
+    expect(Number(rows[0]!.totp_locked_until)).toBeGreaterThan(t);
+    t = Number(rows[0]!.totp_locked_until) + 30_000;
+    expect(await verifyAdminTotp(db, id, codeAt(secret, t), KEY, t)).toBe(true);
+    const after = await db.query({ sql: "SELECT totp_failures, totp_locked_until FROM admin_users WHERE id = ?", params: [id] });
+    expect(Number(after.rows[0]!.totp_failures)).toBe(0);
+    expect(after.rows[0]!.totp_locked_until).toBeNull();
+  });
+
+  test("잠금은 실패할수록 길어진다(상한까지)", async () => {
+    const { db, id } = await setup();
+    const t0 = 1_800_000_000_000;
+    const secret = (await beginAdminTotpEnrollment(db, id, KEY))!;
+    await confirmAdminTotpEnrollment(db, id, codeAt(secret, t0), KEY, t0);
+    const lengths: number[] = [];
+    let t = t0 + 30_000;
+    for (let i = 0; i < PROVISIONAL_TOTP_LOCK.freeFailures + 3; i++) {
+      await verifyAdminTotp(db, id, "000000", KEY, t);
+      const { rows } = await db.query({ sql: "SELECT totp_locked_until FROM admin_users WHERE id = ?", params: [id] });
+      if (rows[0]!.totp_locked_until != null) {
+        lengths.push(Number(rows[0]!.totp_locked_until) - t);
+        t = Number(rows[0]!.totp_locked_until) + 1; // 잠금이 풀린 직후 다시 틀린다
+      }
+    }
+    expect(lengths.length).toBeGreaterThan(2);
+    for (let i = 1; i < lengths.length; i++) expect(lengths[i]!).toBeGreaterThan(lengths[i - 1]!);
+  });
+});
+
+describe("CSRF 토큰 유도", () => {
+  test("세션 토큰에서 같은 값을 다시 만들 수 있고, 세션마다 다르다", async () => {
+    const { db, id } = await setup();
+    const a = await createAdminSession(db, id, null);
+    const b = await createAdminSession(db, id, null);
+    expect(csrfTokenFor(a.token)).toBe(a.csrfToken);
+    expect(a.csrfToken).not.toBe(b.csrfToken);
+  });
+});
+
+describe("TOTP 동시 추측", () => {
+  test("★추측을 한꺼번에 보내도 문턱 수만큼만 계산되고 나머지는 잠금에 막힌다", async () => {
+    const { db, id } = await setup();
+    const t0 = 1_800_000_000_000;
+    const secret = (await beginAdminTotpEnrollment(db, id, KEY))!;
+    await confirmAdminTotpEnrollment(db, id, codeAt(secret, t0), KEY, t0);
+    const t = t0 + 30_000;
+    const guesses = Array.from({ length: 30 }, (_, i) => String(100000 + i));
+    await Promise.all(guesses.map((g) => verifyAdminTotp(db, id, g, KEY, t)));
+    const { rows } = await db.query({ sql: "SELECT totp_failures, totp_locked_until FROM admin_users WHERE id = ?", params: [id] });
+    // 차지에 성공한 시도만 센다 — 문턱(free)을 넘지 않는다.
+    expect(Number(rows[0]!.totp_failures)).toBe(PROVISIONAL_TOTP_LOCK.freeFailures);
+    expect(Number(rows[0]!.totp_locked_until)).toBeGreaterThan(t);
+    expect(await verifyAdminTotp(db, id, codeAt(secret, t), KEY, t)).toBe(false);
   });
 });

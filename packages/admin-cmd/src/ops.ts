@@ -305,7 +305,7 @@ export const opsCommands: readonly Command[] = [
   },
   {
     spec: {
-      name: "tenant-create",
+      name: "tenant-create", sensitive: true,
       group: "테넌트",
       label: "테넌트 생성",
       summary: "새 테넌트를 만든다(root 전용).",
@@ -358,7 +358,7 @@ export const opsCommands: readonly Command[] = [
   },
   {
     spec: {
-      name: "api-key-create",
+      name: "api-key-create", sensitive: true,
       group: "API 키",
       label: "API 키 발급",
       summary: "관리 API용 키를 발급한다. 평문은 이때 한 번만 볼 수 있다.",
@@ -486,7 +486,7 @@ export const opsCommands: readonly Command[] = [
   },
   {
     spec: {
-      name: "smarthost-set",
+      name: "smarthost-set", sensitive: true,
       group: "릴레이",
       label: "릴레이 설정",
       summary: "아웃바운드 릴레이를 지정한다. 범위가 좁을수록(발신 도메인) 우선한다.",
@@ -626,7 +626,7 @@ export const opsCommands: readonly Command[] = [
   },
   {
     spec: {
-      name: "tls-upload",
+      name: "tls-upload", sensitive: true,
       group: "TLS",
       label: "인증서 업로드",
       summary: "cert/key를 올린다. 개인키는 마스터키로 봉인 저장된다(root 전용, sealed 모드).",

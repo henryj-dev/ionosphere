@@ -547,7 +547,12 @@ describe("AdminApiServer", () => {
       expect(res.headers.get("content-type")).toContain("text/html");
       const html = await res.text();
       expect(html).toContain("ionosphere 관리 콘솔");
-      expect(html).toContain("Bearer 토큰");
+      // 결정 D2(2026-10-18): 화면은 사람 로그인만 받는다 — 토큰 입력과 localStorage 보관이 없어야 한다.
+      expect(html).toContain('id="signin"');
+      expect(html).toContain('"/admin/session/login"');
+      expect(html).not.toContain("Bearer 토큰");
+      expect(html).not.toContain("localStorage");
+      expect(html).not.toContain("authorization");
       /**
        * ★콘솔은 **무상태 스키마 구동**이다 — 기능 목록을 HTML에 갖고 있지 않고
        * `/v1/commands`로 받아 그린다. 그래서 "도메인 해제 버튼이 있는가"를 HTML에서 찾지

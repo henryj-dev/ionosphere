@@ -91,8 +91,11 @@ const ALIASES: Readonly<Record<string, string>> = {
 const STDIN_ONLY: Readonly<Record<string, readonly string[]>> = {
   "smarthost-set": ["password"], // 릴레이 토큰
   "tls-upload": ["key"], // TLS 개인키
+  // 콘솔 관리자 비밀번호 — 관리 권한 그 자체라 릴레이 토큰과 같은 급으로 다룬다(회원 정책 E1).
+  "admin-user-create": ["password"],
+  "admin-user-password-set": ["password"],
 };
-const stdinOnly = (command: string, arg: string): boolean => (STDIN_ONLY[command] ?? []).includes(arg);
+const stdinOnly = (command: string, arg: { name: string }): boolean => (STDIN_ONLY[command] ?? []).includes(arg.name);
 
 /** `--k=v` 형태 플래그 파싱 — 값에 `=`가 들어갈 수 있으므로 첫 `=`만 자른다. */
 function parseFlags(args: readonly string[]): Record<string, string> {
@@ -137,7 +140,8 @@ function printUsage(spec: CommandSpec): void {
   console.error(`  ${spec.summary}`);
   for (const a of spec.args) {
     const req = a.required ? "필수" : "선택";
-    const extra = a.type === "secret" ? " ※ stdin 또는 환경변수로만 받는다" : "";
+    // 안내는 실제 동작과 같아야 한다 — stdin 전용은 위 표에 있는 것뿐이고, 나머지 secret은 위치 인자로도 받는다.
+    const extra = stdinOnly(spec.name, a) ? " ※ stdin 또는 환경변수로만 받는다" : "";
     console.error(`  --${a.name}\t${a.label} (${req})${extra}`);
     if (a.help) console.error(`      ${a.help}`);
     if (a.choices) console.error(`      가능: ${a.choices.map((c) => c.value).join(" | ")}`);
@@ -209,7 +213,7 @@ async function collectArgs(): Promise<Record<string, string | undefined>> {
    * stdin/env로만** 받는다 — 그쪽은 그 자체로 임의 발신 권한이고 한 번 노출되면 회수 전까지
    * 계속 유효해서, `ps`·셸 히스토리 노출의 대가가 다르다(readSecret 주석).
    */
-  const required = cmd!.spec.args.filter((a) => a.required && !stdinOnly(resolvedName, a.name));
+  const required = cmd!.spec.args.filter((a) => a.required && !stdinOnly(resolvedName, a));
   let consumed = 0;
   for (const a of required) {
     if (a.variadic) {
@@ -300,15 +304,19 @@ async function collectArgs(): Promise<Record<string, string | undefined>> {
     return true;
   };
   for (const a of cmd!.spec.args) {
-    if (!stdinOnly(resolvedName, a.name)) continue;
-    if (out[a.name] !== undefined) continue;
-    if (!a.required && !flags[a.name] && !needsSecret(a.name)) continue;
+    if (!stdinOnly(resolvedName, a)) continue;
+    /**
+     * ★플래그를 `out` 확인보다 **먼저** 본다. 위 `Object.assign(out, flags)`가 이미 argv 값을 채워 두므로,
+     * 순서가 반대면 "이미 있다"로 건너뛰어 경고가 한 번도 나가지 않는다(릴레이 토큰도 그렇게 조용히 받았다).
+     */
     const fromFlag = flags[a.name];
     if (fromFlag !== undefined) {
       console.error(`⚠ --${a.name}을(를) argv로 받았다 — ps·셸 히스토리에 남는다. stdin/env를 쓸 것.`);
       out[a.name] = fromFlag;
       continue;
     }
+    if (out[a.name] !== undefined) continue;
+    if (!a.required && !needsSecret(a.name)) continue;
     out[a.name] = await readSecret(a.label);
   }
   return out;
