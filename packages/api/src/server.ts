@@ -553,8 +553,8 @@ export class AdminApiServer {
       }
       this.throttle.clear(subject);
       // 같은 브라우저의 이전 세션은 닫는다 — 쿠키는 덮이지만 서버 행은 idle 만료까지 살아 있게 된다.
-      const previous = readCookie(req, ADMIN_SESSION_COOKIE);
-      const previousAuth = previous ? await this.authenticateSession(previous) : null;
+      // 쿠키가 없으면 빈 토큰 — 세션 해석이 null을 돌려준다(조건 분기 없이 같은 경로를 탄다).
+      const previousAuth = await this.authenticateSession(readCookie(req, ADMIN_SESSION_COOKIE) ?? "");
       if (previousAuth) await revokeAdminSession(this.deps.db, previousAuth.sessionId, now);
       const session = await createAdminSession(this.deps.db, user.id, user.mfaEnrolled ? now : null, now);
       auditSubject.detail.adminUserId = user.id;
@@ -568,8 +568,8 @@ export class AdminApiServer {
       return true;
     }
 
-    const token = readCookie(req, ADMIN_SESSION_COOKIE);
-    const auth = token ? await this.authenticateSession(token) : null;
+    const token = readCookie(req, ADMIN_SESSION_COOKIE) ?? "";
+    const auth = await this.authenticateSession(token);
 
     if (method === "POST" && pathname === "/admin/session/logout") {
       if (auth) {
@@ -605,7 +605,7 @@ export class AdminApiServer {
           mfaAt: auth.mfaAt,
           stepUpMs: this.deps.stepUpMs ?? PROVISIONAL_STEP_UP_MS,
           // 세션 토큰에서 유도한 값이라 언제든 다시 줄 수 있다 — 새 탭도 쓰기를 할 수 있게(store `csrfTokenFor`).
-          csrfToken: csrfTokenFor(token!),
+          csrfToken: csrfTokenFor(token),
         },
         { "Cache-Control": "no-store" },
       );
