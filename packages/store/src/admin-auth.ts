@@ -9,7 +9,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 import { base32Decode, base32Encode, generateTotpSecret, openAsync, seal, sha256hex, ulid, verifyTotp } from "@ionosphere/core";
 import { ADMIN_STATUS, BatchConflictError, isAdminRole, type AdminRole, type DbDriver } from "@ionosphere/db";
-import { generateAppPassword, hashSecret, verifySecret } from "./auth.ts";
+import { hashSecret, verifySecret } from "./auth.ts";
 
 export interface AdminUser {
   id: string;
@@ -131,13 +131,34 @@ function requireMasterKey(masterKey: string | undefined): string {
  */
 export const PROVISIONAL_ENROLL_CODE_TTL_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * 일회용 등록 코드 — 16 소문자(4-4-4-4), 편향 없는 rejection sampling, 약 75비트.
+ *
+ * 앱 비밀번호와 모양은 같지만 **생성기를 공유하지 않는다.** 사람이 고르는 비밀번호가 아니라 서버가 뽑는 고엔트로피
+ * 1회용 값이라 sha256 저장이 맞다(api_keys와 같은 규율). 비밀번호 생성기를 빌려 쓰면 그 값이 "비밀번호"로 분류돼
+ * 느린 해시가 필요한 것처럼 보이고(CodeQL js/insufficient-password-hash), 두 용도의 요구가 갈릴 때 함께 묶인다.
+ */
+function generateOneTimeCode(): string {
+  const alphabet = "abcdefghijklmnopqrstuvwxyz";
+  const limit = 256 - (256 % alphabet.length);
+  const chars: string[] = [];
+  while (chars.length < 16) {
+    for (const b of randomBytes(32)) {
+      if (b >= limit) continue;
+      chars.push(alphabet[b % alphabet.length]!);
+      if (chars.length === 16) break;
+    }
+  }
+  return [0, 4, 8, 12].map((i) => chars.slice(i, i + 4).join("")).join("-");
+}
+
 function normalizeOneTimeCode(code: string): string {
   return code.replace(/[\s-]/g, "").toLowerCase();
 }
 
 /** 등록 코드 발급 — 이전 코드는 무효가 된다. 관리자가 없으면 null. */
 export async function issueAdminEnrollCode(db: DbDriver, id: string, nowMs: number = Date.now()): Promise<string | null> {
-  const code = generateAppPassword();
+  const code = generateOneTimeCode();
   const r = await db.batch([
     {
       sql: "UPDATE admin_users SET enroll_code_hash = ?, enroll_code_expires_at = ?, updated_at = ? WHERE id = ?",
@@ -325,7 +346,7 @@ export async function verifyAdminTotp(db: DbDriver, id: string, code: string, ma
  * 초기화 뒤에는 재등록 전까지 보호 요청이 막힌다.
  */
 export async function resetAdminTotpAndRevokeSessions(db: DbDriver, id: string, nowMs: number = Date.now()): Promise<string | null> {
-  const code = generateAppPassword();
+  const code = generateOneTimeCode();
   const r = await db.batch([
     {
       sql: `UPDATE admin_users SET totp_secret = NULL, totp_pending_secret = NULL, totp_last_step = NULL, totp_failures = 0, totp_locked_until = NULL,
@@ -358,7 +379,7 @@ export async function redeemAdminRecoveryCode(db: DbDriver, id: string, code: st
     },
   ]);
   if ((used[0]?.changes ?? 0) === 0) return null;
-  const enrollCode = generateAppPassword();
+  const enrollCode = generateOneTimeCode();
   await db.batch([
     {
       sql: `UPDATE admin_users SET totp_secret = NULL, totp_pending_secret = NULL, totp_last_step = NULL, totp_failures = 0, totp_locked_until = NULL,
