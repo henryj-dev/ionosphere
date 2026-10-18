@@ -9,6 +9,7 @@ export {
   hashSecret,
   listCredentials,
   revokeCredential,
+  setPrimaryPassword,
   verifySecret,
 } from "./auth.ts";
 export {

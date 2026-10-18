@@ -10,7 +10,7 @@
  */
 import { randomBytes, scrypt as scryptCb, timingSafeEqual, type ScryptOptions } from "node:crypto";
 import { ulid } from "@ionosphere/core";
-import { CREDENTIAL_KIND, credentialKindName, type CredentialKind, type CredentialKindName, type DbDriver } from "@ionosphere/db";
+import { ACCOUNT_STATUS, CREDENTIAL_KIND, credentialKindName, type CredentialKind, type CredentialKindName, type DbDriver } from "@ionosphere/db";
 import { deriveScramKeys } from "@ionosphere/core";
 
 const SCRYPT_N = 16384;
@@ -230,6 +230,40 @@ export async function revokeCredential(db: DbDriver, accountId: string, id: stri
     },
   ]);
   return (r[0]?.changes ?? 0) > 0;
+}
+
+/**
+ * 기본 비밀번호(kind=0) 교체 — 옛 기본 비밀번호 행을 **전부** 지우고 새 행 하나를 넣는다.
+ *
+ * ★UPDATE가 아니라 DELETE+INSERT인 이유: `createCredential`이 kind=0을 막지 않아 한 계정에
+ * 기본 비밀번호 행이 여럿일 수 있다. 하나만 고치면 나머지 옛 비밀번호가 PLAIN으로 계속 통과하고,
+ * SCRAM은 `created_at` 순 첫 행을 보므로 "바꿨는데 SCRAM은 옛 비밀번호"가 된다. 전부 지우고
+ * 하나로 수렴시키면 두 경로가 같은 비밀번호를 본다.
+ *
+ * ★앱 비밀번호·OAuth 토큰(kind≠0)은 건드리지 않는다. 메일 클라이언트마다 따로 발급한 것이라
+ * 기본 비밀번호 교체가 그것들까지 끊으면 사용자는 모든 기기를 다시 설정해야 한다. 끊어야 할 때는
+ * `credential-revoke`로 명시적으로 한다.
+ *
+ * 해시는 배치 **밖에서** 만든다 — scrypt를 배치 안에서 기다리면 라이터 큐를 붙잡는다.
+ * 계정이 없거나 삭제 중이면 false(쓰지 않는다).
+ */
+export async function setPrimaryPassword(db: DbDriver, accountId: string, password: string): Promise<boolean> {
+  const secret = await hashSecret(password);
+  const r = await db.batch([
+    {
+      sql: `DELETE FROM credentials WHERE kind = ${CREDENTIAL_KIND.password} AND account_id IN
+              (SELECT id FROM accounts WHERE id = ? AND status != ${ACCOUNT_STATUS.deleting})`,
+      params: [accountId],
+    },
+    {
+      // 같은 배치 안의 조건부 INSERT — 계정 확인과 삽입 사이에 삭제가 끼어들 틈을 없앤다.
+      sql: `INSERT INTO credentials (id, account_id, kind, label, secret, scopes, created_at)
+            SELECT ?, id, ${CREDENTIAL_KIND.password}, NULL, ?, NULL, ? FROM accounts
+             WHERE id = ? AND status != ${ACCOUNT_STATUS.deleting}`,
+      params: [ulid(), secret, Date.now(), accountId],
+    },
+  ]);
+  return (r[1]?.changes ?? 0) > 0;
 }
 
 /** 자격증명 생성. kind 생략 시 기본 비밀번호(CREDENTIAL_KIND.password). */

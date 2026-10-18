@@ -8,7 +8,7 @@
  * 마이그레이션 006이 인덱스로 의도를 증언하는데 정리 코드가 없던 것과 같은 모양의 구멍이다.
  */
 import { CREDENTIAL_KIND, ACCOUNT_STATUS, type DbDriver } from "@ionosphere/db";
-import { AUTH_SURFACES, createAppPassword, createCredential, createOAuthToken, listCredentials, revokeCredential } from "@ionosphere/store";
+import { AUTH_SURFACES, createAppPassword, createCredential, createOAuthToken, listCredentials, revokeCredential, setPrimaryPassword } from "@ionosphere/store";
 import { CommandError, type Command, type CommandContext } from "./types.ts";
 
 /** 이 명령이 작용할 테넌트. root가 지정하지 않으면 대상이 정해지지 않는다 — 추측하지 않는다. */
@@ -216,6 +216,50 @@ export const accountCommands: readonly Command[] = [
         { sql: "UPDATE accounts SET status = ? WHERE id = ? AND tenant_id = ?", params: [ACCOUNT_STATUS.active, acc.id, tenantId] },
       ]);
       return { data: { accountId: acc.id, status: ACCOUNT_STATUS.active }, message: `활성화됨: ${acc.email}` };
+    },
+  },
+  {
+    /**
+     * ★기본 비밀번호 교체 — 계정을 만든 뒤 비밀번호를 바꿀 입구가 **어디에도 없었다**.
+     * 그래서 운영자가 비밀번호를 바꾸려면 DB를 직접 고치거나 계정을 지우고 다시 만들어야 했고,
+     * 후자는 되돌릴 수 없는 삭제 드레인이다.
+     *
+     * 앱 비밀번호·OAuth 토큰은 그대로 둔다(store `setPrimaryPassword` 주석). 정지된 계정도 바꿀 수
+     * 있다 — 침해 대응이 "정지 → 비밀번호 교체 → 재활성" 순서이기 때문이다.
+     *
+     * 파괴적 표시: 옛 비밀번호가 즉시 무효가 되어 그걸 쓰던 클라이언트가 끊긴다. 화면이 2단계
+     * 확인을 걸게 한다. 이미 열린 IMAP·POP3 연결은 끊지 않는다(연결 단위 인증이다).
+     */
+    spec: {
+      name: "account-password-set",
+      group: "계정",
+      label: "비밀번호 변경",
+      summary: "기본 비밀번호를 바꾼다. 앱 비밀번호·OAuth 토큰은 유지된다.",
+      readOnly: false,
+      destructive: true,
+      args: [
+        { name: "account", label: "계정(주소 또는 id)", type: "string", required: true },
+        { name: "password", label: "새 비밀번호", type: "secret", required: true, help: "IMAP/POP3/SMTP 로그인에 쓰입니다." },
+      ],
+    },
+    async run(ctx, args) {
+      const tenantId = requireTenant(ctx);
+      const acc = await resolveAccount(ctx.db, tenantId, args.account!);
+      if (acc.status === ACCOUNT_STATUS.deleting) {
+        throw new CommandError("conflict", `삭제 중인 계정은 비밀번호를 바꿀 수 없습니다: ${acc.email}`, "삭제는 되돌릴 수 없습니다");
+      }
+      const password = args.password ?? "";
+      // 빈 비밀번호는 어떤 프로토콜에서도 쓸 수 없다. 저장되면 "바꿨는데 아무도 못 들어오는" 계정이 된다.
+      if (password.length === 0) throw new CommandError("invalid", "새 비밀번호가 비어 있습니다");
+      // 확인과 쓰기 사이에 삭제가 끼면 store가 쓰지 않고 false를 준다.
+      if (!(await setPrimaryPassword(ctx.db, acc.id, password))) {
+        throw new CommandError("conflict", `계정 상태가 바뀌어 비밀번호를 바꾸지 못했습니다: ${acc.email}`);
+      }
+      return {
+        data: { accountId: acc.id },
+        // JMAP은 인증 결과를 30초 캐시한다 — 옛 비밀번호가 그동안 JMAP에서만 통한다는 사실을 알린다.
+        message: `비밀번호 변경됨: ${acc.email} (앱 비밀번호·OAuth 토큰 유지, JMAP 반영은 최대 30초)`,
+      };
     },
   },
   {

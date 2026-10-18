@@ -216,7 +216,7 @@ CREATE TABLE credentials (
   account_id    VARCHAR(26) NOT NULL,
   kind          SMALLINT NOT NULL,                  -- 0 password / 1 app-password / 2 oauth(v2)
   label         VARCHAR(190),
-  secret        TEXT NOT NULL,                      -- 자기서술 포맷: "argon2id$..." | "scram256$salt$iter$storedKey$serverKey"
+  secret        TEXT NOT NULL,                      -- 자기서술 포맷: "scrypt$N$r$p$salt$hash[ scram256$iter$salt$storedKey$serverKey]" (store/auth.ts — 원안의 argon2id는 node 내장이 아니라 scrypt로 갔다)
                                                     -- SCRAM 키는 다음 PLAIN 로그인 때 지연 생성 (포맷 버전이 앞에)
   scopes        VARCHAR(190),
   last_used_at  BIGINT,
