@@ -28,6 +28,8 @@ export const m025AdminUsers: Migration = {
       totp_last_step      BIGINT,
       totp_failures       INTEGER NOT NULL DEFAULT 0,
       totp_locked_until   BIGINT,
+      enroll_code_hash    VARCHAR(64),
+      enroll_code_expires_at BIGINT,
       created_at          BIGINT NOT NULL,
       updated_at          BIGINT NOT NULL
     )`,
@@ -43,5 +45,16 @@ export const m025AdminUsers: Migration = {
       revoked_at     BIGINT
     )`,
     "CREATE INDEX IF NOT EXISTS ix_admin_sessions_user ON admin_sessions(admin_user_id)",
+    /**
+     * 복구 코드 — 인증 앱을 잃었을 때 본인이 스스로 되찾는 1회용 코드(2026-10-18 사용자 결정).
+     * 해시로만 저장하고, 쓰면 `used_at`을 찍는다(지우지 않는다 — 언제 썼는지가 감사 근거다).
+     */
+    `CREATE TABLE IF NOT EXISTS admin_recovery_codes (
+      admin_user_id  VARCHAR(26) NOT NULL,
+      code_hash      VARCHAR(64) NOT NULL,
+      created_at     BIGINT NOT NULL,
+      used_at        BIGINT,
+      PRIMARY KEY (admin_user_id, code_hash)
+    )`,
   ],
 };

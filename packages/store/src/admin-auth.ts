@@ -7,9 +7,9 @@
  * 이름에 드러나지 않는 부수효과는 없다 — 세션을 함께 끊는 함수는 이름에 `AndRevokeSessions`가 붙는다.
  */
 import { createHmac, randomBytes } from "node:crypto";
-import { base32Decode, generateTotpSecret, openAsync, seal, sha256hex, ulid, verifyTotp } from "@ionosphere/core";
+import { base32Decode, base32Encode, generateTotpSecret, openAsync, seal, sha256hex, ulid, verifyTotp } from "@ionosphere/core";
 import { ADMIN_STATUS, BatchConflictError, isAdminRole, type AdminRole, type DbDriver } from "@ionosphere/db";
-import { hashSecret, verifySecret } from "./auth.ts";
+import { generateAppPassword, hashSecret, verifySecret } from "./auth.ts";
 
 export interface AdminUser {
   id: string;
@@ -123,39 +123,108 @@ function requireMasterKey(masterKey: string | undefined): string {
 }
 
 /**
- * TOTP 등록 시작 — 새 비밀을 **대기 칸**에 봉인해 두고 평문(base32)을 돌려준다. 확정 전에는 로그인에 쓰이지 않는다.
- * 앱에 옮겨 적다 틀리면 그 계정은 영영 MFA를 통과하지 못하므로, 코드 하나를 맞혀야 확정된다.
+ * 일회용 등록 코드(2026-10-18 사용자 결정). 첫 TOTP 등록(새 관리자·MFA 초기화·복구 코드 사용 뒤)에 필요하다.
+ *
+ * ★비밀번호만으로 등록할 수 있으면 비밀번호를 아는 사람이 본인보다 먼저 MFA를 차지한다 — 그 뒤로는 그 사람이
+ * 계정의 주인이 된다. 등록 코드는 만드는 쪽(owner·호스트 CLI)이 한 번만 보고 본인에게 **따로** 전달한다.
+ * 해시로만 저장하고, 등록이 확정되면 지운다. ⚠ 유효 기간은 **임시**다(공통 수치 미확정).
  */
-export async function beginAdminTotpEnrollment(db: DbDriver, id: string, masterKey: string | undefined): Promise<string | null> {
+export const PROVISIONAL_ENROLL_CODE_TTL_MS = 24 * 60 * 60 * 1000;
+
+function normalizeOneTimeCode(code: string): string {
+  return code.replace(/[\s-]/g, "").toLowerCase();
+}
+
+/** 등록 코드 발급 — 이전 코드는 무효가 된다. 관리자가 없으면 null. */
+export async function issueAdminEnrollCode(db: DbDriver, id: string, nowMs: number = Date.now()): Promise<string | null> {
+  const code = generateAppPassword();
+  const r = await db.batch([
+    {
+      sql: "UPDATE admin_users SET enroll_code_hash = ?, enroll_code_expires_at = ?, updated_at = ? WHERE id = ?",
+      params: [sha256hex(normalizeOneTimeCode(code)), nowMs + PROVISIONAL_ENROLL_CODE_TTL_MS, nowMs, id],
+    },
+  ]);
+  return (r[0]?.changes ?? 0) > 0 ? code : null;
+}
+
+/**
+ * TOTP 등록 시작 — 등록 코드가 맞을 때만 새 비밀을 **대기 칸**에 봉인하고 평문(base32)을 돌려준다.
+ * 확정 전에는 로그인에 쓰이지 않는다. 앱에 옮겨 적다 틀리면 영영 통과하지 못하므로, 코드 하나를 맞혀야 확정된다.
+ * 등록 코드 확인은 UPDATE의 조건이다(조회 뒤 쓰기가 아니다). 틀림·만료·이미 등록됨은 전부 null.
+ */
+export async function beginAdminTotpEnrollment(
+  db: DbDriver,
+  id: string,
+  enrollCode: string,
+  masterKey: string | undefined,
+  nowMs: number = Date.now(),
+): Promise<string | null> {
   const key = requireMasterKey(masterKey);
+  if (normalizeOneTimeCode(enrollCode) === "") return null;
   const secret = generateTotpSecret();
   const r = await db.batch([
-    { sql: "UPDATE admin_users SET totp_pending_secret = ?, updated_at = ? WHERE id = ? AND status = ?", params: [seal(secret, key).value, Date.now(), id, ADMIN_STATUS.active] },
+    {
+      sql: `UPDATE admin_users SET totp_pending_secret = ?, updated_at = ?
+             WHERE id = ? AND status = ? AND totp_secret IS NULL AND enroll_code_hash = ? AND enroll_code_expires_at > ?`,
+      params: [seal(secret, key).value, nowMs, id, ADMIN_STATUS.active, sha256hex(normalizeOneTimeCode(enrollCode)), nowMs],
+    },
   ]);
   return (r[0]?.changes ?? 0) > 0 ? secret : null;
 }
 
-/** 등록 확정 — 대기 비밀로 만든 코드가 맞으면 확정 칸으로 옮긴다. 이미 확정된 비밀은 이 경로로 덮지 않는다. */
-export async function confirmAdminTotpEnrollment(db: DbDriver, id: string, code: string, masterKey: string | undefined, nowMs: number = Date.now()): Promise<boolean> {
+/** 복구 코드 — 한 번에 발급하는 개수와 형식. ⚠ **임시** 수치(공통 미확정). 10자 base32 ≈ 50비트. */
+export const PROVISIONAL_RECOVERY_CODES = { count: 10, length: 10 } as const;
+
+function generateRecoveryCode(): string {
+  const raw = base32Encode(randomBytes(8)).toLowerCase().slice(0, PROVISIONAL_RECOVERY_CODES.length);
+  return `${raw.slice(0, 5)}-${raw.slice(5)}`;
+}
+
+/**
+ * 등록 확정 — 대기 비밀로 만든 코드가 맞으면 확정 칸으로 옮기고, 등록 코드를 지우고, **복구 코드를 새로 발급**한다.
+ * 성공하면 평문 복구 코드 목록(한 번만 보인다), 실패하면 null. 이미 확정된 비밀은 이 경로로 덮지 않는다.
+ */
+export async function confirmAdminTotpEnrollment(
+  db: DbDriver,
+  id: string,
+  code: string,
+  masterKey: string | undefined,
+  nowMs: number = Date.now(),
+): Promise<string[] | null> {
   const key = requireMasterKey(masterKey);
   const { rows } = await db.query({
     sql: "SELECT totp_pending_secret FROM admin_users WHERE id = ? AND status = ? AND totp_secret IS NULL",
     params: [id, ADMIN_STATUS.active],
   });
   const pending = rows[0]?.totp_pending_secret;
-  if (typeof pending !== "string") return false;
-  if (!(await claimTotpAttempt(db, id, nowMs))) return false;
+  if (typeof pending !== "string") return null;
+  if (!(await claimTotpAttempt(db, id, nowMs))) return null;
   const step = verifyTotp(await openAsync(pending, key), code, nowMs, null);
-  if (step === null) return false;
+  if (step === null) return null;
   const r = await db.batch([
     {
       // 조건부 — 확인과 쓰기 사이에 다른 요청이 확정했거나 대기 비밀을 바꿨으면 쓰지 않는다.
-      sql: `UPDATE admin_users SET totp_secret = totp_pending_secret, totp_pending_secret = NULL, totp_last_step = ?, totp_failures = 0, totp_locked_until = NULL, updated_at = ?
-            WHERE id = ? AND totp_secret IS NULL AND totp_pending_secret = ?`,
+      sql: `UPDATE admin_users SET totp_secret = totp_pending_secret, totp_pending_secret = NULL, totp_last_step = ?, totp_failures = 0, totp_locked_until = NULL,
+                   enroll_code_hash = NULL, enroll_code_expires_at = NULL, updated_at = ?
+             WHERE id = ? AND totp_secret IS NULL AND totp_pending_secret = ?`,
       params: [step, nowMs, id, pending],
     },
   ]);
-  return (r[0]?.changes ?? 0) > 0;
+  if ((r[0]?.changes ?? 0) === 0) return null;
+  /**
+   * 복구 코드는 확정에 **이긴 뒤에만** 쓴다. 같은 배치에 넣으면 동시 확정에서 진 요청도 복구 코드를 덮어써,
+   * 이긴 요청이 사용자에게 보여 준 코드가 무효가 된다. 옛 코드는 지운다 — 새 장치로 등록했으면 예전에 인쇄해 둔
+   * 코드는 더 이상 이 계정의 것이 아니다.
+   */
+  const recovery = Array.from({ length: PROVISIONAL_RECOVERY_CODES.count }, generateRecoveryCode);
+  await db.batch([
+    { sql: "DELETE FROM admin_recovery_codes WHERE admin_user_id = ?", params: [id] },
+    ...recovery.map((c) => ({
+      sql: "INSERT INTO admin_recovery_codes (admin_user_id, code_hash, created_at, used_at) VALUES (?, ?, ?, NULL)",
+      params: [id, sha256hex(normalizeOneTimeCode(c)), nowMs],
+    })),
+  ]);
+  return recovery;
 }
 
 /**
@@ -250,14 +319,61 @@ export async function verifyAdminTotp(db: DbDriver, id: string, code: string, ma
   return (r[0]?.changes ?? 0) > 0;
 }
 
-/** MFA 초기화(분실 복구 — 비상 경로·owner 명령 전용) + 세션 철회. 초기화 뒤에는 재등록 전까지 보호 요청이 막힌다. */
-export async function resetAdminTotpAndRevokeSessions(db: DbDriver, id: string): Promise<boolean> {
-  const now = Date.now();
+/**
+ * MFA 초기화(분실 복구의 보조 경로 — owner 명령·호스트 CLI 전용) + 세션 철회 + 복구 코드 폐기 + **새 등록 코드 발급**.
+ * 돌려준 등록 코드는 부른 쪽이 한 번만 보고 본인에게 따로 전달한다. 관리자가 없으면 null.
+ * 초기화 뒤에는 재등록 전까지 보호 요청이 막힌다.
+ */
+export async function resetAdminTotpAndRevokeSessions(db: DbDriver, id: string, nowMs: number = Date.now()): Promise<string | null> {
+  const code = generateAppPassword();
   const r = await db.batch([
-    { sql: "UPDATE admin_users SET totp_secret = NULL, totp_pending_secret = NULL, totp_last_step = NULL, totp_failures = 0, totp_locked_until = NULL, updated_at = ? WHERE id = ?", params: [now, id] },
-    { sql: "UPDATE admin_sessions SET revoked_at = ? WHERE admin_user_id = ? AND revoked_at IS NULL", params: [now, id] },
+    {
+      sql: `UPDATE admin_users SET totp_secret = NULL, totp_pending_secret = NULL, totp_last_step = NULL, totp_failures = 0, totp_locked_until = NULL,
+                   enroll_code_hash = ?, enroll_code_expires_at = ?, updated_at = ? WHERE id = ?`,
+      params: [sha256hex(normalizeOneTimeCode(code)), nowMs + PROVISIONAL_ENROLL_CODE_TTL_MS, nowMs, id],
+    },
+    { sql: "UPDATE admin_sessions SET revoked_at = ? WHERE admin_user_id = ? AND revoked_at IS NULL", params: [nowMs, id] },
+    { sql: "DELETE FROM admin_recovery_codes WHERE admin_user_id = ?", params: [id] },
   ]);
-  return (r[0]?.changes ?? 0) > 0;
+  return (r[0]?.changes ?? 0) > 0 ? code : null;
+}
+
+/**
+ * 복구 코드로 들어오기 — 인증 앱을 잃은 본인이 스스로 되찾는 경로(2026-10-18 사용자 결정).
+ *
+ * 맞으면: 그 코드를 소비하고, TOTP를 지우고, **다른 세션을 전부 끊고**, 새 등록 코드를 돌려준다. 호출자는 그 등록 코드로
+ * 이 세션에서 곧바로 새 장치를 등록하게 한다. 복구 코드는 "MFA를 통과했다"가 아니라 "다시 등록할 자격"이다 —
+ * 그래서 등록을 마치기 전에는 보호 요청이 열리지 않는다.
+ *
+ * 시도는 TOTP와 **같은 실패 카운터·잠금**을 쓴다(둘 다 두 번째 요소 추측이다). 틀림·잠김·쓴 코드는 전부 null.
+ */
+export async function redeemAdminRecoveryCode(db: DbDriver, id: string, code: string, nowMs: number = Date.now()): Promise<{ enrollCode: string } | null> {
+  const normalized = normalizeOneTimeCode(code);
+  if (normalized === "") return null;
+  if (!(await claimTotpAttempt(db, id, nowMs))) return null;
+  const used = await db.batch([
+    {
+      sql: "UPDATE admin_recovery_codes SET used_at = ? WHERE admin_user_id = ? AND code_hash = ? AND used_at IS NULL",
+      params: [nowMs, id, sha256hex(normalized)],
+    },
+  ]);
+  if ((used[0]?.changes ?? 0) === 0) return null;
+  const enrollCode = generateAppPassword();
+  await db.batch([
+    {
+      sql: `UPDATE admin_users SET totp_secret = NULL, totp_pending_secret = NULL, totp_last_step = NULL, totp_failures = 0, totp_locked_until = NULL,
+                   enroll_code_hash = ?, enroll_code_expires_at = ?, updated_at = ? WHERE id = ?`,
+      params: [sha256hex(normalizeOneTimeCode(enrollCode)), nowMs + PROVISIONAL_ENROLL_CODE_TTL_MS, nowMs, id],
+    },
+    { sql: "UPDATE admin_sessions SET revoked_at = ? WHERE admin_user_id = ? AND revoked_at IS NULL", params: [nowMs, id] },
+  ]);
+  return { enrollCode };
+}
+
+/** 남은(안 쓴) 복구 코드 수 — 화면이 "얼마 안 남았다"를 알릴 수 있게. */
+export async function remainingAdminRecoveryCodes(db: DbDriver, id: string): Promise<number> {
+  const { rows } = await db.query({ sql: "SELECT COUNT(*) AS n FROM admin_recovery_codes WHERE admin_user_id = ? AND used_at IS NULL", params: [id] });
+  return Number(rows[0]?.n ?? 0);
 }
 
 // ── 세션 ───────────────────────────────────────────────────────────────

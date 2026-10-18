@@ -44,6 +44,8 @@ import {
   revokeAdminSession,
   Store,
   StoreError,
+  redeemAdminRecoveryCode,
+  remainingAdminRecoveryCodes,
   verifyAdminPassword,
   verifyAdminTotp,
   type AdminSessionPolicy,
@@ -534,6 +536,7 @@ export class AdminApiServer {
       const username = typeof body.username === "string" ? body.username : "";
       const password = typeof body.password === "string" ? body.password : "";
       const totp = typeof body.totp === "string" ? body.totp : "";
+      const recoveryCode = typeof body.recoveryCode === "string" ? body.recoveryCode : "";
       const subject = { ip, account: adminThrottleAccount(username) };
       const retryAfter = this.throttle.retryAfterSeconds(subject, now);
       if (retryAfter > 0) {
@@ -542,8 +545,17 @@ export class AdminApiServer {
       }
       const user = username && password ? await verifyAdminPassword(this.deps.db, username, password) : null;
       const checksTotp = user !== null && user.mfaEnrolled && totp !== "";
-      const mfaOk = user !== null && (!user.mfaEnrolled || (checksTotp && (await verifyAdminTotp(this.deps.db, user.id, totp, this.deps.masterKey, now))));
-      // ★TOTP를 확인하지 않은 갈래도 같은 비용(봉인 해제 scrypt)을 태운다 — 응답 시간이 "비밀번호는 맞았다"를 흘리지 않게.
+      /**
+       * 복구 코드 갈래 — TOTP 칸이 비고 복구 코드가 있을 때만. 성공하면 TOTP가 지워지고 새 등록 코드가 나온다
+       * (store `redeemAdminRecoveryCode`). 이 세션은 등록을 마치기 전까지 보호 요청을 쓰지 못한다.
+       */
+      const checksRecovery = user !== null && user.mfaEnrolled && !checksTotp && recoveryCode !== "";
+      let recovered: { enrollCode: string } | null = null;
+      if (checksRecovery) recovered = await redeemAdminRecoveryCode(this.deps.db, user.id, recoveryCode, now);
+      const mfaOk =
+        user !== null &&
+        (!user.mfaEnrolled || recovered !== null || (checksTotp && (await verifyAdminTotp(this.deps.db, user.id, totp, this.deps.masterKey, now))));
+      // ★봉인 해제(scrypt)를 돌리지 않은 갈래도 같은 비용을 태운다 — 응답 시간이 "비밀번호는 맞았다"를 흘리지 않게.
       if (!checksTotp) await burnTotpCost(this.deps.masterKey);
       if (!user || !mfaOk) {
         this.throttle.recordFailure(subject, now);
@@ -556,13 +568,23 @@ export class AdminApiServer {
       // 쿠키가 없으면 빈 토큰 — 세션 해석이 null을 돌려준다(조건 분기 없이 같은 경로를 탄다).
       const previousAuth = await this.authenticateSession(readCookie(req, ADMIN_SESSION_COOKIE) ?? "");
       if (previousAuth) await revokeAdminSession(this.deps.db, previousAuth.sessionId, now);
-      const session = await createAdminSession(this.deps.db, user.id, user.mfaEnrolled ? now : null, now);
+      const enrolledNow = user.mfaEnrolled && recovered === null;
+      const session = await createAdminSession(this.deps.db, user.id, enrolledNow ? now : null, now);
       auditSubject.detail.adminUserId = user.id;
+      if (recovered) auditSubject.detail.recoveryCode = 1;
       if (user.tenantId !== null) auditSubject.tenantId = user.tenantId;
       sendJson(
         res,
         200,
-        { csrfToken: session.csrfToken, username: user.username, role: user.role, tenantId: user.tenantId, mfaEnrolled: user.mfaEnrolled },
+        {
+          csrfToken: session.csrfToken,
+          username: user.username,
+          role: user.role,
+          tenantId: user.tenantId,
+          mfaEnrolled: enrolledNow,
+          // 복구 코드로 들어왔으면 새 장치 등록에 쓸 일회용 코드 — 이 응답에서만 보인다.
+          ...(recovered ? { enrollCode: recovered.enrollCode } : {}),
+        },
         { "Set-Cookie": sessionCookie(session.token), "Cache-Control": "no-store" },
       );
       return true;
@@ -604,6 +626,7 @@ export class AdminApiServer {
           mfaEnrolled: auth.mfaAt !== null || (await this.mfaEnrolled(auth.adminUserId)),
           mfaAt: auth.mfaAt,
           stepUpMs: this.deps.stepUpMs ?? PROVISIONAL_STEP_UP_MS,
+          recoveryCodesRemaining: await remainingAdminRecoveryCodes(this.deps.db, auth.adminUserId),
           // 세션 토큰에서 유도한 값이라 언제든 다시 줄 수 있다 — 새 탭도 쓰기를 할 수 있게(store `csrfTokenFor`).
           csrfToken: csrfTokenFor(token),
         },
@@ -620,23 +643,31 @@ export class AdminApiServer {
 
     if (pathname === "/admin/session/mfa/enroll") {
       if (await this.mfaEnrolled(auth.adminUserId)) throw new HttpError(409, "mfa already enrolled");
-      const secret = await beginAdminTotpEnrollment(this.deps.db, auth.adminUserId, this.deps.masterKey);
-      if (!secret) throw new HttpError(404, "admin user not found");
+      if (this.throttle.retryAfterSeconds(subject, now) > 0) throw new HttpError(429, "too many failed auth attempts");
+      // 일회용 등록 코드가 있어야 한다 — 비밀번호만으로 MFA를 차지하지 못하게(store `issueAdminEnrollCode` 주석).
+      const enrollCode = typeof body.enrollCode === "string" ? body.enrollCode : "";
+      const secret = await beginAdminTotpEnrollment(this.deps.db, auth.adminUserId, enrollCode, this.deps.masterKey, now);
+      if (!secret) {
+        this.throttle.recordFailure(subject, now);
+        throw new HttpError(401, "invalid or expired enrollment code", "invalid_enroll_code");
+      }
       sendJson(res, 200, { secret, uri: totpUri(secret, this.deps.totpIssuer ?? "ionosphere", auth.username) }, { "Cache-Control": "no-store" });
       return true;
     }
     if (pathname === "/admin/session/mfa/confirm" || pathname === "/admin/session/mfa/verify") {
       if (this.throttle.retryAfterSeconds(subject, now) > 0) throw new HttpError(429, "too many failed auth attempts");
-      const ok = pathname === "/admin/session/mfa/confirm"
+      const recoveryCodes = pathname === "/admin/session/mfa/confirm"
         ? await confirmAdminTotpEnrollment(this.deps.db, auth.adminUserId, code, this.deps.masterKey, now)
-        : await verifyAdminTotp(this.deps.db, auth.adminUserId, code, this.deps.masterKey, now);
+        : null;
+      const ok = recoveryCodes !== null || (pathname === "/admin/session/mfa/verify" && (await verifyAdminTotp(this.deps.db, auth.adminUserId, code, this.deps.masterKey, now)));
       if (!ok) {
         this.throttle.recordFailure(subject, now);
         throw new HttpError(401, "invalid code", "invalid_code");
       }
       this.throttle.clear(subject);
       await markAdminSessionMfa(this.deps.db, auth.sessionId, now);
-      sendJson(res, 200, { ok: true, mfaAt: now });
+      // 등록 확정이면 복구 코드를 **이 응답에서만** 준다(저장은 해시뿐이다).
+      sendJson(res, 200, { ok: true, mfaAt: now, ...(recoveryCodes ? { recoveryCodes } : {}) }, { "Cache-Control": "no-store" });
       return true;
     }
     throw new HttpError(404, "not found");

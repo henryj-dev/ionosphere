@@ -16,6 +16,9 @@ import {
   verifyAdminPassword,
   verifyAdminTotp,
   csrfTokenFor,
+  issueAdminEnrollCode,
+  redeemAdminRecoveryCode,
+  PROVISIONAL_RECOVERY_CODES,
   PROVISIONAL_TOTP_LOCK,
 } from "@ionosphere/store";
 
@@ -64,10 +67,10 @@ describe("TOTP 등록·검증", () => {
   test("등록은 코드를 맞혀야 확정되고, 확정 전에는 MFA로 쓰이지 않는다", async () => {
     const { db, id } = await setup();
     const now = 1_800_000_000_000;
-    const secret = (await beginAdminTotpEnrollment(db, id, KEY))!;
+    const secret = (await beginAdminTotpEnrollment(db, id, (await issueAdminEnrollCode(db, id, now))!, KEY, now))!;
     expect(await verifyAdminTotp(db, id, codeAt(secret, now), KEY, now)).toBe(false);
-    expect(await confirmAdminTotpEnrollment(db, id, "000000", KEY, now)).toBe(false);
-    expect(await confirmAdminTotpEnrollment(db, id, codeAt(secret, now), KEY, now)).toBe(true);
+    expect(await confirmAdminTotpEnrollment(db, id, "000000", KEY, now)).toBeNull();
+    expect(await confirmAdminTotpEnrollment(db, id, codeAt(secret, now), KEY, now)).toHaveLength(PROVISIONAL_RECOVERY_CODES.count);
     // 저장값은 봉인돼 있다 — 평문 비밀이 DB에 없다.
     const { rows } = await db.query({ sql: "SELECT totp_secret FROM admin_users WHERE id = ?", params: [id] });
     expect(String(rows[0]!.totp_secret)).toStartWith("enc$v1$");
@@ -77,7 +80,7 @@ describe("TOTP 등록·검증", () => {
   test("★등록에 쓴 코드와 같은 스텝은 다시 못 쓰고, 다음 스텝은 된다", async () => {
     const { db, id } = await setup();
     const now = 1_800_000_000_000;
-    const secret = (await beginAdminTotpEnrollment(db, id, KEY))!;
+    const secret = (await beginAdminTotpEnrollment(db, id, (await issueAdminEnrollCode(db, id, now))!, KEY, now))!;
     await confirmAdminTotpEnrollment(db, id, codeAt(secret, now), KEY, now);
     expect(await verifyAdminTotp(db, id, codeAt(secret, now), KEY, now)).toBe(false);
     const later = now + 30_000;
@@ -87,16 +90,16 @@ describe("TOTP 등록·검증", () => {
 
   test("마스터 키가 없으면 TOTP를 다루지 않는다(평문 저장 금지)", async () => {
     const { db, id } = await setup();
-    await expect(beginAdminTotpEnrollment(db, id, undefined)).rejects.toThrow(/MASTER_KEY/);
+    await expect(beginAdminTotpEnrollment(db, id, "any-code", undefined)).rejects.toThrow(/MASTER_KEY/);
   });
 
   test("MFA 초기화는 비밀을 지우고 세션을 끊는다", async () => {
     const { db, id } = await setup();
     const now = 1_800_000_000_000;
-    const secret = (await beginAdminTotpEnrollment(db, id, KEY))!;
+    const secret = (await beginAdminTotpEnrollment(db, id, (await issueAdminEnrollCode(db, id, now))!, KEY, now))!;
     await confirmAdminTotpEnrollment(db, id, codeAt(secret, now), KEY, now);
     const s = await createAdminSession(db, id, now, now);
-    expect(await resetAdminTotpAndRevokeSessions(db, id)).toBe(true);
+    expect(await resetAdminTotpAndRevokeSessions(db, id, now)).toMatch(/^[a-z]{4}-[a-z]{4}-[a-z]{4}-[a-z]{4}$/);
     expect(await resolveAdminSession(db, s.token, POLICY, now)).toBeNull();
     expect((await verifyAdminPassword(db, "ops@ionosphere.test", "admin-pw"))?.mfaEnrolled).toBe(false);
   });
@@ -168,7 +171,7 @@ describe("TOTP 연속 실패 잠금", () => {
   test("★문턱을 넘으면 잠기고, 잠긴 동안은 맞는 코드도 거절하며, 풀린 뒤 성공하면 초기화된다", async () => {
     const { db, id } = await setup();
     const t0 = 1_800_000_000_000;
-    const secret = (await beginAdminTotpEnrollment(db, id, KEY))!;
+    const secret = (await beginAdminTotpEnrollment(db, id, (await issueAdminEnrollCode(db, id, t0))!, KEY, t0))!;
     await confirmAdminTotpEnrollment(db, id, codeAt(secret, t0), KEY, t0);
     let t = t0 + 30_000;
     for (let i = 0; i < PROVISIONAL_TOTP_LOCK.freeFailures; i++) expect(await verifyAdminTotp(db, id, "000000", KEY, t)).toBe(false);
@@ -187,7 +190,7 @@ describe("TOTP 연속 실패 잠금", () => {
   test("잠금은 실패할수록 길어진다(상한까지)", async () => {
     const { db, id } = await setup();
     const t0 = 1_800_000_000_000;
-    const secret = (await beginAdminTotpEnrollment(db, id, KEY))!;
+    const secret = (await beginAdminTotpEnrollment(db, id, (await issueAdminEnrollCode(db, id, t0))!, KEY, t0))!;
     await confirmAdminTotpEnrollment(db, id, codeAt(secret, t0), KEY, t0);
     const lengths: number[] = [];
     let t = t0 + 30_000;
@@ -218,7 +221,7 @@ describe("TOTP 동시 추측", () => {
   test("★추측을 한꺼번에 보내도 문턱 수만큼만 계산되고 나머지는 잠금에 막힌다", async () => {
     const { db, id } = await setup();
     const t0 = 1_800_000_000_000;
-    const secret = (await beginAdminTotpEnrollment(db, id, KEY))!;
+    const secret = (await beginAdminTotpEnrollment(db, id, (await issueAdminEnrollCode(db, id, t0))!, KEY, t0))!;
     await confirmAdminTotpEnrollment(db, id, codeAt(secret, t0), KEY, t0);
     const t = t0 + 30_000;
     const guesses = Array.from({ length: 30 }, (_, i) => String(100000 + i));
@@ -228,5 +231,49 @@ describe("TOTP 동시 추측", () => {
     expect(Number(rows[0]!.totp_failures)).toBe(PROVISIONAL_TOTP_LOCK.freeFailures);
     expect(Number(rows[0]!.totp_locked_until)).toBeGreaterThan(t);
     expect(await verifyAdminTotp(db, id, codeAt(secret, t), KEY, t)).toBe(false);
+  });
+});
+
+describe("일회용 등록 코드·복구 코드", () => {
+  test("★등록 코드 없이·틀린 코드·만료된 코드로는 등록을 시작할 수 없고, 확정되면 코드는 다시 못 쓴다", async () => {
+    const { db, id } = await setup();
+    const t0 = 1_800_000_000_000;
+    expect(await beginAdminTotpEnrollment(db, id, "", KEY, t0)).toBeNull();
+    const code = (await issueAdminEnrollCode(db, id, t0))!;
+    expect(await beginAdminTotpEnrollment(db, id, "aaaa-bbbb-cccc-dddd", KEY, t0)).toBeNull();
+    expect(await beginAdminTotpEnrollment(db, id, code, KEY, t0 + 25 * 3600_000)).toBeNull();
+    // 하이픈·대소문자는 무시한다(사람이 옮겨 적는 값).
+    const secret = (await beginAdminTotpEnrollment(db, id, code.toUpperCase().replace(/-/g, ""), KEY, t0))!;
+    expect(await confirmAdminTotpEnrollment(db, id, codeAt(secret, t0), KEY, t0)).not.toBeNull();
+    const { rows } = await db.query({ sql: "SELECT enroll_code_hash FROM admin_users WHERE id = ?", params: [id] });
+    expect(rows[0]!.enroll_code_hash).toBeNull();
+  });
+
+  test("복구 코드는 한 번씩만 쓰이고, 쓰면 TOTP가 지워지고 세션이 끊기고 새 등록 코드가 나온다", async () => {
+    const { db, id } = await setup();
+    const t0 = 1_800_000_000_000;
+    const secret = (await beginAdminTotpEnrollment(db, id, (await issueAdminEnrollCode(db, id, t0))!, KEY, t0))!;
+    const codes = (await confirmAdminTotpEnrollment(db, id, codeAt(secret, t0), KEY, t0))!;
+    const s = await createAdminSession(db, id, t0, t0);
+    expect(await redeemAdminRecoveryCode(db, id, "zzzzz-zzzzz", t0)).toBeNull();
+    const r = await redeemAdminRecoveryCode(db, id, codes[0]!, t0);
+    expect(r?.enrollCode).toMatch(/^[a-z]{4}-[a-z]{4}-[a-z]{4}-[a-z]{4}$/);
+    expect((await verifyAdminPassword(db, "ops@ionosphere.test", "admin-pw"))?.mfaEnrolled).toBe(false);
+    expect(await resolveAdminSession(db, s.token, POLICY, t0)).toBeNull();
+    expect(await redeemAdminRecoveryCode(db, id, codes[0]!, t0)).toBeNull();
+    // 새 등록 코드로 다시 등록할 수 있고, 등록하면 복구 코드가 새로 나온다(옛 코드는 무효).
+    const secret2 = (await beginAdminTotpEnrollment(db, id, r!.enrollCode, KEY, t0))!;
+    const codes2 = (await confirmAdminTotpEnrollment(db, id, codeAt(secret2, t0 + 30_000), KEY, t0 + 30_000))!;
+    expect(codes2).toHaveLength(PROVISIONAL_RECOVERY_CODES.count);
+    expect(await redeemAdminRecoveryCode(db, id, codes[1]!, t0 + 60_000)).toBeNull();
+  });
+
+  test("복구 코드 추측도 TOTP와 같은 잠금에 걸린다", async () => {
+    const { db, id } = await setup();
+    const t0 = 1_800_000_000_000;
+    const secret = (await beginAdminTotpEnrollment(db, id, (await issueAdminEnrollCode(db, id, t0))!, KEY, t0))!;
+    const codes = (await confirmAdminTotpEnrollment(db, id, codeAt(secret, t0), KEY, t0))!;
+    for (let i = 0; i < PROVISIONAL_TOTP_LOCK.freeFailures; i++) await redeemAdminRecoveryCode(db, id, `wrong-${i}`, t0);
+    expect(await redeemAdminRecoveryCode(db, id, codes[0]!, t0)).toBeNull();
   });
 });

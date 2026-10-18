@@ -8,7 +8,7 @@
  * 첫 관리자는 CLI(`admin-user-create`)나 rootToken으로 만든다. 그 뒤 rootToken은 쓰지 않는다(결정 D4).
  */
 import { ADMIN_ROLE, ADMIN_STATUS, isAdminRole, type AdminRole } from "@ionosphere/db";
-import { createAdminUser, resetAdminTotpAndRevokeSessions, revokeAdminSessions, setAdminPasswordAndRevokeSessions } from "@ionosphere/store";
+import { createAdminUser, issueAdminEnrollCode, resetAdminTotpAndRevokeSessions, revokeAdminSessions, setAdminPasswordAndRevokeSessions } from "@ionosphere/store";
 import { CommandError, type Command, type CommandContext } from "./types.ts";
 
 const ROLE_NAMES = Object.keys(ADMIN_ROLE) as (keyof typeof ADMIN_ROLE)[];
@@ -37,22 +37,35 @@ async function resolveAdmin(ctx: CommandContext, idOrName: string): Promise<{ id
  * ★마지막 활성 운영자 owner를 정지·강등하지 못하게 막는다. 막지 않으면 사람 로그인으로는 되돌릴 수 없고,
  * 남는 길이 비상 경로(호스트 CLI)뿐이 된다 — 그 경로가 있다고 해서 일상 실수로 거기까지 가게 두지 않는다.
  *
- * 확인을 UPDATE의 조건으로 넣는다(조회 뒤 쓰기가 아니라). 두 owner를 동시에 정지하면 조회 방식은 둘 다
- * "다른 owner가 있다"를 보고 통과한다. 파생 테이블로 감싼 이유: MySQL은 UPDATE 대상 테이블을 같은 문장의
- * 서브쿼리에서 직접 읽지 못한다(ER_UPDATE_TABLE_USED).
- * ⚠ 남는 틈: 격리 수준이 READ COMMITTED이면 두 트랜잭션이 서로의 커밋 전 상태를 보고 함께 통과할 수 있다.
- * 관리자 수가 적고 사람 손으로 하는 작업이라 그 창은 좁다 — 닫으려면 잠금 행이 필요하다.
+ * ★두 단계를 한 배치(트랜잭션)로 한다.
+ *  1) 운영자 owner 행을 **전부 먼저 갱신해 잠근다.** 동시에 온 다른 요청은 여기서 앞 트랜잭션이 끝나기를 기다린다.
+ *  2) 그다음 "나 말고 활성 운영자 owner가 있다"를 조건으로 대상 행을 바꾼다.
+ * 1이 없으면 PG(READ COMMITTED)·MySQL(InnoDB 비잠금 읽기)에서 owner A·B를 동시에 정지할 때 두 트랜잭션이
+ * 서로를 아직 활성으로 보고 둘 다 통과한다 — 활성 운영자 owner가 0명이 된다(2026-10-18 검토, 사용자 결정으로 #46에서 수정).
+ * 1 덕분에 뒤 트랜잭션의 2는 앞 트랜잭션이 커밋한 상태를 본다(PG는 문장마다 새 스냅숏, MySQL은 첫 일관 읽기가 2라서).
+ * SQLite는 쓰기가 하나씩만 돌아 처음부터 해당 없다. 동시성은 `admin-owner-race.test.ts`가 실DB로 확인한다.
+ * 두 트랜잭션이 owner 행을 다른 순서로 잠그면 교착이 날 수 있다 — DB가 한쪽을 되돌리고 그 요청은 500을 받는다.
+ * 안전한 쪽(아무것도 바뀌지 않음)으로 실패하므로 막지 않는다. 다시 시도하면 된다.
+ *
+ * 집계(COUNT) 파생 테이블로 감싼 이유: MySQL은 UPDATE 대상 테이블을 같은 문장의 서브쿼리에서 직접 읽지 못하고
+ * (ER_UPDATE_TABLE_USED), 단순 파생 테이블은 옵티마이저가 바깥으로 합쳐 같은 오류가 난다. 집계는 합쳐지지 않는다.
  */
-const OTHER_OPERATOR_OWNER = `EXISTS (SELECT 1 FROM (SELECT id FROM admin_users WHERE role = ? AND status = ? AND tenant_id IS NULL AND id != ?) AS other_owners)`;
+const OTHER_OPERATOR_OWNER_COUNT = `(SELECT n FROM (SELECT COUNT(*) AS n FROM admin_users WHERE role = ? AND status = ? AND tenant_id IS NULL AND id != ?) AS other_owners)`;
+
+function isActiveOperatorOwner(a: { role: AdminRole; status: number; tenantId: string | null }): boolean {
+  return a.role === ADMIN_ROLE.owner && a.status === ADMIN_STATUS.active && a.tenantId === null;
+}
 
 async function updateKeepingAnOwner(ctx: CommandContext, set: string, setParams: unknown[], id: string): Promise<void> {
+  const now = Date.now();
   const r = await ctx.db.batch([
+    { sql: "UPDATE admin_users SET updated_at = ? WHERE role = ? AND tenant_id IS NULL", params: [now, ADMIN_ROLE.owner] },
     {
-      sql: `UPDATE admin_users SET ${set}, updated_at = ? WHERE id = ? AND ${OTHER_OPERATOR_OWNER}`,
-      params: [...setParams, Date.now(), id, ADMIN_ROLE.owner, ADMIN_STATUS.active, id],
+      sql: `UPDATE admin_users SET ${set}, updated_at = ? WHERE id = ? AND ${OTHER_OPERATOR_OWNER_COUNT} > 0`,
+      params: [...setParams, now, id, ADMIN_ROLE.owner, ADMIN_STATUS.active, id],
     },
   ]);
-  if ((r[0]?.changes ?? 0) === 0) {
+  if ((r[1]?.changes ?? 0) === 0) {
     throw new CommandError("conflict", "마지막 활성 운영자 owner입니다", "다른 운영자 owner를 먼저 만드십시오");
   }
 }
@@ -121,14 +134,23 @@ export const adminUserCommands: readonly Command[] = [
       }
       const id = await createAdminUser(ctx.db, { username, password, role, ...(tenantId ? { tenantId } : {}) });
       if (id === null) throw new CommandError("conflict", `이미 있는 사용자명: ${username}`);
-      return { data: { adminUserId: id }, message: `관리자 생성됨: ${username} (${id}) — 첫 로그인에서 TOTP를 등록하십시오` };
+      const enrollCode = await issueAdminEnrollCode(ctx.db, id);
+      if (enrollCode === null) throw new CommandError("conflict", "등록 코드를 발급하지 못했습니다");
+      return {
+        data: { adminUserId: id },
+        // 등록 코드는 비밀이다 — data에 섞지 않고 secret으로 따로 싣는다(화면·CLI가 한 번만 보여 준다).
+        secret: { label: `TOTP 등록 코드 (${username})`, value: enrollCode, hint: "본인에게 따로 전달하십시오. 24시간 안에 한 번만 쓸 수 있습니다." },
+        message: `관리자 생성됨: ${username} (${id}) — 첫 로그인에서 등록 코드로 TOTP를 등록하십시오`,
+      };
     },
   },
   {
     spec: { name: "admin-user-suspend", group: "관리자", label: "관리자 정지", summary: "로그인과 열린 세션을 막는다(다음 요청부터). 되돌릴 수 있다.", readOnly: false, rootOnly: true, destructive: true, args: [accountArg] },
     async run(ctx, args) {
       const a = await resolveAdmin(ctx, args.admin!);
-      if (a.role === ADMIN_ROLE.owner && a.tenantId === null) await updateKeepingAnOwner(ctx, "status = ?", [ADMIN_STATUS.suspended], a.id);
+      // 보호는 대상이 **지금 활성인 운영자 owner**일 때만 건다. 이미 정지된 행에 걸면 MySQL은 바뀐 행이 없어
+      // changes=0을 돌려주고, 그것이 "마지막 owner" 거절로 잘못 읽힌다.
+      if (isActiveOperatorOwner(a)) await updateKeepingAnOwner(ctx, "status = ?", [ADMIN_STATUS.suspended], a.id);
       else await ctx.db.batch([{ sql: "UPDATE admin_users SET status = ?, updated_at = ? WHERE id = ?", params: [ADMIN_STATUS.suspended, Date.now(), a.id] }]);
       // 세션 해석이 status를 매번 보므로 철회가 없어도 막히지만, 세션 행까지 닫아 두면 재활성 때 옛 세션이 살아나지 않는다.
       await revokeAdminSessions(ctx.db, a.id);
@@ -157,7 +179,7 @@ export const adminUserCommands: readonly Command[] = [
     async run(ctx, args) {
       const a = await resolveAdmin(ctx, args.admin!);
       const role = parseRole(args.role);
-      if (a.role === ADMIN_ROLE.owner && role !== ADMIN_ROLE.owner && a.tenantId === null) await updateKeepingAnOwner(ctx, "role = ?", [role], a.id);
+      if (isActiveOperatorOwner(a) && role !== ADMIN_ROLE.owner) await updateKeepingAnOwner(ctx, "role = ?", [role], a.id);
       else await ctx.db.batch([{ sql: "UPDATE admin_users SET role = ?, updated_at = ? WHERE id = ?", params: [role, Date.now(), a.id] }]);
       return { data: { adminUserId: a.id, role }, message: `역할 변경됨: ${a.username}` };
     },
@@ -185,7 +207,7 @@ export const adminUserCommands: readonly Command[] = [
       name: "admin-user-mfa-reset",
       group: "관리자",
       label: "관리자 MFA 초기화",
-      summary: "TOTP를 지우고 세션을 끊는다. 다음 로그인에서 다시 등록해야 한다(분실 복구용).",
+      summary: "TOTP·복구 코드를 지우고 세션을 끊고 새 등록 코드를 발급한다(본인이 복구 코드도 잃었을 때의 보조 경로).",
       readOnly: false,
       rootOnly: true,
       destructive: true,
@@ -193,8 +215,13 @@ export const adminUserCommands: readonly Command[] = [
     },
     async run(ctx, args) {
       const a = await resolveAdmin(ctx, args.admin!);
-      await resetAdminTotpAndRevokeSessions(ctx.db, a.id);
-      return { data: { adminUserId: a.id }, message: `MFA 초기화됨: ${a.username} — 다음 로그인에서 재등록` };
+      const enrollCode = await resetAdminTotpAndRevokeSessions(ctx.db, a.id);
+      if (enrollCode === null) throw new CommandError("notFound", `관리자를 찾을 수 없습니다: ${args.admin}`);
+      return {
+        data: { adminUserId: a.id },
+        secret: { label: `TOTP 등록 코드 (${a.username})`, value: enrollCode, hint: "본인에게 따로 전달하십시오. 24시간 안에 한 번만 쓸 수 있습니다." },
+        message: `MFA 초기화됨: ${a.username} — 복구 코드도 폐기됐습니다. 다음 로그인에서 등록 코드로 재등록`,
+      };
     },
   },
   {

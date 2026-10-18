@@ -79,8 +79,12 @@ async function rootCommand(f: Fx, name: string, body: Record<string, unknown>): 
   return r.json;
 }
 
+/** 사용자명 → 생성 때 받은 일회용 등록 코드(관리자를 만든 쪽이 본인에게 따로 전달하는 값). */
+const enrollCodes = new Map<string, string>();
+
 async function createAdmin(f: Fx, username: string, role = "owner", tenant?: string): Promise<void> {
-  await rootCommand(f, "admin-user-create", { username, password: "admin-pw", role, ...(tenant ? { adminTenantId: tenant } : {}) });
+  const r = await rootCommand(f, "admin-user-create", { username, password: "admin-pw", role, ...(tenant ? { adminTenantId: tenant } : {}) });
+  enrollCodes.set(username, String((r.__secret as { value: string }).value));
 }
 
 async function login(f: Fx, username: string, totp = ""): Promise<{ status: number; session: Session; json: Record<string, unknown> }> {
@@ -89,15 +93,15 @@ async function login(f: Fx, username: string, totp = ""): Promise<{ status: numb
   return { status: r.status, session: { cookie, csrf: String(r.json.csrfToken ?? "") }, json: r.json };
 }
 
-/** 등록까지 마친 세션과 TOTP 비밀. */
-async function enrolledSession(f: Fx, username: string): Promise<{ session: Session; secret: string }> {
+/** 등록까지 마친 세션과 TOTP 비밀·복구 코드. */
+async function enrolledSession(f: Fx, username: string): Promise<{ session: Session; secret: string; recoveryCodes: string[] }> {
   const { session } = await login(f, username);
-  const enroll = await req(f, "POST", "/admin/session/mfa/enroll", { session });
+  const enroll = await req(f, "POST", "/admin/session/mfa/enroll", { session, body: { enrollCode: enrollCodes.get(username) } });
   expect(enroll.status).toBe(200);
   const secret = String(enroll.json.secret);
   const confirm = await req(f, "POST", "/admin/session/mfa/confirm", { session, body: { code: codeNow(secret) } });
   expect(confirm.status).toBe(200);
-  return { session, secret };
+  return { session, secret, recoveryCodes: confirm.json.recoveryCodes as string[] };
 }
 
 function codeNow(secret: string, offsetSteps = 0): string {
@@ -119,7 +123,11 @@ describe("관리 콘솔 사람 세션", () => {
     expect(blocked.status).toBe(403);
     expect(blocked.json.code).toBe("mfa_required");
 
-    const enroll = await req(f, "POST", "/admin/session/mfa/enroll", { session });
+    // ★등록 코드 없이는 등록을 시작할 수 없다 — 비밀번호만으로 MFA를 차지하지 못한다.
+    const noCode = await req(f, "POST", "/admin/session/mfa/enroll", { session });
+    expect(noCode.status).toBe(401);
+    expect(noCode.json.code).toBe("invalid_enroll_code");
+    const enroll = await req(f, "POST", "/admin/session/mfa/enroll", { session, body: { enrollCode: enrollCodes.get("ops@ionosphere.test") } });
     const secret = String(enroll.json.secret);
     expect(String(enroll.json.uri)).toStartWith("otpauth://totp/");
     expect((await req(f, "POST", "/admin/session/mfa/confirm", { session, body: { code: "000000" } })).status).toBe(401);
@@ -313,5 +321,47 @@ describe("adminOrigin 설정", () => {
     await migrate(db, allMigrations);
     expect(() => new AdminApiServer({ db, store: new Store(db), resolveTxt: async () => [], resolveMx: async () => [], adminOrigin: "not a url" })).toThrow(/URL이 아니다/);
     await db.close();
+  });
+});
+
+describe("복구 코드·MFA 초기화(2026-10-18 사용자 결정)", () => {
+  test("복구 코드로 로그인하면 TOTP가 지워지고, 응답의 등록 코드로 새 장치를 등록해야 콘솔이 열린다", async () => {
+    const f = await setup();
+    await createAdmin(f, "ops@ionosphere.test");
+    const { session: old, recoveryCodes } = await enrolledSession(f, "ops@ionosphere.test");
+    expect(recoveryCodes.length).toBeGreaterThan(0);
+    const r = await req(f, "POST", "/admin/session/login", { body: { username: "ops@ionosphere.test", password: "admin-pw", recoveryCode: recoveryCodes[0] } });
+    expect(r.status).toBe(200);
+    expect(r.json.mfaEnrolled).toBe(false);
+    const session = { cookie: (r.setCookie ?? "").split(";")[0] ?? "", csrf: String(r.json.csrfToken) };
+    // 다른 세션은 끊겼다(복구는 계정 탈취 대응이기도 하다).
+    expect((await req(f, "GET", "/v1/commands", { session: old })).status).toBe(401);
+    expect((await req(f, "GET", "/v1/commands", { session })).json.code).toBe("mfa_required");
+    const enroll = await req(f, "POST", "/admin/session/mfa/enroll", { session, body: { enrollCode: r.json.enrollCode } });
+    expect(enroll.status).toBe(200);
+    expect((await req(f, "POST", "/admin/session/mfa/confirm", { session, body: { code: codeNow(String(enroll.json.secret)) } })).status).toBe(200);
+    expect((await req(f, "GET", "/v1/commands", { session })).status).toBe(200);
+    // 쓴 복구 코드는 다시 못 쓴다 — 응답은 비밀번호 실패와 같다.
+    const again = await req(f, "POST", "/admin/session/login", { body: { username: "ops@ionosphere.test", password: "admin-pw", recoveryCode: recoveryCodes[0] } });
+    expect(again.status).toBe(401);
+    expect(again.json).toEqual({ error: "invalid credentials" });
+  });
+
+  test("owner가 MFA를 초기화하면 step-up이 필요하고, 새 등록 코드는 그 응답에서만 나온다", async () => {
+    const f = await setup({ stepUpMs: 1500 });
+    await createAdmin(f, "owner@ionosphere.test");
+    await createAdmin(f, "lost@ionosphere.test", "admin");
+    const { session, secret } = await enrolledSession(f, "owner@ionosphere.test");
+    await enrolledSession(f, "lost@ionosphere.test");
+    await new Promise((r) => setTimeout(r, 1600));
+    const stale = await req(f, "POST", "/v1/commands/admin-user-mfa-reset", { session, body: { admin: "lost@ionosphere.test" } });
+    expect(stale.json.code).toBe("step_up");
+    expect((await req(f, "POST", "/admin/session/mfa/verify", { session, body: { code: codeNow(secret, 1) } })).status).toBe(200);
+    const reset = await req(f, "POST", "/v1/commands/admin-user-mfa-reset", { session, body: { admin: "lost@ionosphere.test" } });
+    expect(reset.status).toBe(200);
+    const code = (reset.json.__secret as { value: string }).value;
+    const lost = await login(f, "lost@ionosphere.test");
+    expect(lost.json.mfaEnrolled).toBe(false);
+    expect((await req(f, "POST", "/admin/session/mfa/enroll", { session: lost.session, body: { enrollCode: code } })).status).toBe(200);
   });
 });

@@ -110,6 +110,7 @@ export const ADMIN_UI_HTML = `<!doctype html>
     <label class="field"><span>사용자명</span><input id="username" autocomplete="username" size="24"></label>
     <label class="field"><span>비밀번호</span><input id="password" type="password" autocomplete="current-password" size="20"></label>
     <label class="field"><span>TOTP</span><input id="totp" inputmode="numeric" autocomplete="one-time-code" size="8" placeholder="등록했다면"></label>
+    <label class="field"><span>복구 코드</span><input id="recovery" autocomplete="off" size="12" placeholder="앱을 잃었다면"><small>TOTP 대신 쓰면 새 장치를 다시 등록합니다</small></label>
     <button id="signin">로그인</button>
     <span id="loginStatus" class="muted"></span>
   </div>
@@ -118,6 +119,7 @@ export const ADMIN_UI_HTML = `<!doctype html>
   <p>이 관리자는 아직 TOTP를 등록하지 않았습니다. 등록해야 다른 화면을 쓸 수 있습니다.</p>
   <div id="enrollSecret"></div>
   <div class="row">
+    <label class="field"><span>등록 코드</span><input id="enrollGrant" autocomplete="off" size="20"><small>관리자를 만든 사람에게서 따로 받은 일회용 코드. 복구 코드로 들어왔다면 자동으로 채워집니다 — 비어 있으면 로그아웃한 뒤 복구 코드를 하나 더 써서 다시 로그인하십시오.</small></label>
     <button id="enrollStart" class="ghost">비밀 만들기</button>
     <label class="field"><span>앱에 보이는 6자리</span><input id="enrollCode" inputmode="numeric" size="8"></label>
     <button id="enrollConfirm">등록 확정</button>
@@ -172,9 +174,13 @@ $("#signin").onclick = async () => {
       username: $("#username").value.trim(),
       password: $("#password").value,
       totp: $("#totp").value.trim(),
+      recoveryCode: $("#recovery").value.trim(),
     });
     $("#password").value = "";
     $("#totp").value = "";
+    $("#recovery").value = "";
+    // 복구 코드로 들어왔으면 서버가 새 등록 코드를 준다 — 등록 칸에 미리 넣어 둔다(이 응답에서만 보인다).
+    if (res.enrollCode) $("#enrollGrant").value = res.enrollCode;
     state.csrf = res.csrfToken;
     await boot();
   } catch (e) {
@@ -188,7 +194,7 @@ $("#signout").onclick = async () => {
 };
 $("#enrollStart").onclick = async () => {
   try {
-    const res = await api("POST", "/admin/session/mfa/enroll");
+    const res = await api("POST", "/admin/session/mfa/enroll", { enrollCode: $("#enrollGrant").value.trim() });
     // 평문 비밀은 이 화면에 한 번만 보인다 — 인증 앱에 붙여 넣거나 URI를 연다.
     $("#enrollSecret").innerHTML = '<div class="secret"><div class="muted">인증 앱에 이 비밀을 넣으십시오</div><div class="value">' +
       esc(res.secret) + '</div><div class="muted" style="word-break:break-all">' + esc(res.uri) + "</div></div>";
@@ -196,9 +202,21 @@ $("#enrollStart").onclick = async () => {
 };
 $("#enrollConfirm").onclick = async () => {
   try {
-    await api("POST", "/admin/session/mfa/confirm", { code: $("#enrollCode").value.trim() });
+    const res = await api("POST", "/admin/session/mfa/confirm", { code: $("#enrollCode").value.trim() });
     $("#enrollSecret").innerHTML = "";
     $("#enrollCode").value = "";
+    $("#enrollGrant").value = "";
+    /**
+     * 복구 코드는 이 응답에서 한 번만 온다(서버는 해시만 둔다). 'state.secret'에 넣어야 탭을 옮겨 화면을 다시 그려도
+     * 남는다 — #view에 직접 붙이면 다음 그리기에서 사라져 영영 볼 수 없게 된다(2026-10-18 보안 재검토).
+     */
+    if (res && res.recoveryCodes) {
+      state.secret = {
+        label: "복구 코드 (각각 한 번씩 씁니다)",
+        value: res.recoveryCodes.join("  "),
+        hint: "인증 앱을 잃었을 때 로그인 화면의 복구 코드 칸에 넣습니다. 지금 안전한 곳에 적어 두십시오.",
+      };
+    }
     toast("TOTP 등록 완료", "ok");
     await boot();
   } catch (e) { toast(e.message, "err"); }

@@ -39,6 +39,9 @@ describe("admin-user-create (CLI)", () => {
     expect(res.code).toBe(0);
     expect(res.stdout).toContain("관리자 생성됨: ops@ionosphere.test");
     expect(res.stdout + res.stderr).not.toContain(PASSWORD);
+    // 일회용 등록 코드가 한 번 출력된다 — 운영자가 본인에게 따로 전달한다.
+    expect(res.stdout).toContain("TOTP 등록 코드");
+    expect(res.stdout).toMatch(/[a-z]{4}-[a-z]{4}-[a-z]{4}-[a-z]{4}/);
 
     const db = await openSqlite(dbPath);
     const { rows } = await db.query({ sql: "SELECT username, role, tenant_id, password_hash FROM admin_users" });

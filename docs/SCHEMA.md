@@ -329,6 +329,8 @@ CREATE TABLE admin_users (
   totp_last_step      BIGINT,                       -- 마지막으로 쓴 TOTP 스텝(재사용 방지)
   totp_failures       INTEGER NOT NULL DEFAULT 0,   -- 연속 TOTP 실패 수(성공하면 0)
   totp_locked_until   BIGINT,                       -- 이 시각까지 TOTP를 검사하지 않고 거절(지수 잠금)
+  enroll_code_hash    VARCHAR(64),                  -- 일회용 TOTP 등록 코드의 sha256(생성·초기화 때 발급)
+  enroll_code_expires_at BIGINT,                    -- 등록 코드 만료(임시 24시간)
   created_at          BIGINT NOT NULL,
   updated_at          BIGINT NOT NULL
 );
@@ -345,7 +347,19 @@ CREATE TABLE admin_sessions (
   revoked_at     BIGINT
 );
 CREATE INDEX ix_admin_sessions_user ON admin_sessions(admin_user_id);
+
+CREATE TABLE admin_recovery_codes (
+  admin_user_id  VARCHAR(26) NOT NULL,
+  code_hash      VARCHAR(64) NOT NULL,              -- sha256(정규화한 코드)
+  created_at     BIGINT NOT NULL,
+  used_at        BIGINT,                            -- 쓴 시각. 지우지 않는다(감사 근거)
+  PRIMARY KEY (admin_user_id, code_hash)
+);
 ```
+
+첫 TOTP 등록(새 관리자·MFA 초기화·복구 코드 사용 뒤)에는 **일회용 등록 코드**가 필요하다. 비밀번호만으로
+등록할 수 있으면, 비밀번호를 아는 사람이 본인보다 먼저 MFA를 차지한다(2026-10-18 사용자 결정으로 막음).
+복구 코드는 등록을 확정할 때 새로 발급되고 한 번만 보인다.
 
 메일 계정(`accounts`)과 분리한다(회원 정책 결정 D1). 메일 비밀번호는 클라이언트마다 저장돼 새기 쉬운
 자격증명이라 그것이 곧 관리 권한이면 안 되고, 메일 계정을 정지·삭제해도 관리자 접근이 끊기지 않아야 한다.
