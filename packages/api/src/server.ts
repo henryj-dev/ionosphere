@@ -724,20 +724,25 @@ export class AdminApiServer {
        * ★Bearer가 있으면 그것만 본다(쿠키는 무시). 자동화가 브라우저 쿠키를 들고 오는 경우에도
        * 주체가 하나로 정해져야 감사 줄이 "누가"에 답한다.
        */
-      const sessionToken = req.headers.authorization ? null : readCookie(req, ADMIN_SESSION_COOKIE);
-      let auth: AuthContext | null;
-      if (sessionToken !== null) {
-        auth = await this.authenticateSession(sessionToken);
+      /**
+       * 두 자격증명을 **먼저 모두 해석하고**, 그다음 어느 것을 쓸지 고른다. 해석을 사용자 값(헤더 유무)에 따라
+       * 건너뛰는 분기가 없어야 "조건이 인증을 건너뛰게 한다"는 의심(CodeQL js/user-controlled-bypass)이 성립하지 않는다.
+       * 없는 쪽은 null로 해석된다(헤더 없음 → null, 빈 토큰 → null).
+       */
+      const cookieToken = readCookie(req, ADMIN_SESSION_COOKIE) ?? "";
+      const bearerAuth = await this.authenticate(req);
+      const cookieAuth = await this.authenticateSession(cookieToken);
+      const bearerPresented = typeof req.headers.authorization === "string";
+      const auth: AuthContext | null = bearerPresented ? bearerAuth : cookieAuth;
+      if (!auth) {
         // 만료된 쿠키는 공격이 아니라 일상이다 — 스로틀에 세지 않는다(256비트 토큰은 대입할 수 없다).
-        if (!auth) return sendJson(res, 401, { error: "session expired", code: "no_session" }, { "Set-Cookie": clearedSessionCookie() });
-      } else {
-        auth = await this.authenticate(req);
-        if (!auth) {
-          this.throttle.recordFailure(ip, now);
-          return sendJson(res, 401, { error: "unauthorized" });
+        if (!bearerPresented && cookieToken !== "") {
+          return sendJson(res, 401, { error: "session expired", code: "no_session" }, { "Set-Cookie": clearedSessionCookie() });
         }
-        this.throttle.clear(ip);
+        this.throttle.recordFailure(ip, now);
+        return sendJson(res, 401, { error: "unauthorized" });
       }
+      if (auth.kind !== "human") this.throttle.clear(ip);
       if (auth.kind === "human") {
         auditSubject.detail.adminUserId = auth.adminUserId;
         if (method !== "GET") this.requireSameOriginWrite(req, auth.csrfHash);
