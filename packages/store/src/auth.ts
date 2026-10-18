@@ -412,6 +412,25 @@ export async function authenticate(
 }
 
 /**
+ * 인증된 연결이 계속 일해도 되는가 — 계정이 지금 active(status=1)인가.
+ *
+ * ★인증은 연결을 열 때 한 번뿐이다. 그래서 `account-suspend`·`account-delete` 뒤에도 이미 열린
+ * IMAP·POP3·ManageSieve 연결은 그대로 메일을 읽고 지울 수 있었다(2026-10-18 회원 정책 정리 G2).
+ * 프로토콜 어댑터가 계정 데이터를 건드리는 명령마다 이걸 불러 "다음 명령부터 거부"를 만든다.
+ *
+ * PK 조회 하나라 명령마다 불러도 싸다. 캐시를 두지 않는 이유: 캐시 수명만큼 정지가 늦어지고,
+ * 그 지연이 곧 정책의 예외가 된다(JMAP 30초 캐시가 그 예다).
+ * 조회 실패는 **던진다** — 호출자가 그 명령을 실행하지 않는 쪽(fail closed)으로 다룬다.
+ */
+export async function isAccountActive(db: DbDriver, accountId: string): Promise<boolean> {
+  const { rows } = await db.query({
+    sql: `SELECT 1 AS ok FROM accounts WHERE id = ? AND status = ${ACCOUNT_STATUS.active}`,
+    params: [accountId],
+  });
+  return rows.length > 0;
+}
+
+/**
  * SCRAM 교환에 쓸 저장 키 조회 — 없으면 null.
  *
  * ★**기본 비밀번호 자격증명(kind=0)만** 대상이다. SCRAM의 server-first는 salt와 반복

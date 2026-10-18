@@ -1,7 +1,7 @@
 /**
  * ManageSieve 백엔드 — store 연동 (RFC 5804). 스크립트 검증은 @ionosphere/sieve 파서로.
  */
-import { authenticate, Store, StoreError } from "@ionosphere/store";
+import { authenticate, isAccountActive, Store, StoreError } from "@ionosphere/store";
 import type { DbDriver } from "@ionosphere/db";
 import { parseSieve } from "@ionosphere/sieve";
 import type { ManageSieveBackend } from "@ionosphere/proto-managesieve";
@@ -43,6 +43,11 @@ export class IonosphereManageSieveBackend implements ManageSieveBackend {
     } catch (err) {
       return { ok: false, message: err instanceof StoreError ? err.message : "put failed" };
     }
+  }
+
+  /** 열린 연결의 계정 상태 재확인 — 정의·이유는 store `isAccountActive`. */
+  async accountActive(accountId: string): Promise<boolean> {
+    return await isAccountActive(this.db, accountId);
   }
 
   listScripts(accountId: string): Promise<{ name: string; active: boolean }[]> {

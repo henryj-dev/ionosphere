@@ -43,6 +43,7 @@ function slowLockBackend(): {
   const acquired = new Promise<void>((r) => (markAcquired = r));
   const backend: Pop3Backend = {
     authenticate: async (u, p) => (u === "alice" && p === "secret" ? { accountId: "acc-1" } : null),
+    accountActive: async () => true,
     openMaildrop: async () => {
       markStarted();
       await granted;
@@ -154,6 +155,7 @@ function sharedLockBackend(): {
   let pause: { gate: Promise<void>; started: () => void; afterAcquire: boolean } | null = null;
   const backend: Pop3Backend = {
     authenticate: async (u, p) => (u === "alice" && p === "secret" ? { accountId: "acc-1" } : null),
+    accountActive: async () => true,
     openMaildrop: async () => {
       const me = `s${++seq}`;
       const p = pause;

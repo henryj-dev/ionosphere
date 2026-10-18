@@ -58,6 +58,11 @@ export interface Pop3Backend {
   commitDeletions(accountId: string, msgs: Pop3MaildropMessage[]): Promise<void>;
   /** QUIT 또는 연결 종료 시 항상 호출 — maildrop 잠금을 반드시 해제. */
   releaseMaildrop(accountId: string): Promise<void>;
+  /**
+   * 인증된 연결의 계정이 아직 active인가 — RETR·QUIT 커밋 직전에 묻는다(필수, IMAP과 같은 계약).
+   * LIST·STAT·UIDL·DELE는 열 때 받은 목록으로 엔진이 답해 백엔드를 거치지 않으므로 여기 걸리지 않는다.
+   */
+  accountActive(accountId: string): Promise<boolean>;
 }
 
 export interface Pop3ServerOptions {
@@ -353,6 +358,20 @@ export class Pop3Server {
       });
     };
 
+    /**
+     * ★계정 상태 재확인(G2). 정지·삭제는 **다음 RETR·QUIT부터** 반영된다.
+     * 비활성이면 삭제를 커밋하지 않고 잠금만 풀고 닫는다 — 정지는 데이터를 보존하는 상태이고,
+     * 삭제 중이면 드레인이 처리한다. 조회 실패는 throw로 올려 safeRun이 -ERR 뒤 끊게 한다(fail closed).
+     * false면 호출자는 그 명령을 진행하지 않는다.
+     */
+    const stillActive = async (id: string): Promise<boolean> => {
+      if (await backend.accountActive(id)) return true;
+      audit("accountInactive", AUDIT_OUTCOME.denied);
+      writeText("-ERR [AUTH] account unavailable");
+      await finish();
+      return false;
+    };
+
     const runActions = async (actions: Pop3Action[]): Promise<void> => {
       for (const action of actions) {
         switch (action.kind) {
@@ -552,8 +571,9 @@ export class Pop3Server {
               await runActions(engine.retrieveResult({ ok: false }));
               break;
             }
+            if (!(await stillActive(accountId))) break;
             try {
-              const bytes = await backend.retrieve(accountId, msg);
+              const bytes = await backend.retrieve(accountId!, msg);
               // ★본문(`bytes`)은 넣지 않는다 — 넣으면 감사 로그가 메일 사본이 되고 보존기간·
               //   접근권한 설계가 전부 어긋난다(IMAP `auditDetailOf`와 같은 규율). 규모만 남긴다.
               audit("retrieve", AUDIT_OUTCOME.ok, { msgnum: action.msgnum, uidl: msg.uidl, bytes: bytes.byteLength });
@@ -570,9 +590,10 @@ export class Pop3Server {
               await runActions(engine.commitDeletionsResult(false));
               break;
             }
+            if (!(await stillActive(accountId))) break;
             const deleted = action.messages.length;
             try {
-              await backend.commitDeletions(accountId, toBackendMessages(action.messages));
+              await backend.commitDeletions(accountId!, toBackendMessages(action.messages));
               audit("commitDeletions", AUDIT_OUTCOME.ok, { messages: deleted });
               await runActions(engine.commitDeletionsResult(true));
             } catch {

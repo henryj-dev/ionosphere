@@ -31,6 +31,9 @@ import {
 } from "@ionosphere/core";
 import { ManageSieveEngine, type ManageSieveAction } from "./engine.ts";
 
+/** 계정 데이터를 건드리는 액션 — 실행 전에 계정 상태를 다시 본다. `checkScript`는 저장하지 않아 제외. */
+const ACCOUNT_OPS: ReadonlySet<ManageSieveAction["kind"]> = new Set(["putScript", "listScripts", "getScript", "deleteScript", "setActive", "renameScript"]);
+
 export interface ManageSieveBackend {
   /**
    * SCRAM 저장 키 조회 — 없으면 null. **없다고 즉시 실패시키지 않는다**(엔진이 가짜 salt로
@@ -50,6 +53,8 @@ export interface ManageSieveBackend {
   deleteScript(accountId: string, name: string): Promise<{ ok: true } | { ok: false; code?: string; message: string }>;
   setActive(accountId: string, name: string): Promise<{ ok: true } | { ok: false; code?: string; message: string }>;
   renameScript(accountId: string, from: string, to: string): Promise<{ ok: true } | { ok: false; code?: string; message: string }>;
+  /** 인증된 연결의 계정이 아직 active인가 — 스크립트 작업마다 묻는다(필수, IMAP과 같은 계약). */
+  accountActive(accountId: string): Promise<boolean>;
 }
 
 export interface ManageSieveServerOptions {
@@ -236,6 +241,18 @@ export class ManageSieveServer {
 
     const run = async (actions: ManageSieveAction[]): Promise<void> => {
       for (const a of actions) {
+        /**
+         * ★계정 상태 재확인(G2) — 정지·삭제는 **다음 스크립트 작업부터** 반영된다.
+         * 활성 스크립트는 모든 수신 메일의 행방을 바꾸므로(setActive 주석) 정지된 계정이 열린 연결로
+         * 규칙을 계속 바꿀 수 있으면 안 된다. 조회 실패는 throw로 올라가 safeRun이 끊는다(fail closed).
+         */
+        if (ACCOUNT_OPS.has(a.kind) && accountId !== null && !(await backend.accountActive(accountId))) {
+          audit("accountInactive", AUDIT_OUTCOME.denied);
+          accountId = null;
+          write('BYE "account unavailable"');
+          if (!socket.destroyed) socket.end();
+          return;
+        }
         switch (a.kind) {
           case "reply":
             write(a.text);

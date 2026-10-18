@@ -31,6 +31,7 @@ afterEach(async () => {
 function backendWith(keys: ScramStoredKeys): ImapBackend {
   return {
     authenticate: async () => null,
+    accountActive: async () => true,
     scramKeys: async (user) => (user === USER ? keys : null),
     scramAuthorize: async (user) => (user === USER ? { accountId: "acct-1" } : null),
     request: async () => {

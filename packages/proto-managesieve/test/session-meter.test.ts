@@ -11,6 +11,7 @@ import { ManageSieveServer, type ManageSieveBackend } from "../src/server.ts";
 
 const denyBackend: ManageSieveBackend = {
   authenticate: () => Promise.resolve(null),
+  accountActive: () => Promise.resolve(true),
   putScript: () => Promise.resolve({ ok: false, message: "no" }),
   checkScript: () => ({ ok: false, message: "no" }),
   listScripts: () => Promise.resolve([]),
