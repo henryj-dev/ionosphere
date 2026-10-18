@@ -40,6 +40,8 @@ export const AUDIT_SURFACE = {
    * 실행마다 여기에 남는다. 그 기록이 이 예외를 승인한 조건이다.
    */
   cli: "cli",
+  /** 메일 계정 셀프서비스 웹(E2) — 비밀번호 변경·앱 비밀번호 발급처럼 계정 자격증명을 바꾸는 자리. */
+  selfService: "selfservice",
 } as const;
 
 export type AuditSurface = (typeof AUDIT_SURFACE)[keyof typeof AUDIT_SURFACE];

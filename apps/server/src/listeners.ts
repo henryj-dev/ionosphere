@@ -32,6 +32,7 @@ export const LISTENER_ENV_SUFFIX = {
   manageSieve: "MANAGESIEVE",
   jmap: "JMAP",
   admin: "ADMIN",
+  selfService: "SELF_SERVICE",
   autoconfig: "AUTOCONFIG",
   httpsFront: "HTTPS_FRONT",
   httpRedirect: "HTTP_REDIRECT",

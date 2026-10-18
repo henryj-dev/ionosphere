@@ -99,6 +99,7 @@ export { m022HeaderProjection } from "./migrations/022_header_projection.ts";
 export { m023ListingIndexes } from "./migrations/023_listing_indexes.ts";
 export { m024DirectoryIdentityAccountUnique } from "./migrations/024_directory_identity_account_unique.ts";
 export { m025AdminUsers } from "./migrations/025_admin_users.ts";
+export { m026AccountWeb } from "./migrations/026_account_web.ts";
 
 import { m001Init } from "./migrations/001_init.ts";
 import { m002Webhooks } from "./migrations/002_webhooks.ts";
@@ -125,7 +126,8 @@ import { m022HeaderProjection } from "./migrations/022_header_projection.ts";
 import { m023ListingIndexes } from "./migrations/023_listing_indexes.ts";
 import { m024DirectoryIdentityAccountUnique } from "./migrations/024_directory_identity_account_unique.ts";
 import { m025AdminUsers } from "./migrations/025_admin_users.ts";
+import { m026AccountWeb } from "./migrations/026_account_web.ts";
 import type { Migration } from "./migrate.ts";
 
 /** 전체 마이그레이션 목록 (버전 순). */
-export const allMigrations: readonly Migration[] = [m001Init, m002Webhooks, m003Forwarding, m004BlobGc, m005MaildropLock, m006AddressFanout, m007Smarthosts, m008SuppressionExpiry, m009Complaints, m010BayesTokens, m011QueueIndexes, m012DsnDelayNotice, m013Vacation, m014ExpungedFloor, m015VacationResponse, m016DsnParams, m017Reporting, m018PushSubscriptions, m019IdentityState, m020MailboxAcl, m021DirectoryIdentity, m022HeaderProjection, m023ListingIndexes, m024DirectoryIdentityAccountUnique, m025AdminUsers];
+export const allMigrations: readonly Migration[] = [m001Init, m002Webhooks, m003Forwarding, m004BlobGc, m005MaildropLock, m006AddressFanout, m007Smarthosts, m008SuppressionExpiry, m009Complaints, m010BayesTokens, m011QueueIndexes, m012DsnDelayNotice, m013Vacation, m014ExpungedFloor, m015VacationResponse, m016DsnParams, m017Reporting, m018PushSubscriptions, m019IdentityState, m020MailboxAcl, m021DirectoryIdentity, m022HeaderProjection, m023ListingIndexes, m024DirectoryIdentityAccountUnique, m025AdminUsers, m026AccountWeb];

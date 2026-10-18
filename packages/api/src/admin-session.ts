@@ -13,6 +13,8 @@ import { sha256hex } from "@ionosphere/core";
  * 같은 상위 도메인의 다른 서브도메인이 이 쿠키를 덮어쓰는(쿠키 토싱) 길을 막는다.
  */
 export const ADMIN_SESSION_COOKIE = "__Host-ionosphere_admin";
+/** 메일 계정 셀프서비스 세션 쿠키(E2). 이름이 다르면 같은 브라우저에서 두 세션이 서로를 덮지 않는다. */
+export const ACCOUNT_SESSION_COOKIE = "__Host-ionosphere_account";
 
 /** CSRF 토큰을 실어 보내는 헤더. 브라우저는 다른 오리진의 요청에 커스텀 헤더를 붙일 수 없다(CORS 사전 요청). */
 export const CSRF_HEADER = "x-csrf-token";
@@ -37,12 +39,12 @@ export function readCookie(req: IncomingMessage, name: string): string | null {
 }
 
 /** 로그인 응답의 Set-Cookie. 수명은 쿠키가 아니라 서버 세션 행이 정한다(세션 쿠키 — 브라우저를 닫으면 사라진다). */
-export function sessionCookie(token: string): string {
-  return `${ADMIN_SESSION_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict`;
+export function sessionCookie(token: string, name: string = ADMIN_SESSION_COOKIE): string {
+  return `${name}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict`;
 }
 
-export function clearedSessionCookie(): string {
-  return `${ADMIN_SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`;
+export function clearedSessionCookie(name: string = ADMIN_SESSION_COOKIE): string {
+  return `${name}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`;
 }
 
 /**

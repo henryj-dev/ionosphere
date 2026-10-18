@@ -534,6 +534,9 @@ const app = new IonosphereApp({
   ...namedPort("adminPort", process.env.IONOSPHERE_ADMIN_PORT),
   ...(process.env.IONOSPHERE_ADMIN_TOKEN ? { adminRootToken: process.env.IONOSPHERE_ADMIN_TOKEN } : {}),
   ...(process.env.IONOSPHERE_ADMIN_ORIGIN ? { adminOrigin: process.env.IONOSPHERE_ADMIN_ORIGIN } : {}),
+  // 메일 계정 셀프서비스(회원 정책 E2) — 포트 지정 시에만 리슨. 443의 `account.` 라우트(IONOSPHERE_HOST_ACCOUNT)가 받는다.
+  ...namedPort("selfServicePort", process.env.IONOSPHERE_SELF_SERVICE_PORT),
+  ...(process.env.IONOSPHERE_SELF_SERVICE_ORIGIN ? { selfServiceOrigin: process.env.IONOSPHERE_SELF_SERVICE_ORIGIN } : {}),
   /**
    * 관리 콘솔을 얹을 Host 접두사(예: `admin.`). **미지정 시 관리 콘솔에 원격으로 닿을 수 없다**
    * — 평문 `IONOSPHERE_ADMIN_PORT`는 항상 루프백에만 붙는다. (예전의 8443은 걷어냈다.)
