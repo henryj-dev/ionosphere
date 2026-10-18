@@ -295,7 +295,9 @@ export class ManageSieveServer {
           }
           case "authVerified": {
             const ip = normalizeIp(socket.remoteAddress);
-            const ok = (await backend.scramAuthorize?.(a.user)) ?? null;
+            // 계정 축이 막혀 있으면 증명이 맞아도 들이지 않는다 — SCRAM 증명은 값싸서, 여기서 막지 않으면 분산 대입이 계정 축을 비켜 간다.
+            const throttled = await this.authThrottle.blocked({ ip, account: a.user });
+            const ok = throttled ? null : ((await backend.scramAuthorize?.(a.user)) ?? null);
             // ★백엔드를 기다리는 사이 인증 전 마감이 발동했으면 결과를 버린다 — 연결은 이미 끊기는
             //   중이고 여기서 재개하면 닫힌 세션이 계정 상태로 넘어간다(코드 검수 지적).
             if (meter.deadlinePassed) break;
@@ -303,10 +305,12 @@ export class ManageSieveServer {
             if (ok) {
               accountId = ok.accountId;
               meter.authenticated(ok.accountId);
-              await this.authThrottle.clear(ip);
+              // 성공하면 **계정 축만** 지운다. IP 축까지 지우면 자기 계정 하나로 같은 IP의 대입 기록을 계속 초기화할 수 있다
+              // (서버 세 대가 같은 카운터를 쓰므로 한 번의 성공이 클러스터 전체를 지운다). IP 축은 15분 뒤 저절로 풀린다.
+              void this.authThrottle.clear({ account: a.user });
             } else {
               meter.authFailed();
-              await this.authThrottle.recordFailure(ip);
+              if (!throttled) await this.authThrottle.recordFailure({ ip, account: a.user });
             }
             this.audit.record({
               ts: Date.now(),
@@ -333,7 +337,7 @@ export class ManageSieveServer {
             const ip = normalizeIp(socket.remoteAddress);
             meter.attempted(a.user);
             meter.authFailed();
-            await this.authThrottle.recordFailure(ip);
+            await this.authThrottle.recordFailure({ ip, ...(a.user ? { account: a.user } : {}) });
             this.audit.record({
               ts: Date.now(),
               surface: AUDIT_SURFACE.managesieve,
@@ -349,7 +353,7 @@ export class ManageSieveServer {
             const ip = normalizeIp(socket.remoteAddress);
             meter.attempted(a.user);
             // 차단 중이면 백엔드를 부르지 않는다 — 실패마다 scrypt가 도는 걸 막는 게 요점.
-            if (await this.authThrottle.blocked(ip)) {
+            if (await this.authThrottle.blocked({ ip, account: a.user })) {
               // 차단도 기록한다(IMAP·POP3와 같은 이유) — 공격 활동이 가장 잘 드러나는 갈래다.
               this.audit.record({
                 ts: Date.now(),
@@ -377,10 +381,12 @@ export class ManageSieveServer {
                 if (!socket.destroyed) socket.end();
               });
               meter.authenticated(r.accountId);
-              await this.authThrottle.clear(ip);
+              // 성공하면 **계정 축만** 지운다. IP 축까지 지우면 자기 계정 하나로 같은 IP의 대입 기록을 계속 초기화할 수 있다
+              // (서버 세 대가 같은 카운터를 쓰므로 한 번의 성공이 클러스터 전체를 지운다). IP 축은 15분 뒤 저절로 풀린다.
+              void this.authThrottle.clear({ account: a.user });
             } else {
               meter.authFailed();
-              await this.authThrottle.recordFailure(ip);
+              await this.authThrottle.recordFailure({ ip, account: a.user });
             }
             this.audit.record({
               ts: Date.now(),

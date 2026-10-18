@@ -344,7 +344,7 @@ export class SelfServiceServer {
       return sendJson(res, 401, { error: "invalid credentials" });
     }
     // 계정 축만 지운다 — IP 축까지 지우면 자기 계정 하나로 같은 IP의 IMAP 대입 기록을 초기화할 수 있다(2026-10-18 검토).
-    await this.throttle.clear({ account: email });
+    void this.throttle.clear({ account: email }, now);
     const previous = await resolveAccountSession(this.deps.db, readCookie(req, ACCOUNT_SESSION_COOKIE) ?? "", this.deps.sessionPolicy ?? PROVISIONAL_WEB_SESSION_POLICY, now);
     if (previous) await revokeWebSession(this.deps.db, ACCOUNT_REALM, previous.sessionId, now);
     const enrolledNow = account.mfaEnrolled && recovered === null;
@@ -394,8 +394,9 @@ export class SelfServiceServer {
       const now = Date.now();
       const fail = (reason: string): void => {
         audit.detail.oidcFailure = reason;
-        // 응답을 기다리게 하지 않는다 — recordFailure는 저장소 실패를 안에서 삼키므로 거부되지 않는다.
-        void this.throttle.recordFailure(ip, now);
+        // "차단 중" 응답은 세지 않는다 — 세면 새로 고칠 때마다 지연이 두 배로 늘어 스스로 차단을 연장한다
+        // (같은 IP 버킷을 메일 프로토콜도 쓴다). 응답을 기다리게 하지 않는다 — recordFailure는 저장소 실패를 삼킨다.
+        if (reason !== "throttled") void this.throttle.recordFailure(ip, now);
         res.writeHead(302, { Location: "/account?sso=failed", "Set-Cookie": flow.clearStateCookie(), "Cache-Control": "no-store" });
         res.end();
       };
@@ -454,7 +455,8 @@ export class SelfServiceServer {
         await this.throttle.recordFailure(subject, now);
         throw new HttpError(401, "invalid code", "invalid_code");
       }
-      await this.throttle.clear(subject);
+      // 성공하면 계정 축만 지운다(IP 축까지 지우면 자기 계정 하나로 같은 IP의 대입 기록을 초기화할 수 있다).
+      void this.throttle.clear({ account: subject.account }, now);
       await markWebSessionMfa(this.deps.db, ACCOUNT_REALM, s.sessionId, now);
       return sendJson(res, 200, { ok: true, mfaAt: now, ...(recoveryCodes ? { recoveryCodes } : {}) }, { "Cache-Control": "no-store" });
     }

@@ -507,7 +507,8 @@ export class AdminApiServer {
         sendJson(res, 401, { error: "invalid credentials" });
         return true;
       }
-      await this.throttle.clear(subject);
+      // 성공하면 계정 축만 지운다 — IP 축까지 지우면 자기 계정 하나로 같은 IP의 대입 기록을 초기화할 수 있다(서버들이 같은 카운터를 쓴다).
+      void this.throttle.clear({ account: subject.account }, now);
       // 같은 브라우저의 이전 세션은 닫는다 — 쿠키는 덮이지만 서버 행은 idle 만료까지 살아 있게 된다.
       // 쿠키가 없으면 빈 토큰 — 세션 해석이 null을 돌려준다(조건 분기 없이 같은 경로를 탄다).
       const previousAuth = await this.authenticateSession(readCookie(req, ADMIN_SESSION_COOKIE) ?? "");
@@ -608,7 +609,7 @@ export class AdminApiServer {
         await this.throttle.recordFailure(subject, now);
         throw new HttpError(401, "invalid code", "invalid_code");
       }
-      await this.throttle.clear(subject);
+      void this.throttle.clear({ account: subject.account }, now);
       await markAdminSessionMfa(this.deps.db, auth.sessionId, now);
       // 등록 확정이면 복구 코드를 **이 응답에서만** 준다(저장은 해시뿐이다).
       sendJson(res, 200, { ok: true, mfaAt: now, ...(recoveryCodes ? { recoveryCodes } : {}) }, { "Cache-Control": "no-store" });
@@ -672,8 +673,9 @@ export class AdminApiServer {
       const now = Date.now();
       const fail = (reason: string): void => {
         auditSubject.detail.oidcFailure = reason;
-        // 응답을 기다리게 하지 않는다 — recordFailure는 저장소 실패를 안에서 삼키므로 거부되지 않는다.
-        void this.throttle.recordFailure(ip, now);
+        // "차단 중" 응답은 세지 않는다 — 세면 새로 고칠 때마다 지연이 두 배로 늘어 스스로 차단을 연장한다
+        // (같은 IP 버킷을 메일 프로토콜도 쓴다). 응답을 기다리게 하지 않는다 — recordFailure는 저장소 실패를 삼킨다.
+        if (reason !== "throttled") void this.throttle.recordFailure(ip, now);
         res.writeHead(302, { Location: "/admin?sso=failed", "Set-Cookie": flow.clearStateCookie(), "Cache-Control": "no-store" });
         res.end();
       };
@@ -693,7 +695,7 @@ export class AdminApiServer {
       }
       const user = await getAdminUser(this.deps.db, adminUserId);
       if (!user) return fail("not_active");
-      await this.throttle.clear(ip);
+      // OIDC 성공은 IP 축을 지우지 않는다(위 비밀번호 로그인과 같은 이유). 이 경로는 계정 축을 쓰지 않는다.
       const previousAuth = await this.authenticateSession(readCookie(req, ADMIN_SESSION_COOKIE) ?? "");
       if (previousAuth) await revokeAdminSession(this.deps.db, previousAuth.sessionId, now);
       const mfaAt = user.mfaEnrolled && result.idpMfaAt !== null ? result.idpMfaAt : null;
@@ -808,7 +810,7 @@ export class AdminApiServer {
         await this.throttle.recordFailure(ip, now);
         return sendJson(res, 401, { error: "unauthorized" });
       }
-      if (auth.kind !== "human") await this.throttle.clear(ip);
+      // API 키 성공도 IP 축을 지우지 않는다 — 유효한 키 하나로 같은 IP의 대입 기록을 초기화하지 못하게.
       if (auth.kind === "human") {
         auditSubject.detail.adminUserId = auth.adminUserId;
         if (method !== "GET") this.requireSameOriginWrite(req, auth.csrfHash);

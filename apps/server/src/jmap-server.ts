@@ -123,7 +123,7 @@ const MAX_AUTH_CACHE = 10_000;
  */
 type JmapAuthResult =
   | { ok: true; accountId: string; email: string; credKind?: string | undefined; cached: boolean; expiresAt?: number | undefined }
-  | { ok: false; presented: boolean; user?: string };
+  | { ok: false; presented: boolean; user?: string; retryAfter?: number };
 
 export class JmapServer {
   private readonly opts: JmapServerOptions;
@@ -328,15 +328,16 @@ export class JmapServer {
           ...extra,
         });
       };
-      const retryAfter = await this.authThrottle.retryAfterSeconds(ip);
-      if (retryAfter > 0) {
+      // 스로틀 판정은 authenticate 안에서, **캐시를 놓쳐 실제로 검증할 때만** 한다. 예전처럼 요청마다 보면
+      // 폴링·EventSource 요청마다 공유 DB 왕복이 붙는다(캐시 적중은 scrypt를 돌지 않아 막을 이유가 없다).
+      const auth = await this.authenticate(req, ip);
+      if (!auth.ok && auth.retryAfter !== undefined) {
         // 차단도 기록한다(소켓 프로토콜 넷과 같은 이유) — 공격 활동이 가장 잘 드러나는 갈래다.
-        auditRequest(AUDIT_OUTCOME.throttled);
-        res.writeHead(429, { "content-type": "application/json", "retry-after": String(retryAfter) });
+        auditRequest(AUDIT_OUTCOME.throttled, auth.user !== undefined ? { user: auth.user } : {});
+        res.writeHead(429, { "content-type": "application/json", "retry-after": String(auth.retryAfter) });
         res.end(JSON.stringify({ type: "about:blank", status: 429, detail: "too many failed auth attempts" }));
         return;
       }
-      const auth = await this.authenticate(req);
       if (!auth.ok) {
         // **자격증명을 제시한 실패만** 센다. Authorization 헤더가 없는 요청은 공격이 아니라
         // 401을 받고 자격증명을 붙이는 표준 브라우저 흐름이고, NAT/CGNAT 뒤에서는 평범한
@@ -355,7 +356,9 @@ export class JmapServer {
         res.end(JSON.stringify({ type: "about:blank", status: 401, detail: "authentication required" }));
         return;
       }
-      await this.authThrottle.clear({ ip, account: auth.email });
+      // 캐시를 놓쳐 검증한 성공만 계정 축을 지운다. IP 축은 지우지 않는다 — 자기 계정 하나로 같은 IP의
+      // 대입 기록을 초기화하지 못하게(서버들이 같은 카운터를 쓴다). 응답을 기다리게 하지 않는다.
+      if (!auth.cached) void this.authThrottle.clear({ account: auth.email });
       // 인증된 요청 한 줄. **캐시 히트도 여기로 들어온다**(그게 이 자리에 훅을 건 이유다).
       auditRequest(AUDIT_OUTCOME.ok, {
         user: auth.email,
@@ -403,7 +406,7 @@ export class JmapServer {
     }
   }
 
-  private async authenticate(req: IncomingMessage): Promise<JmapAuthResult> {
+  private async authenticate(req: IncomingMessage, ip: string): Promise<JmapAuthResult> {
     const header = req.headers.authorization;
     if (!header || !header.startsWith("Basic ")) return { ok: false, presented: false };
 
@@ -430,6 +433,9 @@ export class JmapServer {
     if (idx === -1) return { ok: false, presented: true };
     const user = decoded.slice(0, idx);
     const pass = decoded.slice(idx + 1);
+    // 차단 중이면 검증(scrypt)을 아예 돌리지 않는다 — 이 스로틀이 생긴 이유다.
+    const retryAfter = await this.authThrottle.retryAfterSeconds({ ip, account: user });
+    if (retryAfter > 0) return { ok: false, presented: true, user, retryAfter };
     const result = this.opts.authenticatePassword
       ? await this.opts.authenticatePassword(user, pass)
       : await authenticate(this.opts.db, user, pass, "jmap");

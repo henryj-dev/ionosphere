@@ -387,8 +387,9 @@ export class SmtpServer {
       } catch {
         result = { ok: false };
       }
-      if (result.ok) await this.authThrottle.clear(ip);
-      else await this.authThrottle.recordFailure(ip);
+      // 성공해도 IP 축은 지우지 않는다 — 자기 계정 하나로 같은 IP의 대입 기록을 초기화하지 못하게(서버들이 같은 카운터를 쓴다).
+      // 계정 축은 백엔드(조립층 authFn)가 판정·기록·해제한다. 계정 축 차단으로 거절된 시도는 IP 실패로 세지 않는다.
+      if (!result.ok && result.throttled !== true) await this.authThrottle.recordFailure(ip);
       // 토큰 만료에 연결을 닫는다(E4) — 제출 세션이 만료된 토큰으로 계속 메일을 보내지 못하게.
       if (result.ok) {
         armAuthExpiry(rawSocket, result.expiresAt, () => {
@@ -470,7 +471,7 @@ export class SmtpServer {
     const recordEngineAuthFailure = (user: string | undefined, mechanism: string): void => {
       const ip = normalizeIp(rawSocket.remoteAddress);
       // 응답을 기다리게 하지 않는다 — recordFailure는 저장소 실패를 안에서 삼키므로 거부되지 않는다.
-      void this.authThrottle.recordFailure(ip);
+      void this.authThrottle.recordFailure({ ip, ...(user ? { account: user } : {}) });
       this.audit.record({
         ts: Date.now(),
         surface: this.auditSurface,

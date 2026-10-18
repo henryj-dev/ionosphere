@@ -31,21 +31,24 @@ export class DbAuthFailureStore implements SharedThrottleStore {
   /**
    * 행이 없으면 만들고, 있으면 하나 더한다.
    *
-   * ★두 문장을 **따로 커밋한다**(SCHEMA의 "한 논리 연산 = 한 배치"의 예외). 한 트랜잭션으로 묶으면 MySQL에서
+   * 순서: UPDATE 먼저 → 0행이면(버킷이 처음이다) INSERT IGNORE로 1회짜리 행 → 그것도 0행이면(동시에 다른 서버가
+   * 만들었다) UPDATE를 한 번 더. 흔한 경우(행이 이미 있다)가 문장 하나로 끝난다.
+   *
+   * ★문장마다 **따로 커밋한다**(SCHEMA의 "한 논리 연산 = 한 배치"의 예외). 한 트랜잭션으로 묶으면 MySQL에서
    * 같은 새 버킷을 동시에 세는 서버들이 INSERT의 공유 잠금과 UPDATE의 배타 잠금을 서로 기다려 교착에 빠진다
    * (2026-10-18 로컬 MySQL 8에서 20개 동시 실패로 재현, ER_LOCK_DEADLOCK). 나눠도 잃는 것이 없다:
-   * 미리 만든 빈 행(0회)은 판정에 쓰이지 않고, 더하기는 UPDATE 한 문장이 자기 행을 읽어 더하므로 원자적이다.
-   * 빈 행의 시각을 0이 아니라 `now`로 넣는 이유: 두 문장 사이에 `sweep`이 돌면 시각 0인 행은 지워져 이번 실패를 잃는다.
-   * `now`면 sweep 대상이 아니고, CASE도 초기화로 보지 않아 0 + 1 = 1이 된다.
+   * UPDATE는 자기 행을 읽어 더하므로 원자적이고, INSERT IGNORE가 진 쪽은 마지막 UPDATE로 이긴 행에 더한다.
+   * 초기화 판정은 `<=`다 — core `blockedUntil`이 "마지막 실패 뒤 정확히 초기화 시간"을 이미 풀린 것으로 보는 것과 맞춘다.
    */
   async recordFailure(bucket: string, now: number, resetBefore: number): Promise<void> {
-    await this.db.batch([{ sql: this.db.insertIgnore(TABLE, ["bucket", "fails", "last_fail_at"]), params: [bucket, 0, now] }]);
-    await this.db.batch([
-      {
-        sql: `UPDATE ${TABLE} SET fails = CASE WHEN last_fail_at < ? THEN 1 ELSE fails + 1 END, last_fail_at = ? WHERE bucket = ?`,
-        params: [resetBefore, now, bucket],
-      },
-    ]);
+    const update = {
+      sql: `UPDATE ${TABLE} SET fails = CASE WHEN last_fail_at <= ? THEN 1 ELSE fails + 1 END, last_fail_at = ? WHERE bucket = ?`,
+      params: [resetBefore, now, bucket],
+    };
+    if ((await this.db.batch([update]))[0]!.changes > 0) return;
+    const inserted = await this.db.batch([{ sql: this.db.insertIgnore(TABLE, ["bucket", "fails", "last_fail_at"]), params: [bucket, 1, now] }]);
+    if (inserted[0]!.changes > 0) return;
+    await this.db.batch([update]);
   }
 
   async clear(buckets: readonly string[]): Promise<void> {

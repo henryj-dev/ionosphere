@@ -96,6 +96,8 @@ const SHARED_ERROR_LOG_INTERVAL_MS = 60_000;
  */
 const READ_MEMO_MS = 30_000;
 const MAX_READ_MEMO = 10_000;
+/** 차단 판정 캐시 상한 — 공격자가 버킷을 바꿔 가며 맵을 불리지 못하게. 넘치면 비운다(더 느슨해질 뿐 틀리지 않는다). */
+const MAX_BLOCK_CACHE = 10_000;
 
 /** 축별 네임스페이스 — 사용자명이 IP 표기와 같아도 버킷이 섞이지 않게. */
 const IP_PREFIX = "ip|";
@@ -134,6 +136,18 @@ export function blockedUntil(c: ThrottleCounter | undefined, now: number, p: Thr
 export class AuthFailureThrottle {
   private readonly local = new Map<string, ThrottleCounter>();
   private readonly readMemo = new Map<string, { at: number; present: boolean }>();
+  /**
+   * 버킷 → 이 시각까지 막힘. 차단이 확인되면 풀릴 때까지 공유 저장소를 다시 읽지 않는다 — 공격 중인 시도마다
+   * DB 왕복이 붙으면 공격 트래픽이 메일 배달과 같은 DB로 그대로 옮겨 간다. 차단은 시간이 지나야 풀리므로
+   * 이 캐시는 **더 엄격한 쪽으로만** 틀린다(다른 서버의 성공이 지운 경우에도 지연이 끝날 때까지는 막는다).
+   */
+  private readonly blockCache = new Map<string, number>();
+  /**
+   * 버킷 → 이 시각까지 미동기. 공유 저장소에 실패를 쓰지 못한 버킷은 공유 값이 실제보다 작다. 그 동안은
+   * 공유 값과 프로세스 카운터 중 **더 엄격한 쪽**을 따른다 — 읽기는 되는데 쓰기만 실패하면 실패가 어디에도
+   * 남지 않던 구멍(fail open)을 막는다.
+   */
+  private readonly unsynced = new Map<string, number>();
   private lastLocalSweep = 0;
   private lastSharedSweep = 0;
   private lastSharedErrorLog = 0;
@@ -164,12 +178,27 @@ export class AuthFailureThrottle {
   async retryAfterSeconds(subject: AuthThrottleSubject, now: number = Date.now()): Promise<number> {
     const axes = this.axesOf(subject);
     if (axes.length === 0) return 0;
+    let cached = 0;
+    for (const axis of axes) {
+      const u = this.blockCache.get(axis.key);
+      if (u === undefined) continue;
+      if (u > now) cached = Math.max(cached, u);
+      else this.blockCache.delete(axis.key);
+    }
+    if (cached > now) return Math.max(1, Math.ceil((cached - now) / 1000));
     // 공유 카운터를 읽었으면 **그것만** 따른다. 프로세스 카운터까지 합치면 다른 서버에서 성공해 지운 뒤에도
     // 이 서버의 낡은 카운터가 계속 막는다. 프로세스 카운터는 공유 저장소를 못 읽을 때의 대비(fail closed)다.
     const shared = await this.readShared(axes.map((a) => a.key), now);
-    const source = (key: string): ThrottleCounter | undefined => (shared ? shared.get(key) : this.local.get(key));
     let until = 0;
-    for (const axis of axes) until = Math.max(until, blockedUntil(source(axis.key), now, this.policy));
+    for (const axis of axes) {
+      const local = blockedUntil(this.local.get(axis.key), now, this.policy);
+      const u = !shared ? local : this.isUnsynced(axis.key, now) ? Math.max(local, blockedUntil(shared.get(axis.key), now, this.policy)) : blockedUntil(shared.get(axis.key), now, this.policy);
+      if (u > now) {
+        if (this.blockCache.size >= MAX_BLOCK_CACHE) this.blockCache.clear();
+        this.blockCache.set(axis.key, u);
+      }
+      until = Math.max(until, u);
+    }
     return until > now ? Math.max(1, Math.ceil((until - now) / 1000)) : 0;
   }
 
@@ -195,21 +224,34 @@ export class AuthFailureThrottle {
     }
     this.sweepLocal(now);
     if (!this.shared || axes.length === 0) return;
-    try {
-      for (const axis of axes) await this.shared.recordFailure(axis.key, now, now - this.policy.resetAfterMs);
-      if (now - this.lastSharedSweep >= SHARED_SWEEP_INTERVAL_MS) {
-        this.lastSharedSweep = now;
-        await this.shared.sweep(now - this.policy.resetAfterMs);
+    // 축마다 따로 쓴다 — 한 축 쓰기가 실패해도 다른 축은 계속 기록한다. 실패한 축은 미동기로 표시한다.
+    for (const axis of axes) {
+      try {
+        await this.shared.recordFailure(axis.key, now, now - this.policy.resetAfterMs);
+      } catch (e) {
+        if (this.unsynced.size >= MAX_BLOCK_CACHE) this.unsynced.clear();
+        this.unsynced.set(axis.key, now + this.policy.resetAfterMs);
+        this.sharedFailed(e, now);
       }
-    } catch (e) {
-      this.sharedFailed(e, now);
+    }
+    if (now - this.lastSharedSweep >= SHARED_SWEEP_INTERVAL_MS) {
+      this.lastSharedSweep = now;
+      try {
+        await this.shared.sweep(now - this.policy.resetAfterMs);
+      } catch (e) {
+        this.sharedFailed(e, now);
+      }
     }
   }
 
   /** 인증 성공 → 그 대상의 실패 기록을 지운다(두 축 모두). */
   async clear(subject: AuthThrottleSubject, now: number = Date.now()): Promise<void> {
     const axes = this.axesOf(subject);
-    for (const axis of axes) this.local.delete(axis.key);
+    for (const axis of axes) {
+      this.local.delete(axis.key);
+      this.blockCache.delete(axis.key);
+      this.unsynced.delete(axis.key);
+    }
     if (!this.shared || axes.length === 0) return;
     // 방금 읽어서 "없다"를 확인한 버킷은 지울 것이 없다 — 쓰기를 건너뛴다.
     const toClear = axes
@@ -240,6 +282,14 @@ export class AuthFailureThrottle {
     }
   }
 
+  private isUnsynced(key: string, now: number): boolean {
+    const u = this.unsynced.get(key);
+    if (u === undefined) return false;
+    if (u > now) return true;
+    this.unsynced.delete(key);
+    return false;
+  }
+
   private sharedFailed(e: unknown, now: number): void {
     if (now - this.lastSharedErrorLog < SHARED_ERROR_LOG_INTERVAL_MS) return;
     this.lastSharedErrorLog = now;
@@ -267,6 +317,8 @@ export class AuthFailureThrottle {
     for (const [key, m] of this.readMemo) {
       if (now - m.at >= READ_MEMO_MS) this.readMemo.delete(key);
     }
+    for (const [key, u] of this.blockCache) if (u <= now) this.blockCache.delete(key);
+    for (const [key, u] of this.unsynced) if (u <= now) this.unsynced.delete(key);
   }
 }
 

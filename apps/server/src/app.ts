@@ -696,7 +696,7 @@ export class IonosphereApp {
       const result = await this.authenticatePassword(user, pass, "submission");
       if (result) {
         log.info("auth ok", { user });
-        await this.authThrottle.clear({ account: user });
+        void this.authThrottle.clear({ account: user });
         return { ok: true, credKind: result.credKind, ...(result.expiresAt !== undefined ? { expiresAt: result.expiresAt } : {}) };
       }
       log.warn("auth failed", { user });
@@ -752,7 +752,7 @@ export class IonosphereApp {
           return { ok: false };
         }
         log.info("auth ok (scram)", { user });
-        await this.authThrottle.clear({ account: user });
+        void this.authThrottle.clear({ account: user });
         return { ok: true, credKind: "password" };
       },
     };

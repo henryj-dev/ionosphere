@@ -863,17 +863,15 @@ describe("AdminApiServer", () => {
     expect((await fetch(`${f.baseUrl}/`)).status).toBe(200);
   });
 
-  test("인증 실패 스로틀 — 성공하면 카운터 리셋(오타 뒤 정상 로그인이 벌받지 않는다)", async () => {
+  test("인증 실패 스로틀 — 성공해도 IP 축은 지우지 않는다(유효한 키 하나로 대입 기록을 초기화하지 못하게)", async () => {
     const f = await setup();
     for (let i = 0; i < 4; i++) {
       expect((await fetch(`${f.baseUrl}/v1/accounts`, { headers: authHeader("bogus-token") })).status).toBe(401);
     }
-    // 성공 → 실패 기록 삭제
+    // 성공해도 IP 축 카운터(4회)는 남는다. 예전에는 여기서 지워져 "4회 실패 + 1회 성공"을 무한히 되풀이할 수 있었다.
     expect((await fetch(`${f.baseUrl}/v1/accounts?tenantId=t`, { headers: authHeader(ROOT_TOKEN) })).status).toBe(200);
-    // 리셋되지 않았다면 이 4회 중 두 번째부터 429가 나온다
-    for (let i = 0; i < 4; i++) {
-      expect((await fetch(`${f.baseUrl}/v1/accounts`, { headers: authHeader("bogus-token") })).status).toBe(401);
-    }
+    expect((await fetch(`${f.baseUrl}/v1/accounts`, { headers: authHeader("bogus-token") })).status).toBe(401);
+    expect((await fetch(`${f.baseUrl}/v1/accounts`, { headers: authHeader("bogus-token") })).status).toBe(429);
   });
 
   test("인증 실패 스로틀 — 성공 요청은 세지 않는다(정상 운영 무영향)", async () => {

@@ -221,9 +221,12 @@ describe("스로틀 발동 로깅 (감사 M-6)", () => {
 class MemoryShared implements SharedThrottleStore {
   readonly rows = new Map<string, ThrottleCounter>();
   writes = 0;
+  reads = 0;
   failing = false;
+  failWrites = false;
   async read(buckets: readonly string[]): Promise<Map<string, ThrottleCounter>> {
     if (this.failing) throw new Error("db down");
+    this.reads++;
     const out = new Map<string, ThrottleCounter>();
     for (const b of buckets) {
       const r = this.rows.get(b);
@@ -232,7 +235,7 @@ class MemoryShared implements SharedThrottleStore {
     return out;
   }
   async recordFailure(bucket: string, now: number, resetBefore: number): Promise<void> {
-    if (this.failing) throw new Error("db down");
+    if (this.failing || this.failWrites) throw new Error("db down");
     this.writes++;
     const r = this.rows.get(bucket);
     this.rows.set(bucket, { fails: !r || r.lastFailAt < resetBefore ? 1 : r.fails + 1, lastFailAt: now });
@@ -319,5 +322,39 @@ describe("공유 저장소 — 서버 여러 대가 함께 센다", () => {
     expect(await t.blocked({ account: "u@test.local" }, now)).toBe(true);
     await t.clear({ account: "u@test.local" }, now);
     expect(await other.blocked({ account: "u@test.local" }, now)).toBe(false);
+  });
+});
+
+describe("공유 저장소 장애·부하 (P1 리뷰 M1·M4)", () => {
+  test("읽기는 되는데 쓰기만 실패하면 프로세스 카운터로 막는다(fail open 금지)", async () => {
+    const shared = new MemoryShared();
+    const t = new AuthFailureThrottle({ freeFailures: 2, baseDelayMs: 60_000, shared });
+    shared.failWrites = true;
+    await t.recordFailure({ account: "u@test.local" }, 10_000);
+    await t.recordFailure({ account: "u@test.local" }, 10_000);
+    expect(await t.blocked({ account: "u@test.local" }, 10_000)).toBe(true);
+  });
+
+  test("차단이 확인되면 풀릴 때까지 저장소를 다시 읽지 않는다", async () => {
+    const shared = new MemoryShared();
+    const t = new AuthFailureThrottle({ freeFailures: 2, baseDelayMs: 60_000, shared });
+    await t.recordFailure("203.0.113.9", 10_000);
+    await t.recordFailure("203.0.113.9", 10_000);
+    expect(await t.blocked("203.0.113.9", 10_000)).toBe(true);
+    const before = shared.reads;
+    for (let i = 0; i < 50; i++) expect(await t.blocked("203.0.113.9", 10_001 + i)).toBe(true);
+    expect(shared.reads).toBe(before);
+    // 지연이 끝나면 다시 읽는다.
+    expect(await t.blocked("203.0.113.9", 70_001)).toBe(false);
+    expect(shared.reads).toBe(before + 1);
+  });
+
+  test("계정 축만 지우면 IP 축은 남는다 — 자기 계정 성공으로 같은 IP의 대입 기록을 초기화하지 못한다", async () => {
+    const shared = new MemoryShared();
+    const t = new AuthFailureThrottle({ freeFailures: 2, baseDelayMs: 60_000, shared });
+    await t.recordFailure({ ip: "203.0.113.9", account: "victim@test.local" }, 10_000);
+    await t.recordFailure({ ip: "203.0.113.9", account: "victim@test.local" }, 10_000);
+    await t.clear({ account: "attacker@test.local" }, 10_000);
+    expect(await t.blocked({ ip: "203.0.113.9", account: "attacker@test.local" }, 10_000)).toBe(true);
   });
 });

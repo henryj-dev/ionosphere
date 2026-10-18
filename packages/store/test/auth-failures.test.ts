@@ -83,7 +83,12 @@ for (const d of dialects) {
     test("★동시에 올려도 하나도 잃지 않는다(서버 여러 대가 같은 버킷을 센다)", async () => {
       const store = new DbAuthFailureStore(await d.open!());
       const N = 20;
-      await Promise.all(Array.from({ length: N }, (_, i) => store.recordFailure("account|race@ionosphere.test", 1000 + i, 0)));
+      // 정리(sweep)를 섞는다 — MySQL에서 보조 인덱스 범위 DELETE와 PK UPDATE가 반대 순서로 잠가 교착하는지 본다(P1 리뷰 L4).
+      // 기준을 작게 둬 이 버킷은 지우지 않지만 같은 인덱스 범위를 훑게 한다.
+      await Promise.all([
+        ...Array.from({ length: N }, (_, i) => store.recordFailure("account|race@ionosphere.test", 1000 + i, 0)),
+        ...Array.from({ length: 5 }, () => store.sweep(500)),
+      ]);
       expect((await store.read(["account|race@ionosphere.test"])).get("account|race@ionosphere.test")?.fails).toBe(N);
     });
 
@@ -107,7 +112,11 @@ for (const d of dialects) {
       for (let i = 0; i < 2; i++) await b.recordFailure({ account: "u@ionosphere.test" }, now);
       expect(await a.blocked({ account: "u@ionosphere.test" }, now)).toBe(true);
       await b.clear({ account: "u@ionosphere.test" }, now);
-      expect(await a.blocked({ account: "u@ionosphere.test" }, now)).toBe(false);
+      // 지운 뒤 처음 판정하는 서버는 바로 풀린 것을 본다.
+      expect(await new AuthFailureThrottle({ shared: store }).blocked({ account: "u@ionosphere.test" }, now)).toBe(false);
+      // 차단을 이미 확인한 서버는 그 지연(5회째 = 1초)이 끝날 때까지 막는다 — 차단 캐시는 더 엄격한 쪽으로만 틀린다.
+      expect(await a.blocked({ account: "u@ionosphere.test" }, now)).toBe(true);
+      expect(await a.blocked({ account: "u@ionosphere.test" }, now + 1000)).toBe(false);
     });
   });
 }
