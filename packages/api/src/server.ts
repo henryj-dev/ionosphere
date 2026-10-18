@@ -31,7 +31,7 @@ import {
   ulid,
   type Logger,
 } from "@ionosphere/core";
-import { ADMIN_ROLE, type AdminRole, type DbDriver } from "@ionosphere/db";
+import { ADMIN_ROLE, ADMIN_STATUS, type AdminRole, type DbDriver } from "@ionosphere/db";
 import {
   beginAdminTotpEnrollment,
   burnTotpCost,
@@ -169,6 +169,15 @@ type AuthContext =
  */
 function adminThrottleAccount(username: string): string {
   return `admin|${username.trim().toLowerCase()}`;
+}
+
+/** 활성 운영자 owner가 있는가 — 있으면 부트스트랩이 끝난 것이다(rootToken을 더 쓸 이유가 없다). */
+export async function hasActiveOperatorOwner(db: DbDriver): Promise<boolean> {
+  const { rows } = await db.query({
+    sql: "SELECT COUNT(*) AS n FROM admin_users WHERE role = ? AND status = ? AND tenant_id IS NULL",
+    params: [ADMIN_ROLE.owner, ADMIN_STATUS.active],
+  });
+  return Number(rows[0]?.n ?? 0) > 0;
 }
 
 /** 사람 역할 → api_keys와 같은 스코프 축(columns.ts `ADMIN_ROLE` 주석). 권한 판단을 하나로 둔다. */
@@ -673,6 +682,23 @@ export class AdminApiServer {
     throw new HttpError(404, "not found");
   }
 
+  /**
+   * rootToken은 **부트스트랩 전용**이다(회원 정책 결정 D4). 활성 운영자 owner가 이미 있는데 rootToken으로 들어오면
+   * MFA 없는 전권 경로를 일상적으로 쓰고 있다는 뜻이라, 감사 줄에 표시하고 경고를 남긴다.
+   * ⚠ 지금은 **거부하지 않는다** — 운영 절차(배포 스크립트 등)가 rootToken에 기대고 있을 수 있어, 경고로 먼저 드러낸 뒤
+   * 이후 릴리즈에서 거부로 바꾼다(D4). 경고는 분당 한 번으로 묶는다(요청마다 찍으면 로그를 덮는다).
+   */
+  private lastRootWarnAt = 0;
+  private async flagRootAfterBootstrap(auditSubject: { detail: Record<string, string | number> }): Promise<void> {
+    if (!(await hasActiveOperatorOwner(this.deps.db))) return;
+    auditSubject.detail.rootAfterBootstrap = 1;
+    const now = Date.now();
+    if (now - this.lastRootWarnAt >= 60_000) {
+      this.lastRootWarnAt = now;
+      this.log.warn("rootToken 사용 — 활성 운영자 owner가 있으므로 부트스트랩 전용 토큰을 쓰지 말 것(IONOSPHERE_ADMIN_TOKEN 제거 권장)", {});
+    }
+  }
+
   private async mfaEnrolled(adminUserId: string): Promise<boolean> {
     const { rows } = await this.deps.db.query({ sql: "SELECT totp_secret FROM admin_users WHERE id = ?", params: [adminUserId] });
     return rows[0]?.totp_secret != null;
@@ -786,6 +812,7 @@ export class AdminApiServer {
        * 내릴 수 있다. root 토큰은 테넌트가 없으므로 `isRoot`로만 드러난다(cross-tenant 주체).
        */
       auditSubject.detail.isRoot = auth.isRoot ? 1 : 0;
+      if (auth.kind === "root") await this.flagRootAfterBootstrap(auditSubject);
       if (auth.kind === "apiKey") {
         auditSubject.tenantId = auth.tenantId;
         auditSubject.detail.apiKeyId = auth.apiKeyId;

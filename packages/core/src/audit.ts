@@ -35,6 +35,11 @@ export const AUDIT_SURFACE = {
   jmap: "jmap",
   /** 관리 REST API — rootToken 하나가 전 테넌트 권한이라 특히 감사가 필요하다. */
   api: "api",
+  /**
+   * 호스트 관리 CLI — DB에 직접 붙는 **비상 경로**(회원 정책 결정 D4). MFA를 거치지 않는 대신
+   * 실행마다 여기에 남는다. 그 기록이 이 예외를 승인한 조건이다.
+   */
+  cli: "cli",
 } as const;
 
 export type AuditSurface = (typeof AUDIT_SURFACE)[keyof typeof AUDIT_SURFACE];
