@@ -35,6 +35,7 @@ import type { DnsblZone, GreylistOptions, SpamScoreOptions, VirusScanner, VirusS
 import { AdminApiServer, hasActiveOperatorOwner, OidcLoginFlow, SelfServiceServer, type OidcRealmProvider, type TlsAdmin } from "@ionosphere/api";
 import { OidcClient } from "@ionosphere/core";
 import type { ParsedOidcProvider } from "./oidc-config.ts";
+import { looksLikeJwt, MailOAuthVerifier } from "./mail-oauth.ts";
 import { AutoconfigServer } from "@ionosphere/autoconfig";
 import { createIonosphereMetrics, MetricsServer, type IonosphereMetrics } from "@ionosphere/metrics";
 import { IonosphereLmtpBackend, IonospherePop3Backend, IonosphereSmtpBackend, StoreDkimHook, type IonosphereSmtpBackendOptions } from "./backend.ts";
@@ -609,6 +610,8 @@ export class IonosphereApp {
   /** 관리 콘솔 전용 TLS 종단(443과 분리 — 방화벽으로 막을 수 있게). */
   admin?: AdminApiServer;
   adminPort = 0;
+  /** 메일 클라이언트의 외부 OAuth access token 검증(E4). 설정된 공급자가 없으면 undefined. */
+  private mailOAuth?: MailOAuthVerifier;
   /** 메일 계정 셀프서비스(E2) — 443 프론트의 `account.` 라우트 upstream. */
   selfService?: SelfServiceServer;
   selfServicePort = 0;
@@ -701,10 +704,18 @@ export class IonosphereApp {
     };
   }
 
-  /** local 자격증명을 우선하고, 실패했을 때만 immutable identity로 연결된 directory를 조회한다. */
+  /**
+   * local 자격증명을 우선한다. 실패하면 외부 OAuth access token(E4, 설정했을 때만), 그다음 immutable identity로
+   * 연결된 directory를 조회한다. 순서가 곧 우선순위다 — 로컬 자격증명은 IdP 장애와 무관하게 동작한다.
+   */
   private async authenticatePassword(user: string, pass: string, surface: AuthSurface): Promise<{ accountId: string; credKind?: string | undefined } | null> {
     const local = await authenticate(this.db, user, pass, surface);
     if (local) return { accountId: local.accountId, ...(local.credKind ? { credKind: local.credKind } : {}) };
+    const external = await this.mailOAuth?.authenticate(user, pass, surface);
+    if (external) return external;
+    // 외부 토큰 경로가 켜져 있고 값이 JWT 모양이면 디렉터리로 넘기지 않는다 — 실패한 토큰이 LDAP bind 비밀번호로
+    // 외부 디렉터리 서버에 전달되면 안 된다(2026-10-18 검토).
+    if (this.mailOAuth?.enabled && looksLikeJwt(pass)) return null;
     if (this.opts.directoryLogin !== true) return null;
     return await this.sharedMailboxRuntime?.authenticate(user, pass, surface) ?? null;
   }
@@ -848,6 +859,10 @@ export class IonosphereApp {
     this.db = this.opts.db ?? (await openDatabase(this.opts.dbUrl ?? this.opts.dbPath));
     // 마이그레이션은 배타 락 아래에서 돈다 — 여러 인스턴스가 동시에 부팅해도 안전하다.
     await migrate(this.db, allMigrations);
+    // E4: 메일 클라이언트용 외부 access token — 설정한 공급자가 있을 때만(모든 인증 표면이 authenticatePassword를 지난다).
+    if ((this.opts.oidcProviders ?? []).some((p) => p.mailAccessToken)) {
+      this.mailOAuth = new MailOAuthVerifier(this.db, this.opts.oidcProviders ?? [], { ...(this.opts.logger ? { logger: this.opts.logger } : {}) });
+    }
     /**
      * 마스터 키를 스토어에도 넘긴다 — **웹훅 엔드포인트 시크릿 봉인에 필요하다**.
      *

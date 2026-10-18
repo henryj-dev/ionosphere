@@ -317,7 +317,7 @@ SPF+DKIM pass · From 도메인 정렬(SPF 또는 DKIM) · DMARC p=none 이상 �
 | PLAIN (4616) | 전 클라이언트 지원 | **MUST** — TLS 후에만 광고 |
 | LOGIN (무RFC) | 구형 Outlook, 프린터/스캐너 | SHOULD — 20줄로 지원티켓 예방 |
 | 앱 비밀번호 | 자체 도메인 서버의 2026년 표준 관행 | MUST (PLAIN 위에서) |
-| XOAUTH2 / OAUTHBEARER (7628) | Thunderbird 128.4.1+ 등 | ✅ 구현(IMAP·POP3·SMTP, 자체발급 토큰 `kind=2`). 원래 판단이 "후순위"였던 이유는 그대로다 — **OAuth AS 운영이 진짜 비용**이라, 지금 있는 것은 자체발급 토큰이지 완전한 AS가 아니다 |
+| XOAUTH2 / OAUTHBEARER (7628) | Thunderbird 128.4.1+ 등 | ✅ 구현(IMAP·POP3·SMTP, 자체발급 토큰 `kind=2`). 2026-10-18부터 **외부 IdP access token(JWT)**도 받는다(E4 — 메일 전용 audience·scope, sub 연결, introspection 없음). 우리는 여전히 AS가 아니다 — 토큰은 IdP가 발급한다 |
 | SCRAM-SHA-256 (7677) | Thunderbird/Dovecot/Stalwart만. Apple Mail/Outlook 미지원 | ✅ 구현 — 네 프로토콜 전부. **PLAIN보다 앞에 광고**(아래) |
 | CRAM-MD5/DIGEST-MD5 | 죽음 (6331 Historic) | 구현 금지 |
 
