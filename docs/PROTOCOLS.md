@@ -342,7 +342,7 @@ SPF+DKIM pass · From 도메인 정렬(SPF 또는 DKIM) · DMARC p=none 이상 �
 
 | 항목 | 현행 | 근거 |
 |---|---|---|
-| 가입 | 관리자 생성만(`account-create`). 공개 가입·초대·JIT 없음 | `admin-cmd/accounts.ts` |
+| 가입 | 관리자 생성만(`account-create`, 콘솔 관리자는 `admin-user-create`). 공개 가입·초대·JIT 없음 | `admin-cmd/accounts.ts`, `admin-users.ts` |
 | 식별자 | `accounts.id`(ULID) 불변, `email` 전역 유일·소문자. 주소 변경 명령 없음 | SCHEMA §4 |
 | 저장 | scrypt(N=16384,r=8,p=1) + SCRAM-SHA-256 세그먼트 병기 | `store/auth.ts` |
 | 기본 비밀번호 교체 | `account-password-set` — kind=0 전부 교체, **앱 비밀번호·OAuth 토큰은 유지** | `setPrimaryPassword` |
@@ -351,9 +351,13 @@ SPF+DKIM pass · From 도메인 정렬(SPF 또는 DKIM) · DMARC p=none 이상 �
 | 시도 제한 | 실패만 셈, 60초 창, IP 프리픽스 10회 + 계정 20회, 프로세스 로컬 | `core/auth-throttle.ts` |
 | 정지 | `account-suspend` — 새 인증·제출·수신 차단, 데이터 보존, 되돌릴 수 있음 | — |
 | 삭제 | `account-delete` — 되돌릴 수 없는 드레인, 끝날 때까지 주소 재등록 차단 | SCHEMA §7-7 |
-| 반영 지연 | 새 인증은 즉시. **JMAP은 인증 캐시로 최대 30초**. 제출(SMTP)은 메시지마다 상태를 다시 본다. 열린 IMAP·POP3·ManageSieve 연결은 **다음 명령에서** 계정 상태를 다시 본다(G2) | `jmap-server.ts`, `backend.ts`, `proto-*/server.ts` |
+| 반영 지연 | 새 인증은 즉시. **JMAP은 인증 캐시로 최대 30초**(외부 토큰은 exp를 넘지 않는다). 제출(SMTP)은 메시지마다 상태를 다시 본다. 열린 IMAP·POP3·ManageSieve 연결은 **다음 명령에서** 계정 상태를 다시 본다(G2). 외부 토큰으로 연 연결은 토큰 exp에 닫힌다(E4) | `jmap-server.ts`, `backend.ts`, `proto-*/server.ts`, `core/auth-expiry.ts` |
 | 디렉터리 로그인 | 기본 꺼짐. 로컬 실패 뒤 폴백, 관리자가 연결한 불변 키만. provider별 허용 표면(`surfaces`, 생략하면 전부) — 밖이면 bind 전에 거절 | `shared-mailbox-runtime.ts`, `directory-config.ts` |
-| 관리 주체 | `api_keys`(테넌트, read/write/admin) + 정적 `rootToken`. 메일 계정과 별개 | `api/server.ts` |
+| 관리 주체 | 사람: `admin_users`(메일 계정과 별개, TOTP 필수, 서버 세션). 서비스: `api_keys`(read/write/admin). 정적 `rootToken`은 부트스트랩 전용(활성 owner가 생기면 경고) | `store/admin-auth.ts`, `api/server.ts` |
+| 웹 MFA | TOTP(RFC 6238, 봉인 저장), 일회용 등록 코드, 복구 코드, 연속 실패 지수 잠금 — 관리자·셀프서비스 공용 | `store/web-mfa.ts` |
+| 셀프서비스 | 기본 비밀번호로만 로그인. 민감 작업(비밀번호 변경·앱 비밀번호)은 TOTP + 최근 MFA. 기본 꺼짐 | `api/self-service.ts` |
+| 외부 OIDC | 웹 로그인. 연결된 sub만(자동 연결 없음). IdP MFA는 공급자 계약(acr·amr·auth_time)으로만 인정 | `core/oidc-client.ts`, `api/oidc-login.ts` |
+| 외부 access token | 메일 클라이언트 XOAUTH2/OAUTHBEARER. 메일 전용 aud·scope·typ, sub 연결, 만료에 연결 종료. introspection 없음 | `apps/server/src/mail-oauth.ts` |
 
 ---
 
