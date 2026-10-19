@@ -34,7 +34,9 @@ describe("앱 비밀번호 — 128비트 이상", () => {
     expect(await authenticate(db, "u@x.test", password, "imap")).toMatchObject({ accountId, credKind: "appPassword", credentialId: id });
     const sloppy = password.replace(/-/g, " ").toUpperCase();
     expect(await authenticate(db, "u@x.test", sloppy, "imap")).toMatchObject({ credentialId: id });
-    expect(await authenticate(db, "u@x.test", password.slice(0, -1) + "a", "imap")).toBeNull();
+    // 마지막 글자를 **다른** 글자로 바꾼다. 늘 "a"로 바꾸면 원래 끝이 "a"일 때(1/26) 같은 비밀번호가 되어 CI가 가끔 깨졌다.
+    const last = password.slice(-1);
+    expect(await authenticate(db, "u@x.test", password.slice(0, -1) + (last === "a" ? "b" : "a"), "imap")).toBeNull();
   });
 
   test("표면 제한은 빠른 경로에서도 지킨다", async () => {
