@@ -481,7 +481,7 @@ export async function scramKeysFor(db: DbDriver, email: string): Promise<StoredS
             FROM credentials c
             JOIN accounts a ON a.id = c.account_id
            WHERE a.email = ? AND a.status = 1 AND c.kind = ?
-           ORDER BY c.created_at ASC`,
+           ORDER BY c.created_at ASC, c.id ASC`,
     params: [email.toLowerCase(), CREDENTIAL_KIND.password],
   });
   const secret = rows[0]?.secret;
@@ -509,7 +509,7 @@ export async function scramAuthorize(db: DbDriver, email: string, surface: AuthS
     sql: `SELECT a.id AS id, c.id AS credential_id, c.scopes AS scopes
             FROM accounts a LEFT JOIN credentials c ON c.account_id = a.id AND c.kind = ?
            WHERE a.email = ? AND a.status = 1
-           ORDER BY c.created_at ASC`,
+           ORDER BY c.created_at ASC, c.id ASC`,
     params: [CREDENTIAL_KIND.password, email.toLowerCase()],
   });
   const row = rows[0];

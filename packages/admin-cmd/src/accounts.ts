@@ -339,7 +339,7 @@ export const accountCommands: readonly Command[] = [
       summary:
         "최근 N일 안에 기본 비밀번호로 메일(IMAP·POP3·SMTP 제출·JMAP·ManageSieve)에 접속한 계정. 앱 비밀번호로 옮겨야 할 대상을 찾는다.",
       readOnly: true,
-      args: [{ name: "days", label: "기간(일)", type: "string", required: false, placeholder: "14" }],
+      args: [{ name: "days", label: "기간(일)", type: "number", required: false, placeholder: "14" }],
       fields: [
         { key: "email", label: "계정" },
         { key: "lastUsedAt", label: "기본 비밀번호 최근 사용", format: "time" },
