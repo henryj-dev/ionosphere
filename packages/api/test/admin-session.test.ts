@@ -83,12 +83,12 @@ async function rootCommand(f: Fx, name: string, body: Record<string, unknown>): 
 const enrollCodes = new Map<string, string>();
 
 async function createAdmin(f: Fx, username: string, role = "owner", tenant?: string): Promise<void> {
-  const r = await rootCommand(f, "admin-user-create", { username, password: "admin-pw", role, ...(tenant ? { adminTenantId: tenant } : {}) });
+  const r = await rootCommand(f, "admin-user-create", { username, password: "Admin-pw-1", role, ...(tenant ? { adminTenantId: tenant } : {}) });
   enrollCodes.set(username, String((r.__secret as { value: string }).value));
 }
 
 async function login(f: Fx, username: string, totp = ""): Promise<{ status: number; session: Session; json: Record<string, unknown> }> {
-  const r = await req(f, "POST", "/admin/session/login", { body: { username, password: "admin-pw", totp } });
+  const r = await req(f, "POST", "/admin/session/login", { body: { username, password: "Admin-pw-1", totp } });
   const cookie = (r.setCookie ?? "").split(";")[0] ?? "";
   return { status: r.status, session: { cookie, csrf: String(r.json.csrfToken ?? "") }, json: r.json };
 }
@@ -164,7 +164,7 @@ describe("관리 콘솔 사람 세션", () => {
     expect((await req(f, "POST", path, { session, body, origin: null })).json.code).toBe("csrf");
     expect((await req(f, "POST", path, { session, body })).status).toBe(200);
     // 로그인도 Origin을 본다(로그인 CSRF).
-    expect((await req(f, "POST", "/admin/session/login", { body: { username: "ops@ionosphere.test", password: "admin-pw" }, origin: "https://evil.example.com" })).status).toBe(403);
+    expect((await req(f, "POST", "/admin/session/login", { body: { username: "ops@ionosphere.test", password: "Admin-pw-1" }, origin: "https://evil.example.com" })).status).toBe(403);
   });
 
   test("★로그아웃·정지·역할 하향은 다음 요청부터 반영된다", async () => {
@@ -286,7 +286,7 @@ describe("보안 검토 반영(2026-10-18)", () => {
     const f = await setup();
     await createAdmin(f, "ops@ionosphere.test");
     const first = await login(f, "ops@ionosphere.test");
-    const again = await req(f, "POST", "/admin/session/login", { session: first.session, csrf: null, body: { username: "ops@ionosphere.test", password: "admin-pw" } });
+    const again = await req(f, "POST", "/admin/session/login", { session: first.session, csrf: null, body: { username: "ops@ionosphere.test", password: "Admin-pw-1" } });
     expect(again.status).toBe(200);
     expect((await req(f, "GET", "/admin/session", { session: first.session })).status).toBe(401);
   });
@@ -311,7 +311,7 @@ describe("adminOrigin 설정", () => {
     // 설정된 오리진은 Origin 헤더와 정확 비교한다(Host는 보지 않는다) — 그래서 서버 주소와 무관하게 고정값으로 볼 수 있다.
     const f = await setup({ adminOrigin: "HTTPS://Admin.Ionosphere.TEST/" });
     await createAdmin(f, "ops@ionosphere.test");
-    const body = { username: "ops@ionosphere.test", password: "admin-pw" };
+    const body = { username: "ops@ionosphere.test", password: "Admin-pw-1" };
     expect((await req(f, "POST", "/admin/session/login", { body, origin: "https://admin.ionosphere.test" })).status).toBe(200);
     expect((await req(f, "POST", "/admin/session/login", { body, origin: f.base })).status).toBe(403);
   });
@@ -330,7 +330,7 @@ describe("복구 코드·MFA 초기화(2026-10-18 사용자 결정)", () => {
     await createAdmin(f, "ops@ionosphere.test");
     const { session: old, recoveryCodes } = await enrolledSession(f, "ops@ionosphere.test");
     expect(recoveryCodes.length).toBeGreaterThan(0);
-    const r = await req(f, "POST", "/admin/session/login", { body: { username: "ops@ionosphere.test", password: "admin-pw", recoveryCode: recoveryCodes[0] } });
+    const r = await req(f, "POST", "/admin/session/login", { body: { username: "ops@ionosphere.test", password: "Admin-pw-1", recoveryCode: recoveryCodes[0] } });
     expect(r.status).toBe(200);
     expect(r.json.mfaEnrolled).toBe(false);
     const session = { cookie: (r.setCookie ?? "").split(";")[0] ?? "", csrf: String(r.json.csrfToken) };
@@ -342,7 +342,7 @@ describe("복구 코드·MFA 초기화(2026-10-18 사용자 결정)", () => {
     expect((await req(f, "POST", "/admin/session/mfa/confirm", { session, body: { code: codeNow(String(enroll.json.secret)) } })).status).toBe(200);
     expect((await req(f, "GET", "/v1/commands", { session })).status).toBe(200);
     // 쓴 복구 코드는 다시 못 쓴다 — 응답은 비밀번호 실패와 같다.
-    const again = await req(f, "POST", "/admin/session/login", { body: { username: "ops@ionosphere.test", password: "admin-pw", recoveryCode: recoveryCodes[0] } });
+    const again = await req(f, "POST", "/admin/session/login", { body: { username: "ops@ionosphere.test", password: "Admin-pw-1", recoveryCode: recoveryCodes[0] } });
     expect(again.status).toBe(401);
     expect(again.json).toEqual({ error: "invalid credentials" });
   });

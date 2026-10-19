@@ -44,7 +44,7 @@ async function rows(): Promise<Record<string, unknown>[]> {
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "ionosphere-smarthost-cli-"));
   dbPath = join(dir, "cli.db");
-  expect(run(["create-user", "u@ionosphere.test", "pw123"]).code).toBe(0);
+  expect(run(["create-user", "u@ionosphere.test", "Pw123-test"]).code).toBe(0);
   expect(run(["add-domain", "ionosphere.test"]).code).toBe(0);
 });
 

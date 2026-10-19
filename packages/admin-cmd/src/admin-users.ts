@@ -8,6 +8,7 @@
  * 첫 관리자는 CLI(`admin-user-create`)나 rootToken으로 만든다. 그 뒤 rootToken은 쓰지 않는다(결정 D4).
  */
 import { ADMIN_ROLE, ADMIN_STATUS, isAdminRole, type AdminRole } from "@ionosphere/db";
+import { requirePasswordPolicy } from "./password-rule.ts";
 import { createAdminUser, issueAdminEnrollCode, resetAdminTotpAndRevokeSessions, revokeAdminSessions, setAdminPasswordAndRevokeSessions } from "@ionosphere/store";
 import { CommandError, type Command, type CommandContext } from "./types.ts";
 
@@ -127,6 +128,7 @@ export const adminUserCommands: readonly Command[] = [
       }
       const password = args.password ?? "";
       if (password.length === 0) throw new CommandError("invalid", "비밀번호가 비어 있습니다");
+      requirePasswordPolicy(password);
       const tenantId = args.adminTenantId?.trim() || undefined;
       if (tenantId) {
         const t = await ctx.db.query({ sql: "SELECT id FROM tenants WHERE id = ?", params: [tenantId] });
@@ -198,6 +200,7 @@ export const adminUserCommands: readonly Command[] = [
     async run(ctx, args) {
       const a = await resolveAdmin(ctx, args.admin!);
       if ((args.password ?? "").length === 0) throw new CommandError("invalid", "새 비밀번호가 비어 있습니다");
+      requirePasswordPolicy(args.password!);
       await setAdminPasswordAndRevokeSessions(ctx.db, a.id, args.password!);
       return { data: { adminUserId: a.id }, message: `비밀번호 변경됨: ${a.username} (세션 전부 종료)` };
     },

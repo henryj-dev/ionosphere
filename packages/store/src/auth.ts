@@ -11,7 +11,7 @@
 import { randomBytes, scrypt as scryptCb, timingSafeEqual, type ScryptOptions } from "node:crypto";
 import { ulid } from "@ionosphere/core";
 import { ACCOUNT_STATUS, CREDENTIAL_KIND, credentialKindName, type CredentialKind, type CredentialKindName, type DbDriver } from "@ionosphere/db";
-import { deriveScramKeys } from "@ionosphere/core";
+import { deriveScramKeys, saslprep } from "@ionosphere/core";
 
 const SCRYPT_N = 16384;
 const SCRYPT_R = 8;
@@ -30,16 +30,25 @@ function scryptAsync(password: string, salt: Buffer, keylen: number, opts: Scryp
   });
 }
 
+/**
+ * 해시·SCRAM 키를 만들기 전의 정규화 — SASLprep(RFC 4013, `core/saslprep.ts`). 금지 문자가 있어 정규화할 수 없으면
+ * 원문 그대로 쓴다(새 비밀번호는 규칙 검사가 먼저 막는다. 여기서 던지면 기존 값의 재저장이 깨진다).
+ */
+function normalizeForHash(password: string): string {
+  return saslprep(password, "query") ?? password;
+}
+
 export async function hashSecret(password: string): Promise<string> {
+  const normalized = normalizeForHash(password);
   const salt = randomBytes(16);
-  const hash = await scryptAsync(password, salt, KEY_LEN, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P });
+  const hash = await scryptAsync(normalized, salt, KEY_LEN, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P });
   const scrypt = `scrypt$${SCRYPT_N}$${SCRYPT_R}$${SCRYPT_P}$${salt.toString("base64")}$${hash.toString("base64")}`;
   /**
    * SCRAM 세그먼트를 **여기서 함께** 만든다 — 평문을 손에 쥔 자리이기 때문이다.
    * (기존 행은 첫 로그인 때 지연 생성된다. 새로 만드는 것까지 지연시킬 이유는 없다.)
    * 비밀번호 설정은 드문 동작이라 KDF 두 번의 비용이 문제가 되지 않는다.
    */
-  return `${scrypt}${SECRET_SEP}${await buildScramSegment(password)}`;
+  return `${scrypt}${SECRET_SEP}${await buildScramSegment(normalized)}`;
 }
 
 /** 저장값에서 읽는 파라미터의 상한 — DB가 오염돼도 메모리 폭탄이 되지 않게. */
@@ -95,11 +104,32 @@ export function scramSegment(stored: string): StoredScram | null {
 
 /** 비밀번호에서 SCRAM 세그먼트를 만든다(지연 생성·비밀번호 변경 시 호출). */
 export async function buildScramSegment(password: string): Promise<string> {
-  const k = await deriveScramKeys(password);
+  // SCRAM 클라이언트는 SASLprep한 비밀번호로 증명을 만든다(RFC 5802 §2.2) — 키도 같은 값에서 만들어야 맞는다.
+  const k = await deriveScramKeys(normalizeForHash(password));
   return `scram256$${k.iterations}$${k.salt.toString("base64")}$${k.storedKey.toString("base64")}$${k.serverKey.toString("base64")}`;
 }
 
+/**
+ * 비밀번호 비교 결과. `rehash: true`면 맞았지만 저장값이 정규화 전 원문으로 만들어진 것이다 — 호출자가 새 규칙으로 다시 저장한다
+ * (2026-10-18 결정 2: 기존 비ASCII 비밀번호의 로그인이 깨지지 않게 원문도 확인하고, 성공하면 다시 저장한다).
+ */
+export type SecretMatch = { rehash: boolean } | null;
+
+export async function matchSecret(password: string, stored: string): Promise<SecretMatch> {
+  const normalized = saslprep(password, "query");
+  if (normalized !== null && normalized !== password) {
+    if (await verifyRawSecret(normalized, stored)) return { rehash: false };
+    return (await verifyRawSecret(password, stored)) ? { rehash: true } : null;
+  }
+  return (await verifyRawSecret(password, stored)) ? { rehash: false } : null;
+}
+
 export async function verifySecret(password: string, stored: string): Promise<boolean> {
+  return (await matchSecret(password, stored)) !== null;
+}
+
+/** 정규화 없이 저장된 scrypt 세그먼트와 그대로 비교한다. */
+async function verifyRawSecret(password: string, stored: string): Promise<boolean> {
   const parts = scryptSegment(stored).split("$");
   if (parts.length !== 6 || parts[0] !== "scrypt") return false;
   const n = Number(parts[1]);
@@ -353,9 +383,8 @@ export async function authenticate(
     // 원문 우선 검증(기본 비번·원문 저장 앱비번 하위호환). 앱 비번(kind=1)은 실패 시
     // 정규화 입력(하이픈/공백 무시)으로 한 번 더 — createAppPassword가 정규화 저장하므로.
     const secret = String(c.secret);
-    const matched =
-      (await verifySecret(password, secret)) ||
-      (Number(c.kind) === 1 && normalizedApp !== password && (await verifySecret(normalizedApp, secret)));
+    const direct = await matchSecret(password, secret);
+    const matched = direct !== null || (Number(c.kind) === 1 && normalizedApp !== password && (await verifySecret(normalizedApp, secret)));
     if (matched) {
       const scopes = c.scopes == null ? null : String(c.scopes);
       /**
@@ -385,7 +414,10 @@ export async function authenticate(
        * 베스트에포트다 — 실패해도 인증 성공에는 영향이 없다(다음 로그인에 다시 시도한다).
        * 매칭된 값(`password` 또는 정규화된 앱 비번)으로 유도해야 SCRAM 교환의 입력과 맞는다.
        */
-      if (scramSegment(secret) === null) {
+      if (direct?.rehash === true) {
+        // 정규화 전 원문으로 맞았다 — 새 규칙(SASLprep)으로 다시 저장한다. SCRAM 세그먼트도 정규화한 값으로 새로 만든다.
+        void rewriteCredentialSecret(db, credentialId, secret, password);
+      } else if (scramSegment(secret) === null) {
         void (async () => {
           try {
             const matchedValue = (await verifySecret(password, secret)) ? password : normalizedApp;
@@ -484,4 +516,17 @@ export async function scramAuthorize(db: DbDriver, email: string, surface: AuthS
   if (typeof row?.id !== "string") return null;
   if (!credentialAllowsSurface(row.scopes == null ? null : String(row.scopes), surface)) return null;
   return { accountId: String(row.id) };
+}
+
+/**
+ * 자격증명 비밀을 새 규칙으로 다시 저장한다 — 베스트에포트, 조건부 UPDATE(그사이 바뀌었으면 건드리지 않는다).
+ * 실패해도 인증 결과에는 영향이 없다(다음 로그인에 다시 시도한다).
+ */
+export async function rewriteCredentialSecret(db: DbDriver, credentialId: string, oldSecret: string, password: string): Promise<void> {
+  try {
+    const next = await hashSecret(password);
+    await db.batch([{ sql: "UPDATE credentials SET secret = ? WHERE id = ? AND secret = ?", params: [next, credentialId, oldSecret] }]);
+  } catch {
+    /* 무시 — 다음 로그인에 다시 시도한다 */
+  }
 }

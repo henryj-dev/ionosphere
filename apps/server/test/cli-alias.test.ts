@@ -28,7 +28,7 @@ beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "ionosphere-cli-"));
   dbPath = join(dir, "cli.db");
   // 부트스트랩: 계정 + 도메인
-  expect(run("create-user", "u@d.test", "pw123").code).toBe(0);
+  expect(run("create-user", "u@d.test", "Pw123-test").code).toBe(0);
   expect(run("add-domain", "d.test").code).toBe(0);
 });
 
@@ -54,7 +54,7 @@ describe("알리아스 CLI", () => {
   });
 
   test("add-alias: 로컬 계정 여러 개 → 팬아웃(한 주소가 계정 N개를 가리킨다)", () => {
-    expect(run("create-user", "u2@d.test", "pw123").code).toBe(0);
+    expect(run("create-user", "u2@d.test", "Pw123-test").code).toBe(0);
     const r = run("add-alias", "team@d.test", "u@d.test", "u2@d.test");
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("계정 u@d.test, u2@d.test");

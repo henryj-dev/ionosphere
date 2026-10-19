@@ -7,7 +7,7 @@
 import { randomBytes } from "node:crypto";
 import { sha256hex } from "@ionosphere/core";
 import { ACCOUNT_STATUS, CREDENTIAL_KIND, type DbDriver } from "@ionosphere/db";
-import { hashSecret, verifySecret } from "./auth.ts";
+import { hashSecret, matchSecret, rewriteCredentialSecret, verifySecret } from "./auth.ts";
 import { ACCOUNT_REALM, touchWebSession, type WebSessionPolicy } from "./web-mfa.ts";
 
 export interface SelfServiceAccount {
@@ -31,7 +31,7 @@ let dummyHash: Promise<string> | null = null;
  */
 export async function verifyAccountPrimaryPassword(db: DbDriver, email: string, password: string): Promise<SelfServiceAccount | null> {
   const { rows } = await db.query({
-    sql: `SELECT a.id, a.tenant_id, a.email, c.secret, m.totp_secret
+    sql: `SELECT a.id, a.tenant_id, a.email, c.id AS credential_id, c.secret, m.totp_secret
             FROM accounts a
             JOIN credentials c ON c.account_id = a.id AND c.kind = ?
             LEFT JOIN account_mfa m ON m.account_id = a.id
@@ -44,7 +44,13 @@ export async function verifyAccountPrimaryPassword(db: DbDriver, email: string, 
     return null;
   }
   for (const r of rows) {
-    if (await verifySecret(password, String(r.secret))) {
+    const secret = String(r.secret);
+    const match = await matchSecret(password, secret);
+    if (match) {
+      if (match.rehash) {
+        // 정규화 전 원문으로 맞았다 — 새 규칙(SASLprep)으로 다시 저장한다(메일 프로토콜 로그인과 같은 규칙).
+        void rewriteCredentialSecret(db, String(r.credential_id), secret, password);
+      }
       return { accountId: String(r.id), tenantId: String(r.tenant_id), email: String(r.email), mfaEnrolled: r.totp_secret != null };
     }
   }

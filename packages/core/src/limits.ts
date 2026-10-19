@@ -321,3 +321,11 @@ export const MAX_SMTP_ERRORS_PER_SESSION = 20;
  * 블롭이 그대로 25MB를 넘는 메시지가 되지는 못한다(수신·제출 경로가 각자 상한을 건다).
  */
 export const MAX_JMAP_UPLOAD_BYTES = 50_000_000;
+
+/**
+ * 로그인·비밀번호 변경 요청 본문 상한 — 회원 공통 수치(2026-10-18 결정 1).
+ *
+ * 비밀번호에 최대 길이를 두지 않는 대신, 아주 긴 값으로 해시(scrypt)를 무겁게 만드는 공격은 이 상한이 막는다.
+ * 관리 API의 나머지 요청(1 MiB, `api/http-util.ts`)보다 작다 — 로그인 본문은 사용자명·비밀번호·코드뿐이다.
+ */
+export const MAX_LOGIN_BODY_BYTES = 64 * 1024;

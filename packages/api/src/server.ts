@@ -52,7 +52,7 @@ import {
   verifyAdminTotp,
   type AdminSessionPolicy,
 } from "@ionosphere/store";
-import { totpUri } from "@ionosphere/core";
+import { MAX_LOGIN_BODY_BYTES, totpUri } from "@ionosphere/core";
 import {
   ADMIN_SESSION_COOKIE,
   clearedSessionCookie,
@@ -476,7 +476,7 @@ export class AdminApiServer {
     if (method === "POST" && pathname === "/admin/session/login") {
       // 로그인 CSRF(남의 세션으로 로그인시키기)도 막는다 — 쿠키가 없을 때라 Origin만 본다.
       if (!originAllowed(req, this.adminOrigin)) throw new HttpError(403, "csrf check failed", "csrf");
-      const body = asRecord(await readBody(req));
+      const body = asRecord(await readBody(req, MAX_LOGIN_BODY_BYTES));
       const username = typeof body.username === "string" ? body.username : "";
       const password = typeof body.password === "string" ? body.password : "";
       const totp = typeof body.totp === "string" ? body.totp : "";
@@ -582,7 +582,7 @@ export class AdminApiServer {
 
     if (method !== "POST") throw new HttpError(404, "not found");
     this.requireSameOriginWrite(req, auth.csrfHash);
-    const body = asRecord(await readBody(req));
+    const body = asRecord(await readBody(req, MAX_LOGIN_BODY_BYTES));
     const code = typeof body.code === "string" ? body.code : "";
     const subject = { ip, account: adminThrottleAccount(auth.username) };
 

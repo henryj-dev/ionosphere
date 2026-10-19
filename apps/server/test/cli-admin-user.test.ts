@@ -14,7 +14,7 @@ import { openSqlite } from "@ionosphere/db";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cli = join(here, "../src/cli.ts");
-const PASSWORD = "bootstrap-admin-password";
+const PASSWORD = "Bootstrap-admin-password1";
 
 let dir: string;
 let dbPath: string;

@@ -165,6 +165,8 @@ describe("셀프서비스", () => {
     const { session } = await enrolled(f);
     expect((await req(f, "POST", "/account/password", { session, body: { currentPassword: "wrong", newPassword: "new-password-1" } })).status).toBe(401);
     expect((await req(f, "POST", "/account/password", { session, body: { currentPassword: PASSWORD, newPassword: "short" } })).json.code).toBe("weak_password");
+    // 길이만 길고 한 종류뿐이면 거절한다(공통 규칙: 4종 가운데 3종 이상).
+    expect((await req(f, "POST", "/account/password", { session, body: { currentPassword: PASSWORD, newPassword: "abcdefghijkl" } })).json.code).toBe("weak_password");
     const ok = await req(f, "POST", "/account/password", { session, body: { currentPassword: PASSWORD, newPassword: "new-password-1" } });
     expect(ok.status).toBe(200);
     expect((await req(f, "GET", "/account/session", { session })).status).toBe(401);
