@@ -332,7 +332,8 @@ Bearer 토큰 입력 칸은 없앴다. API 키(`api-key-create`)는 REST 자동�
   - 관리자: `admin-identity-link --admin=... --provider=<id> --subject=<sub>`
   - 메일 계정: `oidc-identity-link --account=... --provider=<id> --subject=<sub>`(그 공급자의 테넌트 안에서)
   - 처음 로그인을 시도했다 실패하면 감사 로그의 `oidcUnlinkedSub`에 sub가 남는다.
-  - 연결을 끊은 sub는 **다른 관리자·계정에 다시 연결할 수 없다**(묘비, SCHEMA §4-5). 원래 주인에게는 다시 이을 수 있다.
+  - 한 번 연결한 sub는 **다른 관리자·계정에 다시 연결할 수 없다**(끊은 뒤에도 — 최초 주인 기록, SCHEMA §4-5). 원래 주인에게는 다시 이을 수 있다.
+  - ⚠ 공급자 `id`를 바꾸거나 다른 IdP에 다시 쓰지 말 것 — 연결 기록이 id로 묶인다. 같은 영역에서 같은 issuer를 두 id로 쓰면 기동이 실패한다.
 - **MFA 증거 계약**(`mfaContract`): `{ "acceptAcr"?: [...], "requireAmrAll"?: [...], "maxAgeSec": N }`.
   - 응답의 acr이 목록에 있거나 amr에 지정한 값이 모두 있고, `auth_time`이 N초 안이면 그 로그인을 MFA로 인정한다.
   - 요청한 값(acr_values·max_age)이 아니라 **응답의 클레임**으로만 판정한다.
