@@ -42,6 +42,8 @@ describe("앱 비밀번호 — 128비트 이상", () => {
     const { password } = await createAppPassword(db, accountId, "imap-only", "imap");
     expect(await authenticate(db, "u@x.test", password, "imap")).not.toBeNull();
     expect(await authenticate(db, "u@x.test", password, "submission")).toBeNull();
+    // 표면이 막힌 새 앱 비밀번호가 예전(scrypt) 루프로 넘어가도 맞는 것이 없다.
+    expect(await authenticate(db, "u@x.test", password.replace(/-/g, ""), "pop3")).toBeNull();
   });
 
   test("예전 16자 앱 비밀번호(scrypt 저장)는 계속 받는다", async () => {
@@ -57,6 +59,8 @@ describe("앱 비밀번호 — 128비트 이상", () => {
     const { rows } = await db.query({ sql: "SELECT secret FROM credentials WHERE id = ?", params: [id] });
     expect(String(rows[0]!.secret)).toMatch(/^sha256\$/);
     expect(await authenticate(db, "u@x.test", token, "imap")).toMatchObject({ credentialId: id, credKind: "oauthToken" });
+    // 토큰은 원문이 저장 키다 — 앱 비밀번호처럼 정규화(하이픈 제거·소문자)한 값으로는 맞지 않는다.
+    if (token.replace(/-/g, "").toLowerCase() !== token) expect(await authenticate(db, "u@x.test", token.replace(/-/g, "").toLowerCase(), "imap")).toBeNull();
   });
 
   test("기본 비밀번호는 여전히 scrypt로 확인한다(빠른 경로가 기본 비밀번호를 찾지 않는다)", async () => {

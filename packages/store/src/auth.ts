@@ -1,7 +1,8 @@
 /**
  * 자격증명 (SCHEMA.md §4 credentials).
  * secret은 자기서술 포맷 — Phase 0은 scrypt (node:crypto 내장, 의존성 제로 원칙).
- * 포맷: `scrypt$N$r$p$saltB64$hashB64[ scram256$i$salt$storedKey$serverKey]`.
+ * 포맷: `scrypt$N$r$p$saltB64$hashB64[ scram256$i$salt$storedKey$serverKey]`(사람이 고른 비밀번호).
+ * 서버가 만든 무작위 비밀(새 앱 비밀번호·자체 토큰)은 `sha256$<hex>` — 아래 `RANDOM_SECRET_PREFIX`.
  * 두 세그먼트를 **함께** 둔다 — SCRAM으로 갈아타면 PBKDF2가 scrypt를 대체해 오프라인
  * 대입 내성이 내려간다. 옛 행은 첫 세그먼트만 있고, 첫 로그인 때 SCRAM 키가 지연 생성된다.
  *
@@ -422,7 +423,7 @@ export async function authenticate(
   const fast = await queryInChunks(
     db,
     randomCandidates,
-    (ph) => `SELECT id, kind, scopes FROM credentials WHERE account_id = ? AND kind != ${CREDENTIAL_KIND.password} AND secret IN (${ph})`,
+    (ph) => `SELECT id, kind, scopes FROM credentials WHERE account_id = ? AND kind IN (${CREDENTIAL_KIND.appPassword}, ${CREDENTIAL_KIND.oauthToken}) AND secret IN (${ph})`,
     [accountId],
   );
   for (const c of fast) {
@@ -442,6 +443,9 @@ export async function authenticate(
     sql: `SELECT id, kind, secret, scopes FROM credentials WHERE account_id = ? AND secret NOT LIKE '${RANDOM_SECRET_PREFIX}%'`,
     params: [accountId],
   });
+  // 예전 형식 자격증명이 하나도 없으면 scrypt를 한 번도 돌지 않아 "없는 계정"(더미 scrypt)보다 빨라진다 — 존재가 시간으로
+  // 새지 않게 같은 비용을 태운다(허용 목록에 든 kind만 빠른 경로가 받으므로 앞으로 생길 kind는 저절로 로그인 수단이 되지 않는다).
+  if (creds.length === 0) await verifySecret(password, await dummySecret());
   for (const c of creds) {
     // 원문 우선 검증(기본 비번·원문 저장 앱비번 하위호환). 앱 비번(kind=1)은 실패 시
     // 정규화 입력(하이픈/공백 무시)으로 한 번 더 — createAppPassword가 정규화 저장하므로.
