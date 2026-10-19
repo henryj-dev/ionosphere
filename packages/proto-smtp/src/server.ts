@@ -375,7 +375,7 @@ export class SmtpServer {
       const ip = normalizeIp(rawSocket.remoteAddress);
       // 차단 중이면 **백엔드를 아예 부르지 않는다**. 실패마다 scrypt가 도는 게 브루트포스를
       // 곧 CPU 소모 공격으로 만들던 자리라, 값을 검사하기 전에 끊는 것이 요점이다.
-      if (this.authThrottle.blocked(ip)) {
+      if (await this.authThrottle.blocked(ip)) {
         // 차단도 기록한다(다른 세 표면과 같은 이유) — 공격 활동이 가장 잘 드러나는 갈래다.
         this.audit.record({ ts: Date.now(), surface: this.auditSurface, action: "auth", outcome: AUDIT_OUTCOME.throttled, ip, user });
         applyActions(engine.authResult(false));
@@ -387,8 +387,9 @@ export class SmtpServer {
       } catch {
         result = { ok: false };
       }
-      if (result.ok) this.authThrottle.clear(ip);
-      else this.authThrottle.recordFailure(ip);
+      // 성공해도 IP 축은 지우지 않는다 — 자기 계정 하나로 같은 IP의 대입 기록을 초기화하지 못하게(서버들이 같은 카운터를 쓴다).
+      // 계정 축은 백엔드(조립층 authFn)가 판정·기록·해제한다. 계정 축 차단으로 거절된 시도는 IP 실패로 세지 않는다.
+      if (!result.ok && result.throttled !== true) await this.authThrottle.recordFailure(ip);
       // 토큰 만료에 연결을 닫는다(E4) — 제출 세션이 만료된 토큰으로 계속 메일을 보내지 못하게.
       if (result.ok) {
         armAuthExpiry(rawSocket, result.expiresAt, () => {
@@ -426,10 +427,14 @@ export class SmtpServer {
      */
     const runScramKeys = async (user: string): Promise<void> => {
       let keys: ScramStoredKeys | null = null;
-      try {
-        keys = (await this.opts.backend.scramKeys?.(user)) ?? null;
-      } catch {
-        /* 없는 것으로 진행 */
+      // ★IP 축이 막혀 있으면 진짜 키 대신 null — 가짜 salt로 교환이 진행돼 어떤 증명도 통과하지 못한다. SCRAM은 서버 서명을
+      //   먼저 보내므로, 여기서 막지 않으면 차단 중에도 "비밀번호가 맞았다"가 응답 모양으로 드러난다. 계정 축은 백엔드가 본다.
+      if (!(await this.authThrottle.blocked(normalizeIp(rawSocket.remoteAddress)))) {
+        try {
+          keys = (await this.opts.backend.scramKeys?.(user)) ?? null;
+        } catch {
+          /* 없는 것으로 진행 */
+        }
       }
       applyActions(engine.scramKeysResult(keys));
     };
@@ -441,16 +446,22 @@ export class SmtpServer {
     const runScramAuthorize = async (user: string): Promise<void> => {
       const ip = normalizeIp(rawSocket.remoteAddress);
       let result: SmtpAuthResult = { ok: false };
-      try {
-        result = (await this.opts.backend.scramAuthorize?.(user)) ?? { ok: false };
-      } catch {
-        /* 실패로 수렴 */
+      // IP 축 이중 방어 — 키 조회 단계에서 막혔으면 여기까지 오지 못하지만, 그 사이에 막혔을 수 있다.
+      if (await this.authThrottle.blocked(ip)) {
+        result = { ok: false, throttled: true };
+      } else {
+        try {
+          result = (await this.opts.backend.scramAuthorize?.(user)) ?? { ok: false };
+        } catch {
+          /* 실패로 수렴 */
+        }
+        if (!result.ok && result.throttled !== true) await this.authThrottle.recordFailure(ip);
       }
       this.audit.record({
         ts: Date.now(),
         surface: this.auditSurface,
         action: "auth",
-        outcome: result.ok ? AUDIT_OUTCOME.ok : AUDIT_OUTCOME.fail,
+        outcome: result.ok ? AUDIT_OUTCOME.ok : result.throttled === true ? AUDIT_OUTCOME.throttled : AUDIT_OUTCOME.fail,
         ip,
         user,
         // SCRAM으로 들어온 것을 감사에서 구분할 수 있어야 한다 — 평문 경로와 위험이 다르다.
@@ -469,7 +480,8 @@ export class SmtpServer {
      */
     const recordEngineAuthFailure = (user: string | undefined, mechanism: string): void => {
       const ip = normalizeIp(rawSocket.remoteAddress);
-      this.authThrottle.recordFailure(ip);
+      // 응답을 기다리게 하지 않는다 — recordFailure는 저장소 실패를 안에서 삼키므로 거부되지 않는다.
+      void this.authThrottle.recordFailure({ ip, ...(user ? { account: user } : {}) });
       this.audit.record({
         ts: Date.now(),
         surface: this.auditSurface,

@@ -545,18 +545,28 @@ export class ImapServer {
              * 조회 실패를 **null로 수렴**시킨다. 예외를 밖으로 내면 교환이 중간에 끊겨
              * "그 사용자는 조회가 실패한다"가 드러난다 — 없는 것과 못 읽은 것을 같게 다룬다.
              */
+            /**
+             * ★차단 중이면 진짜 키 대신 null을 넘긴다 — 엔진이 가짜 salt로 교환을 끝까지 진행하므로 어떤 증명도 통과하지
+             * 못하고, 응답 모양은 "계정 없음"·"비밀번호 틀림"과 같다. SCRAM은 서버 서명(server-final)을 먼저 보내므로
+             * 여기서 막지 않으면 차단 중에도 "비밀번호가 맞았다"가 응답 모양으로 드러난다(P1 델타 리뷰 HIGH).
+             */
+            const ip = normalizeIp(socket.remoteAddress);
             let keys = null;
-            try {
-              keys = (await backend.scramKeys?.(action.user)) ?? null;
-            } catch {
-              /* 없는 것으로 진행 */
+            if (!(await this.authThrottle.blocked({ ip, account: action.user }))) {
+              try {
+                keys = (await backend.scramKeys?.(action.user)) ?? null;
+              } catch {
+                /* 없는 것으로 진행 */
+              }
             }
             await runActions(engine.scramKeysResult(keys));
             break;
           }
           case "authVerified": {
             const ip = normalizeIp(socket.remoteAddress);
-            const ok = (await backend.scramAuthorize?.(action.user)) ?? null;
+            // 계정 축이 막혀 있으면 증명이 맞아도 들이지 않는다 — SCRAM 증명은 값싸서, 여기서 막지 않으면 분산 대입이 계정 축을 비켜 간다.
+            const throttled = await this.authThrottle.blocked({ ip, account: action.user });
+            const ok = throttled ? null : ((await backend.scramAuthorize?.(action.user)) ?? null);
             // ★백엔드를 기다리는 사이 인증 전 마감이 발동했으면 결과를 버린다 — 연결은 이미 끊기는
             //   중이고 여기서 재개하면 닫힌 세션이 계정 상태로 넘어간다(코드 검수 지적).
             if (meter.deadlinePassed) break;
@@ -564,16 +574,18 @@ export class ImapServer {
             if (ok) {
               accountId = ok.accountId;
               meter.authenticated(ok.accountId);
-              this.authThrottle.clear(ip);
+              // 성공하면 **계정 축만** 지운다. IP 축까지 지우면 자기 계정 하나로 같은 IP의 대입 기록을 계속 초기화할 수 있다
+              // (서버 세 대가 같은 카운터를 쓰므로 한 번의 성공이 클러스터 전체를 지운다). IP 축은 15분 뒤 저절로 풀린다.
+              void this.authThrottle.clear({ account: action.user });
             } else {
               meter.authFailed();
-              this.authThrottle.recordFailure(ip);
+              if (!throttled) await this.authThrottle.recordFailure({ ip, account: action.user });
             }
             this.audit.record({
               ts: Date.now(),
               surface: AUDIT_SURFACE.imap,
               action: "auth",
-              outcome: ok ? AUDIT_OUTCOME.ok : AUDIT_OUTCOME.fail,
+              outcome: ok ? AUDIT_OUTCOME.ok : throttled ? AUDIT_OUTCOME.throttled : AUDIT_OUTCOME.fail,
               ip,
               user: action.user,
               // SCRAM으로 들어온 것을 감사에서 구분할 수 있어야 한다 — 평문 경로와 위험이 다르다.
@@ -594,7 +606,7 @@ export class ImapServer {
             const ip = normalizeIp(socket.remoteAddress);
             meter.attempted(action.user);
             meter.authFailed();
-            this.authThrottle.recordFailure(ip);
+            await this.authThrottle.recordFailure({ ip, ...(action.user ? { account: action.user } : {}) });
             this.audit.record({
               ts: Date.now(),
               surface: AUDIT_SURFACE.imap,
@@ -610,7 +622,7 @@ export class ImapServer {
             const ip = normalizeIp(socket.remoteAddress);
             meter.attempted(action.user);
             // 차단 중이면 백엔드를 부르지 않는다 — 실패마다 scrypt가 도는 걸 막는 게 요점.
-            if (this.authThrottle.blocked(ip)) {
+            if (await this.authThrottle.blocked({ ip, account: action.user })) {
               /**
                * ★차단도 **기록한다**. 예전에는 이 갈래가 백엔드를 부르지 않고 조기 반환해서
                * 로그가 한 줄도 남지 않았다 — 공격 활동이 가장 잘 드러나는 갈래가 무기록이었다.
@@ -642,10 +654,12 @@ export class ImapServer {
                 if (!socket.destroyed) socket.end();
               });
               meter.authenticated(result.accountId);
-              this.authThrottle.clear(ip);
+              // 성공하면 **계정 축만** 지운다. IP 축까지 지우면 자기 계정 하나로 같은 IP의 대입 기록을 계속 초기화할 수 있다
+              // (서버 세 대가 같은 카운터를 쓰므로 한 번의 성공이 클러스터 전체를 지운다). IP 축은 15분 뒤 저절로 풀린다.
+              void this.authThrottle.clear({ account: action.user });
             } else {
               meter.authFailed();
-              this.authThrottle.recordFailure(ip);
+              await this.authThrottle.recordFailure({ ip, account: action.user });
             }
             this.audit.record({
               ts: Date.now(),

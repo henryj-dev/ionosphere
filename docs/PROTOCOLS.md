@@ -348,7 +348,7 @@ SPF+DKIM pass · From 도메인 정렬(SPF 또는 DKIM) · DMARC p=none 이상 �
 | 기본 비밀번호 교체 | `account-password-set` — kind=0 전부 교체, **앱 비밀번호·OAuth 토큰은 유지** | `setPrimaryPassword` |
 | 부가 자격증명 철회 | `credential-revoke` 즉시. 기본 비밀번호는 철회 불가(정지를 쓴다) | `revokeCredential` |
 | 표면 제한 | `credentials.scopes` — 인증 함수 안의 단일 관문, 모르는 이름은 fail closed | `credentialAllowsSurface` |
-| 시도 제한 | 실패만 셈, 60초 창, IP 프리픽스 10회 + 계정 20회, 프로세스 로컬 | `core/auth-throttle.ts` |
+| 시도 제한 | 실패만 셈, IP 프리픽스·계정 두 축(모든 메일 프로토콜·웹), 5회 뒤 1초부터 두 배·상한 15분·15분 뒤 초기화(공통 수치). 성공하면 계정 축만 지움. 서버들이 공유 DB로 함께 센다(DB 장애 시 프로세스 카운터) | `core/auth-throttle.ts`, `store/auth-failures.ts` |
 | 정지 | `account-suspend` — 새 인증·제출·수신 차단, 데이터 보존, 되돌릴 수 있음 | — |
 | 삭제 | `account-delete` — 되돌릴 수 없는 드레인, 끝날 때까지 주소 재등록 차단 | SCHEMA §7-7 |
 | 반영 지연 | 새 인증은 즉시. **JMAP은 인증 캐시로 최대 30초**(외부 토큰은 exp를 넘지 않는다). 제출(SMTP)은 메시지마다 상태를 다시 본다. 열린 IMAP·POP3·ManageSieve 연결은 **다음 명령에서** 계정 상태를 다시 본다(G2). 외부 토큰으로 연 연결은 토큰 exp에 닫힌다(E4) | `jmap-server.ts`, `backend.ts`, `proto-*/server.ts`, `core/auth-expiry.ts` |

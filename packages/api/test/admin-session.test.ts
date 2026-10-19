@@ -295,7 +295,7 @@ describe("보안 검토 반영(2026-10-18)", () => {
     const throttle = new AuthFailureThrottle();
     const f = await setup({ authThrottle: throttle });
     await createAdmin(f, "ops@ionosphere.test");
-    for (let i = 0; i < 30; i++) throttle.recordFailure({ account: "ops@ionosphere.test" });
+    for (let i = 0; i < 30; i++) await throttle.recordFailure({ account: "ops@ionosphere.test" });
     expect((await login(f, "ops@ionosphere.test")).status).toBe(200);
   });
 

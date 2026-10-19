@@ -65,6 +65,41 @@ function smtpAuth(port: number, user: string, pass: string): Promise<string> {
   });
 }
 
+/** 143에 붙어 LOGIN의 태그 응답 한 줄만 받아온다. */
+function imapLogin(port: number, user: string, pass: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const sock = connect(port, "127.0.0.1");
+    sock.setEncoding("utf8");
+    let buf = "";
+    let greeted = false;
+    const timer = setTimeout(() => {
+      sock.destroy();
+      reject(new Error("timeout"));
+    }, 15_000);
+    sock.on("data", (c: string) => {
+      buf += c;
+      let i: number;
+      while ((i = buf.indexOf("\r\n")) >= 0) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        if (!greeted) {
+          greeted = true;
+          sock.write(`a1 LOGIN ${user} ${pass}\r\n`);
+        } else if (line.startsWith("a1 ")) {
+          clearTimeout(timer);
+          sock.end("a2 LOGOUT\r\n");
+          resolve(line);
+          return;
+        }
+      }
+    });
+    sock.on("error", (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+  });
+}
+
 beforeAll(async () => {
   blobRoot = mkdtempSync(join(tmpdir(), "ionosphere-throttle-wire-"));
   app = new IonosphereApp({
@@ -74,6 +109,7 @@ beforeAll(async () => {
     jmapPort: 0,
     adminPort: 0,
     submissionPort: 0,
+    imapPort: 0,
     adminRootToken: ROOT_TOKEN,
     runMtaWorker: false,
     resolver: offlineResolver(),
@@ -103,8 +139,8 @@ describe("JMAP — 자격증명 없는 요청은 실패로 세지 않는다 (M-5
 
 describe("리스너들이 스로틀 인스턴스를 공유한다 (M-4)", () => {
   test("JMAP에서 소진한 한도가 관리 API에도 그대로 적용된다", async () => {
-    // 기본 한도는 IP당 10회. 자격증명을 **제시한** 실패라 이번엔 센다.
-    for (let i = 0; i < 10; i++) {
+    // 기본은 무료 실패 5회(공통 수치). 자격증명을 **제시한** 실패라 이번엔 센다.
+    for (let i = 0; i < 5; i++) {
       const res = await fetch(`${jmapBase}/jmap/session`, { headers: { authorization: basic("wrong") } });
       expect(res.status).toBe(401);
     }
@@ -117,7 +153,7 @@ describe("리스너들이 스로틀 인스턴스를 공유한다 (M-4)", () => {
     expect(admin.headers.get("retry-after")).toBeTruthy();
 
     // 뒷 테스트에 영향이 없도록 정리(성공 인증이 하는 일과 같다).
-    app.authThrottle.clear({ ip: "127.0.0.1" });
+    await app.authThrottle.clear({ ip: "127.0.0.1" });
   });
 
   /**
@@ -130,10 +166,10 @@ describe("리스너들이 스로틀 인스턴스를 공유한다 (M-4)", () => {
    * 있으면 그 절반이 다시 갈라져도 통과한다.
    */
   test("submission(587)에서 소진한 IP 한도가 JMAP에도 적용된다", async () => {
-    app.authThrottle.clear({ ip: "127.0.0.1" });
+    await app.authThrottle.clear({ ip: "127.0.0.1" });
 
     // 587에서 IP 축을 소진시킨다(자격증명을 제시한 실패라 카운트된다).
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 5; i++) {
       expect(await smtpAuth(app.submissionPort, USER, "wrong-password")).toStartWith("535");
     }
 
@@ -141,18 +177,42 @@ describe("리스너들이 스로틀 인스턴스를 공유한다 (M-4)", () => {
     const res = await fetch(`${jmapBase}/jmap/session`, { headers: { authorization: basic("wrong") } });
     expect(res.status).toBe(429);
 
-    app.authThrottle.clear({ ip: "127.0.0.1" });
+    await app.authThrottle.clear({ ip: "127.0.0.1" });
   });
 });
 
 describe("submission(587) 계정 축 (M-6)", () => {
   test("계정 축이 소진되면 비밀번호가 맞아도 인증이 실패한다(scrypt를 돌리기 전에 막는다)", async () => {
     // 서로 다른 20개 IP에서 같은 계정을 두드린 상황 — IP 축은 어디에도 걸리지 않는다.
-    for (let i = 0; i < 20; i++) app.authThrottle.recordFailure({ ip: `2001:db8:${i}::1`, account: USER });
+    for (let i = 0; i < 20; i++) await app.authThrottle.recordFailure({ ip: `2001:db8:${i}::1`, account: USER });
 
     expect(await smtpAuth(app.submissionPort, USER, PASS)).toStartWith("535");
 
-    app.authThrottle.clear({ account: USER });
+    await app.authThrottle.clear({ account: USER });
     expect(await smtpAuth(app.submissionPort, USER, PASS)).toStartWith("235");
+  });
+});
+
+describe("메일 프로토콜 계정 축 (P1 리뷰 H1)", () => {
+  /**
+   * 예전에는 계정 축이 submission과 웹에만 있었다. IMAP·POP3·ManageSieve·JMAP은 IP 축만 봐서,
+   * 출처가 흩어진 분산 대입이 한 계정에 무제한이었다.
+   */
+  test("IMAP — 서로 다른 IP의 실패로 계정 축이 막히면 맞는 비밀번호도 거절된다", async () => {
+    for (let i = 0; i < 5; i++) await app.authThrottle.recordFailure({ ip: `2001:db8:${i}::1`, account: USER });
+    expect(await imapLogin(app.imapPort, USER, PASS)).toStartWith("a1 NO");
+    await app.authThrottle.clear({ account: USER });
+    expect(await imapLogin(app.imapPort, USER, PASS)).toStartWith("a1 OK");
+  });
+
+  test("JMAP — 계정 축이 막히면 429를 돌려주고 검증하지 않는다", async () => {
+    for (let i = 0; i < 5; i++) await app.authThrottle.recordFailure({ ip: `2001:db8:${i}::1`, account: USER });
+    // 앞 테스트의 성공이 인증 캐시(30초)에 있으므로 캐시에 없는 헤더를 쓴다 — 캐시 적중은 검증을 돌리지 않아 막지 않는다(설계).
+    // 사용자명 대소문자만 바꾸면 캐시 키는 다르고 계정 축 키(소문자 정규화)는 같다.
+    const fresh = "Basic " + Buffer.from(`${USER.toUpperCase()}:${PASS}`).toString("base64");
+    const res = await fetch(`${jmapBase}/jmap/session`, { headers: { authorization: fresh } });
+    expect(res.status).toBe(429);
+    await app.authThrottle.clear({ account: USER });
+    expect((await fetch(`${jmapBase}/jmap/session`, { headers: { authorization: fresh } })).status).toBe(200);
   });
 });

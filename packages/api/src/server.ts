@@ -482,7 +482,7 @@ export class AdminApiServer {
       const totp = typeof body.totp === "string" ? body.totp : "";
       const recoveryCode = typeof body.recoveryCode === "string" ? body.recoveryCode : "";
       const subject = { ip, account: adminThrottleAccount(username) };
-      const retryAfter = this.throttle.retryAfterSeconds(subject, now);
+      const retryAfter = await this.throttle.retryAfterSeconds(subject, now);
       if (retryAfter > 0) {
         sendJson(res, 429, { error: "too many failed auth attempts" }, { "Retry-After": String(retryAfter) });
         return true;
@@ -502,12 +502,13 @@ export class AdminApiServer {
       // ★봉인 해제(scrypt)를 돌리지 않은 갈래도 같은 비용을 태운다 — 응답 시간이 "비밀번호는 맞았다"를 흘리지 않게.
       if (!checksTotp) await burnTotpCost(this.deps.masterKey);
       if (!user || !mfaOk) {
-        this.throttle.recordFailure(subject, now);
+        await this.throttle.recordFailure(subject, now);
         auditSubject.detail.user = username;
         sendJson(res, 401, { error: "invalid credentials" });
         return true;
       }
-      this.throttle.clear(subject);
+      // 성공하면 계정 축만 지운다 — IP 축까지 지우면 자기 계정 하나로 같은 IP의 대입 기록을 초기화할 수 있다(서버들이 같은 카운터를 쓴다).
+      void this.throttle.clear({ account: subject.account }, now);
       // 같은 브라우저의 이전 세션은 닫는다 — 쿠키는 덮이지만 서버 행은 idle 만료까지 살아 있게 된다.
       // 쿠키가 없으면 빈 토큰 — 세션 해석이 null을 돌려준다(조건 분기 없이 같은 경로를 탄다).
       const previousAuth = await this.authenticateSession(readCookie(req, ADMIN_SESSION_COOKIE) ?? "");
@@ -587,28 +588,28 @@ export class AdminApiServer {
 
     if (pathname === "/admin/session/mfa/enroll") {
       if (await this.mfaEnrolled(auth.adminUserId)) throw new HttpError(409, "mfa already enrolled");
-      if (this.throttle.retryAfterSeconds(subject, now) > 0) throw new HttpError(429, "too many failed auth attempts");
+      if ((await this.throttle.retryAfterSeconds(subject, now)) > 0) throw new HttpError(429, "too many failed auth attempts");
       // 일회용 등록 코드가 있어야 한다 — 비밀번호만으로 MFA를 차지하지 못하게(store `issueAdminEnrollCode` 주석).
       const enrollCode = typeof body.enrollCode === "string" ? body.enrollCode : "";
       const secret = await beginAdminTotpEnrollment(this.deps.db, auth.adminUserId, enrollCode, this.deps.masterKey, now);
       if (!secret) {
-        this.throttle.recordFailure(subject, now);
+        await this.throttle.recordFailure(subject, now);
         throw new HttpError(401, "invalid or expired enrollment code", "invalid_enroll_code");
       }
       sendJson(res, 200, { secret, uri: totpUri(secret, this.deps.totpIssuer ?? "ionosphere", auth.username) }, { "Cache-Control": "no-store" });
       return true;
     }
     if (pathname === "/admin/session/mfa/confirm" || pathname === "/admin/session/mfa/verify") {
-      if (this.throttle.retryAfterSeconds(subject, now) > 0) throw new HttpError(429, "too many failed auth attempts");
+      if ((await this.throttle.retryAfterSeconds(subject, now)) > 0) throw new HttpError(429, "too many failed auth attempts");
       const recoveryCodes = pathname === "/admin/session/mfa/confirm"
         ? await confirmAdminTotpEnrollment(this.deps.db, auth.adminUserId, code, this.deps.masterKey, now)
         : null;
       const ok = recoveryCodes !== null || (pathname === "/admin/session/mfa/verify" && (await verifyAdminTotp(this.deps.db, auth.adminUserId, code, this.deps.masterKey, now)));
       if (!ok) {
-        this.throttle.recordFailure(subject, now);
+        await this.throttle.recordFailure(subject, now);
         throw new HttpError(401, "invalid code", "invalid_code");
       }
-      this.throttle.clear(subject);
+      void this.throttle.clear({ account: subject.account }, now);
       await markAdminSessionMfa(this.deps.db, auth.sessionId, now);
       // 등록 확정이면 복구 코드를 **이 응답에서만** 준다(저장은 해시뿐이다).
       sendJson(res, 200, { ok: true, mfaAt: now, ...(recoveryCodes ? { recoveryCodes } : {}) }, { "Cache-Control": "no-store" });
@@ -656,11 +657,11 @@ export class AdminApiServer {
     if (method === "GET" && pathname === "/admin/session/oidc/start") {
       const providerId = new URL(req.url ?? "/", "http://localhost").searchParams.get("provider") ?? "";
       // 무인증 시작 요청도 IP 축 스로틀을 본다 — 반복으로 인가 상태 행을 쌓지 못하게(2026-10-18 검토).
-      if (this.throttle.retryAfterSeconds(ip, Date.now()) > 0) return sendJson(res, 429, { error: "too many attempts" });
+      if ((await this.throttle.retryAfterSeconds(ip, Date.now())) > 0) return sendJson(res, 429, { error: "too many attempts" });
       const started = await flow.start(providerId);
       if (started === "busy") return sendJson(res, 503, { error: "busy, retry shortly" }, { "Retry-After": "5" });
       if (!started) {
-        this.throttle.recordFailure(ip, Date.now());
+        await this.throttle.recordFailure(ip, Date.now());
         return sendJson(res, 404, { error: "unknown provider" });
       }
       auditSubject.detail.oidcProvider = providerId;
@@ -672,11 +673,13 @@ export class AdminApiServer {
       const now = Date.now();
       const fail = (reason: string): void => {
         auditSubject.detail.oidcFailure = reason;
-        this.throttle.recordFailure(ip, now);
+        // "차단 중" 응답은 세지 않는다 — 세면 새로 고칠 때마다 지연이 두 배로 늘어 스스로 차단을 연장한다
+        // (같은 IP 버킷을 메일 프로토콜도 쓴다). 응답을 기다리게 하지 않는다 — recordFailure는 저장소 실패를 삼킨다.
+        if (reason !== "throttled") void this.throttle.recordFailure(ip, now);
         res.writeHead(302, { Location: "/admin?sso=failed", "Set-Cookie": flow.clearStateCookie(), "Cache-Control": "no-store" });
         res.end();
       };
-      if (this.throttle.retryAfterSeconds(ip, now) > 0) return fail("throttled");
+      if ((await this.throttle.retryAfterSeconds(ip, now)) > 0) return fail("throttled");
       let result;
       try {
         result = await flow.callback(req, new URL(req.url ?? "/", "http://localhost"));
@@ -692,7 +695,7 @@ export class AdminApiServer {
       }
       const user = await getAdminUser(this.deps.db, adminUserId);
       if (!user) return fail("not_active");
-      this.throttle.clear(ip);
+      // OIDC 성공은 IP 축을 지우지 않는다(위 비밀번호 로그인과 같은 이유). 이 경로는 계정 축을 쓰지 않는다.
       const previousAuth = await this.authenticateSession(readCookie(req, ADMIN_SESSION_COOKIE) ?? "");
       if (previousAuth) await revokeAdminSession(this.deps.db, previousAuth.sessionId, now);
       const mfaAt = user.mfaEnrolled && result.idpMfaAt !== null ? result.idpMfaAt : null;
@@ -778,7 +781,7 @@ export class AdminApiServer {
       // 차단된 IP도 콘솔 자체는 열 수 있다(스로틀 때문에 운영자가 화면조차 못 보는 상황 방지).
       const ip = clientIp(req);
       const now = Date.now();
-      const retryAfter = this.throttle.retryAfterSeconds(ip, now);
+      const retryAfter = await this.throttle.retryAfterSeconds(ip, now);
       if (retryAfter > 0) {
         return sendJson(res, 429, { error: "too many failed auth attempts" }, { "Retry-After": String(retryAfter) });
       }
@@ -804,10 +807,10 @@ export class AdminApiServer {
         if (!bearerPresented && cookieToken !== "") {
           return sendJson(res, 401, { error: "session expired", code: "no_session" }, { "Set-Cookie": clearedSessionCookie() });
         }
-        this.throttle.recordFailure(ip, now);
+        await this.throttle.recordFailure(ip, now);
         return sendJson(res, 401, { error: "unauthorized" });
       }
-      if (auth.kind !== "human") this.throttle.clear(ip);
+      // API 키 성공도 IP 축을 지우지 않는다 — 유효한 키 하나로 같은 IP의 대입 기록을 초기화하지 못하게.
       if (auth.kind === "human") {
         auditSubject.detail.adminUserId = auth.adminUserId;
         if (method !== "GET") this.requireSameOriginWrite(req, auth.csrfHash);

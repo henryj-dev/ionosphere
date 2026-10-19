@@ -4,6 +4,7 @@ import { allMigrations, describeDbSpec, migrate, MTA_QUEUE_STATUS, openDatabase,
 import {
   authenticate,
   createCredential,
+  DbAuthFailureStore,
   DbMaildropLock,
   FsBlobStore,
   LayeredBlobStore,
@@ -687,7 +688,7 @@ export class IonosphereApp {
        * 차단 중이면 `authenticate`를 아예 부르지 않는 것이 핵심이다 — 실패마다 scrypt가 도는
        * 것이 이 스로틀이 생긴 이유(브루트포스 = CPU 소모 공격)라, 검증을 돌린 뒤 막으면 늦다.
        */
-      if (this.authThrottle.blocked({ account: user })) {
+      if (await this.authThrottle.blocked({ account: user })) {
         log.warn("auth throttled", { user });
         // `throttled`를 실어 올린다 — 어댑터가 감사 로그에서 "거부됨"과 "비밀번호 틀림"을 가른다.
         return { ok: false, throttled: true };
@@ -695,11 +696,11 @@ export class IonosphereApp {
       const result = await this.authenticatePassword(user, pass, "submission");
       if (result) {
         log.info("auth ok", { user });
-        this.authThrottle.clear({ account: user });
+        void this.authThrottle.clear({ account: user });
         return { ok: true, credKind: result.credKind, ...(result.expiresAt !== undefined ? { expiresAt: result.expiresAt } : {}) };
       }
       log.warn("auth failed", { user });
-      this.authThrottle.recordFailure({ account: user });
+      await this.authThrottle.recordFailure({ account: user });
       return { ok: false };
     };
   }
@@ -737,21 +738,22 @@ export class IonosphereApp {
        * "그 사용자는 조회가 막혔다"가 응답 형태로 새어 계정 열거가 열린다. 차단 판정은
        * `authorize`에서 한다(그 시점에는 이미 증명이 끝나 응답 형태가 갈리지 않는다).
        */
-      keys: async (user) => await scramKeysFor(this.db, user),
+      // 계정 축이 막혀 있으면 null — 가짜 salt로 교환이 진행돼 응답 모양이 "계정 없음"과 같다(차단 중 정답 여부가 새지 않게).
+      keys: async (user) => ((await this.authThrottle.blocked({ account: user })) ? null : await scramKeysFor(this.db, user)),
       authorize: async (user) => {
         // 계정 축 차단 — SCRAM은 scrypt를 돌지 않지만 분산 대입 방어는 그대로 필요하다.
-        if (this.authThrottle.blocked({ account: user })) {
+        if (await this.authThrottle.blocked({ account: user })) {
           log.warn("auth throttled (scram)", { user });
           return { ok: false, throttled: true };
         }
         const ok = await scramAuthorize(this.db, user, "submission");
         if (!ok) {
           log.warn("scram authorize 실패 — 계정 없음/정지", { user });
-          this.authThrottle.recordFailure({ account: user });
+          await this.authThrottle.recordFailure({ account: user });
           return { ok: false };
         }
         log.info("auth ok (scram)", { user });
-        this.authThrottle.clear({ account: user });
+        void this.authThrottle.clear({ account: user });
         return { ok: true, credKind: "password" };
       },
     };
@@ -859,6 +861,8 @@ export class IonosphereApp {
     this.db = this.opts.db ?? (await openDatabase(this.opts.dbUrl ?? this.opts.dbPath));
     // 마이그레이션은 배타 락 아래에서 돈다 — 여러 인스턴스가 동시에 부팅해도 안전하다.
     await migrate(this.db, allMigrations);
+    // 인증 실패 카운터를 서버들이 함께 센다(마이그레이션 028, 회원 공통 수치 결정 3). 리스너가 뜨기 전에 붙인다.
+    this.authThrottle.attachShared(new DbAuthFailureStore(this.db));
     // E4: 메일 클라이언트용 외부 access token — 설정한 공급자가 있을 때만(모든 인증 표면이 authenticatePassword를 지난다).
     if ((this.opts.oidcProviders ?? []).some((p) => p.mailAccessToken)) {
       this.mailOAuth = new MailOAuthVerifier(this.db, this.opts.oidcProviders ?? [], { ...(this.opts.logger ? { logger: this.opts.logger } : {}) });

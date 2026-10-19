@@ -11,6 +11,7 @@
  * **실제로 스로틀을 움직이는가**다 — 감사 로그가 남는 것과 공격이 막히는 것은 다른 사실이다.
  */
 import { afterEach, describe, expect, test } from "@ionosphere/testkit";
+import { createHash, createHmac, pbkdf2Sync } from "node:crypto";
 import { connect, type Socket } from "node:net";
 import { AuthFailureThrottle, deriveScramKeys, type ScramStoredKeys } from "@ionosphere/core";
 import { ImapServer, type ImapBackend } from "../src/server.ts";
@@ -114,7 +115,7 @@ describe("IMAP SCRAM — 대입 스로틀", () => {
   test("★틀린 증명이 스로틀에 세어진다 — 예전에는 무제한이었다", async () => {
     const keys = (await deriveScramKeys(PASS, { iterations: 4096 })) as ScramStoredKeys;
     // 한도를 3으로 낮춰 테스트를 빠르게 — 기본 10을 쓰면 같은 것을 열 번 확인한다.
-    const throttle = new AuthFailureThrottle({ limit: 3, windowMs: 60_000 });
+    const throttle = new AuthFailureThrottle({ freeFailures: 3, baseDelayMs: 60_000 });
     const server = new ImapServer({
       hostname: "imap.test",
       backend: backendWith(keys),
@@ -132,12 +133,12 @@ describe("IMAP SCRAM — 대입 스로틀", () => {
      * ★네 번째는 **차단**이어야 한다. 여기가 결함의 핵심이었다 — 실패가 세어지지 않으면
      * 이 값이 영원히 false이고, 공격자는 초당 수십 번 SCRAM 교환을 돌릴 수 있다.
      */
-    expect(throttle.blocked("127.0.0.1")).toBe(true);
+    expect(await throttle.blocked("127.0.0.1")).toBe(true);
   });
 
   test("성공 경로를 막지 않는다 — 스로틀 발동 전에는 교환이 정상 진행된다", async () => {
     const keys = (await deriveScramKeys(PASS, { iterations: 4096 })) as ScramStoredKeys;
-    const throttle = new AuthFailureThrottle({ limit: 3, windowMs: 60_000 });
+    const throttle = new AuthFailureThrottle({ freeFailures: 3, baseDelayMs: 60_000 });
     const server = new ImapServer({
       hostname: "imap.test",
       backend: backendWith(keys),
@@ -149,14 +150,14 @@ describe("IMAP SCRAM — 대입 스로틀", () => {
 
     // 한 번 틀려도 아직 차단은 아니다 — 오타 한 번에 잠기면 안 된다.
     await oneBadAttempt(port, "nonce-single");
-    expect(throttle.blocked("127.0.0.1")).toBe(false);
+    expect(await throttle.blocked("127.0.0.1")).toBe(false);
   });
 
   test("★없는 계정에 대한 대입도 세어진다 — 열거 방어가 스로틀 우회로 쓰이면 안 된다", async () => {
     // 없는 계정은 가짜 salt로 교환이 끝까지 진행된다(열거 방어). 그 갈래가 무기록·무계수면
     // 공격자는 존재하지 않는 사용자명으로 한도를 소진 없이 서버를 계속 두드릴 수 있다.
     const keys = (await deriveScramKeys(PASS, { iterations: 4096 })) as ScramStoredKeys;
-    const throttle = new AuthFailureThrottle({ limit: 2, windowMs: 60_000 });
+    const throttle = new AuthFailureThrottle({ freeFailures: 2, baseDelayMs: 60_000 });
     const server = new ImapServer({
       hostname: "imap.test",
       backend: backendWith(keys),
@@ -181,6 +182,47 @@ describe("IMAP SCRAM — 대입 스로틀", () => {
       await c.read((l) => l.startsWith("a1 "));
     }
 
-    expect(throttle.blocked("127.0.0.1")).toBe(true);
+    expect(await throttle.blocked("127.0.0.1")).toBe(true);
+  });
+});
+
+/** RFC 5802 클라이언트 증명 — 맞는 비밀번호로 교환을 끝까지 해 보기 위한 것. */
+function clientProof(password: string, salt: Buffer, iterations: number, authMessage: string): string {
+  const salted = pbkdf2Sync(password, salt, iterations, 32, "sha256");
+  const clientKey = createHmac("sha256", salted).update("Client Key").digest();
+  const storedKey = createHash("sha256").update(clientKey).digest();
+  const sig = createHmac("sha256", storedKey).update(authMessage).digest();
+  const proof = Buffer.alloc(32);
+  for (let i = 0; i < 32; i++) proof[i] = clientKey[i]! ^ sig[i]!;
+  return proof.toString("base64");
+}
+
+describe("IMAP SCRAM — 차단 중에는 정답 여부를 알려 주지 않는다 (P1 델타 리뷰 HIGH)", () => {
+  test("★계정 축이 막혀 있으면 맞는 비밀번호로도 서버 서명(server-final) 없이 거절된다", async () => {
+    const keys = (await deriveScramKeys(PASS, { iterations: 4096 })) as ScramStoredKeys;
+    const throttle = new AuthFailureThrottle({ freeFailures: 2, baseDelayMs: 60_000 });
+    // 다른 IP에서 이 계정을 두드려 계정 축만 막는다(IP 축은 비어 있다).
+    await throttle.recordFailure({ ip: "203.0.113.9", account: USER });
+    await throttle.recordFailure({ ip: "203.0.113.10", account: USER });
+    const server = new ImapServer({ hostname: "imap.test", backend: backendWith(keys), allowInsecureAuth: true, authThrottle: throttle });
+    servers.push(server);
+    const port = await server.listen(0, "127.0.0.1");
+
+    const c = lineClient(port);
+    await c.read((l) => l.startsWith("* OK"));
+    const clientFirstBare = `n=${USER},r=clientnonce`;
+    c.send(`a1 AUTHENTICATE SCRAM-SHA-256 ${Buffer.from(`n,,${clientFirstBare}`).toString("base64")}\r\n`);
+    const first = (await c.read((l) => l.startsWith("+ ") || l.startsWith("a1 "))).at(-1)!;
+    expect(first.startsWith("+ ")).toBe(true);
+    const serverFirst = Buffer.from(first.slice(2), "base64").toString();
+    const nonce = /r=([^,]+)/.exec(serverFirst)![1]!;
+    const salt = Buffer.from(/s=([^,]+)/.exec(serverFirst)![1]!, "base64");
+    const iterations = Number(/i=(\d+)/.exec(serverFirst)![1]);
+    const withoutProof = `c=biws,r=${nonce}`;
+    const proof = clientProof(PASS, salt, iterations, `${clientFirstBare},${serverFirst},${withoutProof}`);
+    c.send(`${Buffer.from(`${withoutProof},p=${proof}`).toString("base64")}\r\n`);
+    const reply = (await c.read((l) => l.startsWith("+ ") || l.startsWith("a1 "))).at(-1)!;
+    // 진짜 키로 교환했다면 여기서 "+ <server-final>"이 온다 — 그 자체가 "비밀번호가 맞았다"는 신호다.
+    expect(reply.startsWith("a1 NO")).toBe(true);
   });
 });

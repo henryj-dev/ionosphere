@@ -7,14 +7,19 @@
  * (SASL 파싱·프로토콜 한도를 core로 올린 것과 같은 이유) 여기서 한 번만 정의한다.
  *
  * 설계 요점:
- *  - **실패만** 센다. 성공은 세지 않고 즉시 카운터를 지운다 — 오타 뒤 정상 로그인이 벌받지 않게.
+ *  - **실패만** 센다. 성공하면 카운터를 지운다 — 오타 뒤 정상 로그인이 벌받지 않게.
+ *  - 규칙은 회원 공통 수치(2026-10-18 결정 3)다: 무료 실패 5회 뒤부터 지연이 1초에서 시작해
+ *    실패마다 두 배, 상한 15분. 마지막 실패 뒤 15분이 지나면 초기화한다. 영구 잠금은 없다.
  *  - **축이 둘이다**: IP(프리픽스) 축 + 계정 축. 어느 한쪽이라도 한도를 넘으면 차단한다.
  *    IP 축만 있던 시절엔 봇넷·IPv6 프리픽스 전환으로 **한 계정 분산 대입이 무제한**이었다.
  *  - 키는 호출자가 아니라 **여기서** 정규화한다(`throttleKeyOf`). 정규화를 호출자에게 맡기면
  *    한 갈래가 빠지고 그 갈래만 스로틀이 무력해진다 — 실제로 IPv6에서 그랬다.
- *  - 상태는 인프로세스 Map(단일 프로세스 배포 전제). 여러 인스턴스면 각자 따로 센다 —
- *    그래서 조립층(`apps/server/src/app.ts`)이 **인스턴스 하나를 만들어 주입**한다.
- *  - 공격자가 IP를 바꿔가며 Map을 불리는 것을 막으려고 윈도우당 한 번 만료 엔트리를 쓸어낸다
+ *  - 카운터의 정본은 **공유 저장소**(`SharedThrottleStore`, 실제 구현은 store 패키지의 DB 테이블)다.
+ *    프로세스 메모리만 쓰던 때는 서버가 세 대면 한도가 세 배였다. core는 I/O를 모르므로 저장소는
+ *    인터페이스로만 받고, 조립층(`apps/server/src/app.ts`)이 인스턴스 하나를 만들어 주입한다.
+ *  - 프로세스 메모리 카운터도 **함께** 센다. 공유 저장소를 읽지 못하면 그것으로 판정한다(fail closed —
+ *    DB 장애가 곧 스로틀 해제가 되면 안 된다). 공유 저장소를 읽었으면 그 값만 따른다.
+ *  - 공격자가 IP를 바꿔가며 Map을 불리는 것을 막으려고 주기적으로 만료 엔트리를 쓸어낸다
  *    (요청마다 전수 순회하면 O(n) 비용이 요청 경로에 실린다).
  *
  * 이 모듈은 **비밀번호를 받지도 로깅하지도 않는다** — 들어오는 것은 주소와 사용자명뿐이다.
@@ -23,19 +28,40 @@ import { isIP } from "node:net";
 import { noopLogger, type Logger } from "./log.ts";
 
 export interface AuthThrottleOptions {
-  /** 실패를 세는 슬라이딩 윈도우 폭(ms). 기본 60초. */
-  windowMs?: number;
-  /** 윈도우 안에서 한 IP 프리픽스가 허용받는 실패 횟수. 기본 10. */
-  limit?: number;
-  /**
-   * 윈도우 안에서 **한 계정**이 허용받는 실패 횟수. 기본 20 — IP 축보다 느슨하게 둔다.
-   * 계정 축은 출처를 가리지 않으므로, 공격자가 남의 주소를 알면 그 계정을 윈도우 동안
-   * 잠글 수 있다(가용성 대가). 윈도우가 60초라 피해가 유계이고, 그 대가로
-   * "봇넷이 한 계정을 무제한 대입"이 닫힌다 — 이 스로틀의 존재 이유가 scrypt CPU 방어다.
-   */
-  accountLimit?: number;
+  /** 지연 없이 허용하는 실패 횟수. 기본 5(공통 수치). 이 횟수에 닿은 순간부터 지연이 붙는다. */
+  freeFailures?: number;
+  /** 첫 지연(ms). 기본 1초. 그 뒤 실패마다 두 배. */
+  baseDelayMs?: number;
+  /** 지연 상한(ms). 기본 15분. */
+  maxDelayMs?: number;
+  /** 마지막 실패 뒤 이만큼 지나면 카운터를 처음부터 센다(ms). 기본 15분. */
+  resetAfterMs?: number;
+  /** 서버 여러 대가 함께 쓰는 카운터. 없으면 프로세스 메모리만 쓴다(테스트·단일 프로세스). */
+  shared?: SharedThrottleStore;
   /** 스로틀 발동 로깅용. 미지정이면 무소음(라이브러리 기본). */
   logger?: Logger;
+}
+
+/** 한 버킷의 카운터. `lastFailAt`은 마지막 실패 시각(ms). */
+export interface ThrottleCounter {
+  readonly fails: number;
+  readonly lastFailAt: number;
+}
+
+/**
+ * 공유 카운터 저장소 — 인스턴스 여러 대가 같은 값을 본다.
+ *
+ * 실패는 던진다. 스로틀이 잡아서 프로세스 메모리 판정으로 내려간다(fail closed).
+ */
+export interface SharedThrottleStore {
+  /** 버킷들의 현재 카운터. 없는 버킷은 결과에 없다. */
+  read(buckets: readonly string[]): Promise<Map<string, ThrottleCounter>>;
+  /** 실패 하나를 원자적으로 더한다. 마지막 실패가 `resetBefore`보다 오래됐으면 1부터 다시 센다. */
+  recordFailure(bucket: string, now: number, resetBefore: number): Promise<void>;
+  /** 버킷들을 지운다(인증 성공). */
+  clear(buckets: readonly string[]): Promise<void>;
+  /** 마지막 실패가 `before`보다 오래된 버킷을 지운다. */
+  sweep(before: number): Promise<void>;
 }
 
 /**
@@ -54,9 +80,24 @@ export interface AuthSubject {
 
 export type AuthThrottleSubject = string | AuthSubject;
 
-const DEFAULT_WINDOW_MS = 60_000;
-const DEFAULT_LIMIT = 10;
-const DEFAULT_ACCOUNT_LIMIT = 20;
+/** 공통 수치(2026-10-18 결정 3). 바꾸려면 orc의 공통 정책부터 바뀌어야 한다. */
+export const AUTH_THROTTLE_FREE_FAILURES = 5;
+export const AUTH_THROTTLE_BASE_DELAY_MS = 1_000;
+export const AUTH_THROTTLE_MAX_DELAY_MS = 15 * 60_000;
+export const AUTH_THROTTLE_RESET_AFTER_MS = 15 * 60_000;
+
+/** 공유 저장소를 정리하는 간격 — 실패가 날 때만 보고, 이보다 자주 지우지 않는다. */
+const SHARED_SWEEP_INTERVAL_MS = 10 * 60_000;
+/** 공유 저장소 장애 경고 간격 — 실패마다 찍으면 장애가 곧 로그 폭주가 된다. */
+const SHARED_ERROR_LOG_INTERVAL_MS = 60_000;
+/**
+ * 최근에 읽은 공유 카운터를 기억하는 시간. 성공한 로그인이 "카운터가 없다"를 이미 확인했으면
+ * 지우기 위한 쓰기를 건너뛴다 — 정상 로그인마다 DB 쓰기가 끼지 않게 하려는 장치다(결정 3: 실패할 때만 쓴다).
+ */
+const READ_MEMO_MS = 30_000;
+const MAX_READ_MEMO = 10_000;
+/** 차단 판정 캐시 상한 — 공격자가 버킷을 바꿔 가며 맵을 불리지 못하게. 넘치면 비운다(더 느슨해질 뿐 틀리지 않는다). */
+const MAX_BLOCK_CACHE = 10_000;
 
 /** 축별 네임스페이스 — 사용자명이 IP 표기와 같아도 버킷이 섞이지 않게. */
 const IP_PREFIX = "ip|";
@@ -68,65 +109,191 @@ interface Axis {
   readonly axis: AxisName;
   /** 정규화된 대상(로그용). */
   readonly id: string;
-  /** Map 키(네임스페이스 포함). */
+  /** 버킷 키(네임스페이스 포함). */
   readonly key: string;
-  readonly limit: number;
+}
+
+export interface ThrottlePolicy {
+  readonly freeFailures: number;
+  readonly baseDelayMs: number;
+  readonly maxDelayMs: number;
+  readonly resetAfterMs: number;
+}
+
+/**
+ * 카운터 하나가 언제까지 막히는가(ms, 0이면 통과) — 순수 함수라 공유·로컬 판정이 같은 규칙을 탄다.
+ * 실패가 `freeFailures`회에 닿으면 첫 지연, 그 뒤 실패마다 두 배.
+ */
+export function blockedUntil(c: ThrottleCounter | undefined, now: number, p: ThrottlePolicy): number {
+  if (!c || c.fails < p.freeFailures) return 0;
+  if (now - c.lastFailAt >= p.resetAfterMs) return 0;
+  const exp = Math.min(c.fails - p.freeFailures, 30); // 2^30이면 어떤 상한도 넘는다 — 그 이상은 계산하지 않는다
+  const delay = Math.min(p.baseDelayMs * 2 ** exp, p.maxDelayMs);
+  const until = c.lastFailAt + delay;
+  return until > now ? until : 0;
 }
 
 export class AuthFailureThrottle {
-  private readonly fails = new Map<string, number[]>();
-  private lastSweep = 0;
-  private readonly windowMs: number;
-  private readonly limit: number;
-  private readonly accountLimit: number;
+  private readonly local = new Map<string, ThrottleCounter>();
+  private readonly readMemo = new Map<string, { at: number; present: boolean }>();
+  /**
+   * 버킷 → 이 시각까지 막힘. 차단이 확인되면 풀릴 때까지 공유 저장소를 다시 읽지 않는다 — 공격 중인 시도마다
+   * DB 왕복이 붙으면 공격 트래픽이 메일 배달과 같은 DB로 그대로 옮겨 간다. 차단은 시간이 지나야 풀리므로
+   * 이 캐시는 **더 엄격한 쪽으로만** 틀린다(다른 서버의 성공이 지운 경우에도 지연이 끝날 때까지는 막는다).
+   */
+  private readonly blockCache = new Map<string, number>();
+  /**
+   * 버킷 → 이 시각까지 미동기. 공유 저장소에 실패를 쓰지 못한 버킷은 공유 값이 실제보다 작다. 그 동안은
+   * 공유 값과 프로세스 카운터 중 **더 엄격한 쪽**을 따른다 — 읽기는 되는데 쓰기만 실패하면 실패가 어디에도
+   * 남지 않던 구멍(fail open)을 막는다.
+   */
+  private readonly unsynced = new Map<string, number>();
+  private lastLocalSweep = 0;
+  private lastSharedSweep = 0;
+  private lastSharedErrorLog = 0;
+  private readonly policy: ThrottlePolicy;
+  private shared: SharedThrottleStore | undefined;
   private readonly log: Logger;
 
   constructor(opts: AuthThrottleOptions = {}) {
-    this.windowMs = opts.windowMs ?? DEFAULT_WINDOW_MS;
-    this.limit = opts.limit ?? DEFAULT_LIMIT;
-    this.accountLimit = opts.accountLimit ?? DEFAULT_ACCOUNT_LIMIT;
+    this.policy = {
+      freeFailures: opts.freeFailures ?? AUTH_THROTTLE_FREE_FAILURES,
+      baseDelayMs: opts.baseDelayMs ?? AUTH_THROTTLE_BASE_DELAY_MS,
+      maxDelayMs: opts.maxDelayMs ?? AUTH_THROTTLE_MAX_DELAY_MS,
+      resetAfterMs: opts.resetAfterMs ?? AUTH_THROTTLE_RESET_AFTER_MS,
+    };
+    this.shared = opts.shared;
     this.log = (opts.logger ?? noopLogger).child({ component: "auth-throttle" });
   }
 
-  /** 차단 중이면 남은 대기 초(>=1), 통과면 0. 두 축 중 **더 오래 걸린 쪽**을 답한다. */
-  retryAfterSeconds(subject: AuthThrottleSubject, now: number = Date.now()): number {
-    let worst = 0;
-    for (const axis of this.axesOf(subject)) {
-      const recent = this.recent(axis.key, now);
-      if (recent.length < axis.limit) continue;
-      const oldest = recent[0]!;
-      worst = Math.max(worst, Math.max(1, Math.ceil((oldest + this.windowMs - now) / 1000)));
+  /**
+   * 공유 저장소를 나중에 붙인다 — 조립층은 스로틀을 리스너들에 먼저 나눠 주고 DB는 기동할 때 연다.
+   * 리스너가 뜨기 전에 붙이므로 그 사이에 판정되는 인증은 없다.
+   */
+  attachShared(store: SharedThrottleStore): void {
+    this.shared = store;
+  }
+
+  /** 차단 중이면 남은 대기 초(>=1), 통과면 0. 축·저장소 중 **가장 오래 막는 쪽**을 답한다. */
+  async retryAfterSeconds(subject: AuthThrottleSubject, now: number = Date.now()): Promise<number> {
+    const axes = this.axesOf(subject);
+    if (axes.length === 0) return 0;
+    let cached = 0;
+    for (const axis of axes) {
+      const u = this.blockCache.get(axis.key);
+      if (u === undefined) continue;
+      if (u > now) cached = Math.max(cached, u);
+      else this.blockCache.delete(axis.key);
     }
-    return worst;
+    if (cached > now) return Math.max(1, Math.ceil((cached - now) / 1000));
+    // 공유 카운터를 읽었으면 **그것만** 따른다. 프로세스 카운터까지 합치면 다른 서버에서 성공해 지운 뒤에도
+    // 이 서버의 낡은 카운터가 계속 막는다. 프로세스 카운터는 공유 저장소를 못 읽을 때의 대비(fail closed)다.
+    const shared = await this.readShared(axes.map((a) => a.key), now);
+    let until = 0;
+    for (const axis of axes) {
+      const local = blockedUntil(this.local.get(axis.key), now, this.policy);
+      const u = !shared ? local : this.isUnsynced(axis.key, now) ? Math.max(local, blockedUntil(shared.get(axis.key), now, this.policy)) : blockedUntil(shared.get(axis.key), now, this.policy);
+      if (u > now) {
+        if (this.blockCache.size >= MAX_BLOCK_CACHE) this.blockCache.clear();
+        this.blockCache.set(axis.key, u);
+      }
+      until = Math.max(until, u);
+    }
+    return until > now ? Math.max(1, Math.ceil((until - now) / 1000)) : 0;
   }
 
   /** 차단 여부만 볼 때. */
-  blocked(subject: AuthThrottleSubject, now: number = Date.now()): boolean {
-    return this.retryAfterSeconds(subject, now) > 0;
+  async blocked(subject: AuthThrottleSubject, now: number = Date.now()): Promise<boolean> {
+    return (await this.retryAfterSeconds(subject, now)) > 0;
   }
 
-  recordFailure(subject: AuthThrottleSubject, now: number = Date.now()): void {
-    for (const axis of this.axesOf(subject)) {
-      const recent = this.recent(axis.key, now);
-      recent.push(now);
-      this.fails.set(axis.key, recent);
+  async recordFailure(subject: AuthThrottleSubject, now: number = Date.now()): Promise<void> {
+    const axes = this.axesOf(subject);
+    for (const axis of axes) {
+      const prev = this.local.get(axis.key);
+      const next: ThrottleCounter =
+        !prev || now - prev.lastFailAt >= this.policy.resetAfterMs ? { fails: 1, lastFailAt: now } : { fails: prev.fails + 1, lastFailAt: now };
+      this.local.set(axis.key, next);
+      this.readMemo.delete(axis.key);
       // 발동은 **경계에서 한 번만** 로깅한다. 시도마다 찍으면 공격이 곧 로그 폭주가 되고,
       // 아예 안 찍으면 운영자가 "공격 중인지 정상 사용자가 잠긴 건지"를 알 방법이 없다.
-      if (recent.length === axis.limit) {
-        this.log.warn("인증 실패 스로틀 발동", {
-          axis: axis.axis,
-          subject: axis.id,
-          fails: recent.length,
-          windowMs: this.windowMs,
-        });
+      // 경계는 이 프로세스가 본 횟수 기준이다 — 공유 카운터는 다른 서버의 실패까지 포함하므로 더 일찍 막을 수 있다.
+      if (next.fails === this.policy.freeFailures) {
+        this.log.warn("인증 실패 스로틀 발동", { axis: axis.axis, subject: axis.id, fails: next.fails });
       }
     }
-    this.sweep(now);
+    this.sweepLocal(now);
+    if (!this.shared || axes.length === 0) return;
+    // 축마다 따로 쓴다 — 한 축 쓰기가 실패해도 다른 축은 계속 기록한다. 실패한 축은 미동기로 표시한다.
+    for (const axis of axes) {
+      try {
+        await this.shared.recordFailure(axis.key, now, now - this.policy.resetAfterMs);
+      } catch (e) {
+        if (this.unsynced.size >= MAX_BLOCK_CACHE) this.unsynced.clear();
+        this.unsynced.set(axis.key, now + this.policy.resetAfterMs);
+        this.sharedFailed(e, now);
+      }
+    }
+    if (now - this.lastSharedSweep >= SHARED_SWEEP_INTERVAL_MS) {
+      this.lastSharedSweep = now;
+      try {
+        await this.shared.sweep(now - this.policy.resetAfterMs);
+      } catch (e) {
+        this.sharedFailed(e, now);
+      }
+    }
   }
 
   /** 인증 성공 → 그 대상의 실패 기록을 지운다(두 축 모두). */
-  clear(subject: AuthThrottleSubject): void {
-    for (const axis of this.axesOf(subject)) this.fails.delete(axis.key);
+  async clear(subject: AuthThrottleSubject, now: number = Date.now()): Promise<void> {
+    const axes = this.axesOf(subject);
+    for (const axis of axes) {
+      this.local.delete(axis.key);
+      this.blockCache.delete(axis.key);
+      this.unsynced.delete(axis.key);
+    }
+    if (!this.shared || axes.length === 0) return;
+    // 방금 읽어서 "없다"를 확인한 버킷은 지울 것이 없다 — 쓰기를 건너뛴다.
+    const toClear = axes
+      .map((a) => a.key)
+      .filter((k) => {
+        const m = this.readMemo.get(k);
+        return !(m && !m.present && now - m.at < READ_MEMO_MS);
+      });
+    if (toClear.length === 0) return;
+    try {
+      await this.shared.clear(toClear);
+      for (const k of toClear) this.readMemo.set(k, { at: now, present: false });
+    } catch (e) {
+      this.sharedFailed(e, now);
+    }
+  }
+
+  private async readShared(keys: readonly string[], now: number): Promise<Map<string, ThrottleCounter> | null> {
+    if (!this.shared) return null;
+    try {
+      const got = await this.shared.read(keys);
+      if (this.readMemo.size >= MAX_READ_MEMO) this.readMemo.clear();
+      for (const k of keys) this.readMemo.set(k, { at: now, present: got.has(k) });
+      return got;
+    } catch (e) {
+      this.sharedFailed(e, now);
+      return null;
+    }
+  }
+
+  private isUnsynced(key: string, now: number): boolean {
+    const u = this.unsynced.get(key);
+    if (u === undefined) return false;
+    if (u > now) return true;
+    this.unsynced.delete(key);
+    return false;
+  }
+
+  private sharedFailed(e: unknown, now: number): void {
+    if (now - this.lastSharedErrorLog < SHARED_ERROR_LOG_INTERVAL_MS) return;
+    this.lastSharedErrorLog = now;
+    this.log.warn("공유 스로틀 저장소 실패 — 이 프로세스의 카운터로 판정한다", { error: e instanceof Error ? e.message : String(e) });
   }
 
   private axesOf(subject: AuthThrottleSubject): Axis[] {
@@ -134,27 +301,24 @@ export class AuthFailureThrottle {
     const axes: Axis[] = [];
     if (s.ip !== undefined) {
       const id = throttleKeyOf(s.ip);
-      axes.push({ axis: "ip", id, key: IP_PREFIX + id, limit: this.limit });
+      axes.push({ axis: "ip", id, key: IP_PREFIX + id });
     }
     const account = accountKeyOf(s.account);
-    if (account !== null) {
-      axes.push({ axis: "account", id: account, key: ACCOUNT_PREFIX + account, limit: this.accountLimit });
-    }
+    if (account !== null) axes.push({ axis: "account", id: account, key: ACCOUNT_PREFIX + account });
     return axes;
   }
 
-  private recent(key: string, now: number): number[] {
-    const arr = this.fails.get(key);
-    if (!arr) return [];
-    return arr.filter((t) => t > now - this.windowMs);
-  }
-
-  private sweep(now: number): void {
-    if (now - this.lastSweep < this.windowMs) return;
-    this.lastSweep = now;
-    for (const [key, times] of this.fails) {
-      if (times.every((t) => t <= now - this.windowMs)) this.fails.delete(key);
+  private sweepLocal(now: number): void {
+    if (now - this.lastLocalSweep < this.policy.resetAfterMs) return;
+    this.lastLocalSweep = now;
+    for (const [key, c] of this.local) {
+      if (now - c.lastFailAt >= this.policy.resetAfterMs) this.local.delete(key);
     }
+    for (const [key, m] of this.readMemo) {
+      if (now - m.at >= READ_MEMO_MS) this.readMemo.delete(key);
+    }
+    for (const [key, u] of this.blockCache) if (u <= now) this.blockCache.delete(key);
+    for (const [key, u] of this.unsynced) if (u <= now) this.unsynced.delete(key);
   }
 }
 

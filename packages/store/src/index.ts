@@ -48,6 +48,7 @@ export {
 } from "./blob.ts";
 export { StoreConflictError, StoreError, StoreQuotaError } from "./errors.ts";
 export { DbMaildropLock, type DbMaildropLockOptions } from "./maildrop-lock.ts";
+export { DbAuthFailureStore } from "./auth-failures.ts";
 export { Store } from "./store.ts";
 export { authorizeMailbox, deleteMailboxAcl, getMailboxAcl, setMailboxAcl, type MailboxAclRow, type MailboxAuthorization } from "./authorization.ts";
 export { tokenize, tokenizeQuery } from "./tokenize.ts";

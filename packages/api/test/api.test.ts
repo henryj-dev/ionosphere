@@ -847,7 +847,8 @@ describe("AdminApiServer", () => {
   // ── 인증 실패 스로틀(443 공개 노출 대비) ────────────────────────────
   test("인증 실패 스로틀 — 연속 실패 한도 초과 시 429 + Retry-After", async () => {
     const f = await setup();
-    for (let i = 0; i < 10; i++) {
+    // 공통 수치: 무료 실패 5회(AUTH_THROTTLE_FREE_FAILURES). 5회째 실패부터 지연이 붙는다.
+    for (let i = 0; i < 5; i++) {
       const res = await fetch(`${f.baseUrl}/v1/accounts`, { headers: authHeader("bogus-token") });
       expect(res.status).toBe(401);
     }
@@ -862,17 +863,15 @@ describe("AdminApiServer", () => {
     expect((await fetch(`${f.baseUrl}/`)).status).toBe(200);
   });
 
-  test("인증 실패 스로틀 — 성공하면 카운터 리셋(오타 뒤 정상 로그인이 벌받지 않는다)", async () => {
+  test("인증 실패 스로틀 — 성공해도 IP 축은 지우지 않는다(유효한 키 하나로 대입 기록을 초기화하지 못하게)", async () => {
     const f = await setup();
-    for (let i = 0; i < 9; i++) {
+    for (let i = 0; i < 4; i++) {
       expect((await fetch(`${f.baseUrl}/v1/accounts`, { headers: authHeader("bogus-token") })).status).toBe(401);
     }
-    // 성공 → 실패 기록 삭제
+    // 성공해도 IP 축 카운터(4회)는 남는다. 예전에는 여기서 지워져 "4회 실패 + 1회 성공"을 무한히 되풀이할 수 있었다.
     expect((await fetch(`${f.baseUrl}/v1/accounts?tenantId=t`, { headers: authHeader(ROOT_TOKEN) })).status).toBe(200);
-    // 리셋되지 않았다면 이 9회 중 두 번째부터 429가 나온다
-    for (let i = 0; i < 9; i++) {
-      expect((await fetch(`${f.baseUrl}/v1/accounts`, { headers: authHeader("bogus-token") })).status).toBe(401);
-    }
+    expect((await fetch(`${f.baseUrl}/v1/accounts`, { headers: authHeader("bogus-token") })).status).toBe(401);
+    expect((await fetch(`${f.baseUrl}/v1/accounts`, { headers: authHeader("bogus-token") })).status).toBe(429);
   });
 
   test("인증 실패 스로틀 — 성공 요청은 세지 않는다(정상 운영 무영향)", async () => {
