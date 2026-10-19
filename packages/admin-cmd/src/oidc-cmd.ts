@@ -76,6 +76,7 @@ export const oidcCommands: readonly Command[] = [
       if (!(ctx.oidcAdminProviders ?? []).includes(p)) throw new CommandError("invalid", `설정된 관리자 OIDC 공급자가 아닙니다: ${p}`);
       const r = await linkAdminIdentity(ctx.db, p, subject(args.subject), id);
       if (r === "conflict") throw new CommandError("conflict", "그 sub가 이미 연결돼 있거나, 이 관리자가 같은 공급자의 다른 sub에 연결돼 있습니다");
+      if (r === "retired") throw new CommandError("conflict", "그 sub는 예전에 다른 관리자에 연결됐다가 끊겼습니다 — 재사용을 막기 위해 다른 관리자에 다시 연결하지 않습니다");
       return { data: { adminUserId: id }, message: `연결됨: ${args.admin} ← ${args.provider}` };
     },
   },
@@ -117,6 +118,7 @@ export const oidcCommands: readonly Command[] = [
       const r = await linkAccountOidcIdentity(ctx.db, tenantId, p, subject(args.subject), acc);
       if (r === "no_account") throw new CommandError("conflict", "활성 계정이 아닙니다");
       if (r === "conflict") throw new CommandError("conflict", "그 sub가 이미 연결돼 있거나, 이 계정이 같은 공급자의 다른 sub에 연결돼 있습니다");
+      if (r === "retired") throw new CommandError("conflict", "그 sub는 예전에 다른 계정에 연결됐다가 끊겼습니다 — 재사용을 막기 위해 다른 계정에 다시 연결하지 않습니다");
       return { data: { accountId: acc }, message: `연결됨: ${args.account} ← ${args.provider}` };
     },
   },

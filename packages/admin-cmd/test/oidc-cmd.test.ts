@@ -42,4 +42,29 @@ describe("OIDC 연결 명령", () => {
     await expect(runCommand(reg, s.ctx(s.tenantId), "directory-identity-link", { provider: "oidc:corp", externalKey: "sub-1", accountId: s.accountId })).rejects.toThrow(/oidc-identity-link/);
     await expect(runCommand(reg, s.ctx(s.tenantId), "directory-identity-unlink", { provider: "oidc:corp", externalKey: "sub-1" })).rejects.toThrow(/oidc-identity-link/);
   });
+
+  test("★끊은 sub는 다른 계정에 다시 연결하지 못하고, 원래 계정에는 다시 이을 수 있다(묘비, 결정 9)", async () => {
+    const s = await setup();
+    const reg = createRegistry();
+    const store = new Store(s.db);
+    await store.createAccount({ tenantId: s.tenantId, email: "bob@acme.test" });
+    const ctx = s.ctx(s.tenantId);
+    await runCommand(reg, ctx, "oidc-identity-link", { account: "alice@acme.test", provider: "corp", subject: "sub-1" });
+    await runCommand(reg, ctx, "oidc-identity-unlink", { provider: "corp", subject: "sub-1" });
+    await expect(runCommand(reg, ctx, "oidc-identity-link", { account: "bob@acme.test", provider: "corp", subject: "sub-1" })).rejects.toThrow(/재사용을 막기 위해/);
+    expect((await runCommand(reg, ctx, "oidc-identity-link", { account: "alice@acme.test", provider: "corp", subject: "sub-1" })).data?.accountId).toBe(s.accountId);
+  });
+
+  test("★관리자도 같다 — 끊은 sub를 다른 관리자에 잇지 못한다", async () => {
+    const s = await setup();
+    const reg = createRegistry();
+    await createAdminUser(s.db, { username: "second@ionosphere.test", role: ADMIN_ROLE.admin });
+    const root = s.ctx("", true);
+    await runCommand(reg, root, "admin-identity-link", { admin: "ops@ionosphere.test", provider: "staff", subject: "emp-7" });
+    await runCommand(reg, root, "admin-identity-unlink", { admin: "ops@ionosphere.test", provider: "staff" });
+    await expect(runCommand(reg, root, "admin-identity-link", { admin: "second@ionosphere.test", provider: "staff", subject: "emp-7" })).rejects.toThrow(/재사용을 막기 위해/);
+    expect((await runCommand(reg, root, "admin-identity-link", { admin: "ops@ionosphere.test", provider: "staff", subject: "emp-7" })).message).toContain("연결됨");
+    // 다른 sub는 영향이 없다.
+    expect((await runCommand(reg, root, "admin-identity-link", { admin: "second@ionosphere.test", provider: "staff", subject: "emp-8" })).message).toContain("연결됨");
+  });
 });

@@ -72,19 +72,46 @@ export async function adminByIdentity(db: DbDriver, provider: string, subject: s
   return rows[0] ? String(rows[0].id) : null;
 }
 
-/** 연결 — 그 sub가 이미 다른 관리자에, 또는 그 관리자가 이 공급자의 다른 sub에 연결돼 있으면 "conflict". */
-export async function linkAdminIdentity(db: DbDriver, provider: string, subject: string, adminUserId: string): Promise<"ok" | "conflict"> {
+// ── 연결 식별자의 최초 주인 기록(마이그레이션 029) ─────────────────────────
+
+type ClaimRealm = "admin" | "account";
+
+/**
+ * sub를 처음 연결할 때 주인을 기록한다 — 이미 있으면(예전에 누군가에게 연결됐었다) 그대로 둔다. 기록은 지우지 않는다
+ * (회원 공통 수치 결정 9 — IdP가 sub를 재활용하거나 운영자가 실수해도 예전 사람의 로그인이 새 주체로 들어오지 않게).
+ */
+function claimStatement(db: DbDriver, realm: ClaimRealm, provider: string, subject: string, ownerId: string, now: number): { sql: string; params: unknown[] } {
+  return { sql: db.insertIgnore("identity_claims", ["realm", "provider", "subject", "owner_id", "claimed_at"]), params: [realm, provider, subject, ownerId, now] };
+}
+
+/** 연결 행을 넣는 조건 — 그 sub의 주인 기록이 **나**일 때만. 같은 배치 안에서 판정하므로 해제와의 경합으로 재사용되지 않는다. */
+const OWNED_BY_ME = "FROM identity_claims WHERE realm = ? AND provider = ? AND subject = ? AND owner_id = ?";
+
+/**
+ * 연결 — 그 sub가 이미 다른 관리자에, 또는 그 관리자가 이 공급자의 다른 sub에 연결돼 있으면 "conflict".
+ * 예전에 다른 관리자에 연결됐던 sub면 "retired"(최초 주인 기록이 다르다).
+ */
+export async function linkAdminIdentity(db: DbDriver, provider: string, subject: string, adminUserId: string): Promise<"ok" | "conflict" | "retired"> {
+  const now = Date.now();
   try {
-    await db.batch([
-      { sql: "INSERT INTO admin_identities (provider, subject, admin_user_id, created_at) VALUES (?, ?, ?, ?)", params: [provider, subject, adminUserId, Date.now()] },
+    const r = await db.batch([
+      claimStatement(db, "admin", provider, subject, adminUserId, now),
+      {
+        sql: `INSERT INTO admin_identities (provider, subject, admin_user_id, created_at) SELECT ?, ?, ?, ? ${OWNED_BY_ME}`,
+        params: [provider, subject, adminUserId, now, "admin", provider, subject, adminUserId],
+      },
     ]);
-    return "ok";
+    if ((r[1]?.changes ?? 0) > 0) return "ok";
+    // 안 들어갔다 — 지금 다른 관리자에 연결돼 있으면 conflict, 예전에 연결됐다가 끊긴 sub면 retired(안내 문구가 다르다).
+    const { rows } = await db.query({ sql: "SELECT 1 AS x FROM admin_identities WHERE provider = ? AND subject = ?", params: [provider, subject] });
+    return rows.length > 0 ? "conflict" : "retired";
   } catch (err) {
     if (err instanceof BatchConflictError) return "conflict";
     throw err;
   }
 }
 
+/** 연결 해제 — 행만 지운다. 최초 주인 기록은 남으므로 그 sub를 다른 관리자에 다시 연결할 수 없다. */
 export async function unlinkAdminIdentity(db: DbDriver, provider: string, adminUserId: string): Promise<boolean> {
   const r = await db.batch([{ sql: "DELETE FROM admin_identities WHERE provider = ? AND admin_user_id = ?", params: [provider, adminUserId] }]);
   return (r[0]?.changes ?? 0) > 0;
@@ -112,24 +139,34 @@ export async function accountByOidcIdentity(db: DbDriver, tenantId: string, prov
  * 그 sub가 이미 있거나(다른 계정이든 같은 계정이든), 그 계정이 이 공급자의 다른 sub에 연결돼 있으면 "conflict"
  * (024의 UNIQUE가 최종 판정).
  */
-export async function linkAccountOidcIdentity(db: DbDriver, tenantId: string, providerId: string, subject: string, accountId: string): Promise<"ok" | "conflict" | "no_account"> {
+export async function linkAccountOidcIdentity(db: DbDriver, tenantId: string, providerId: string, subject: string, accountId: string): Promise<"ok" | "conflict" | "no_account" | "retired"> {
   const { rows } = await db.query({ sql: "SELECT id FROM accounts WHERE id = ? AND tenant_id = ? AND status = ?", params: [accountId, tenantId, ACCOUNT_STATUS.active] });
   if (rows.length === 0) return "no_account";
+  const provider = accountOidcProvider(providerId);
+  const now = Date.now();
   try {
-    await db.batch([
+    const r = await db.batch([
+      claimStatement(db, "account", provider, subject, accountId, now),
       {
         sql: `INSERT INTO directory_identities (id, tenant_id, provider, external_key, account_id, login_names, email, display_name, last_seen_at, status)
-              VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, 1)`,
-        params: [ulid(), tenantId, accountOidcProvider(providerId), subject, accountId, "[]", Date.now()],
+              SELECT ?, ?, ?, ?, ?, ?, NULL, NULL, ?, 1 ${OWNED_BY_ME}`,
+        params: [ulid(), tenantId, provider, subject, accountId, "[]", now, "account", provider, subject, accountId],
       },
     ]);
-    return "ok";
+    if ((r[1]?.changes ?? 0) > 0) return "ok";
+    // 안 들어갔다 — 지금 다른 계정에 연결돼 있으면 conflict, 예전에 연결됐다가 끊긴 sub면 retired.
+    const { rows } = await db.query({
+      sql: "SELECT 1 AS x FROM directory_identities WHERE tenant_id = ? AND provider = ? AND external_key = ?",
+      params: [tenantId, provider, subject],
+    });
+    return rows.length > 0 ? "conflict" : "retired";
   } catch (err) {
     if (err instanceof BatchConflictError) return "conflict";
     throw err;
   }
 }
 
+/** 연결 해제 — 행만 지운다. 최초 주인 기록은 남으므로 그 sub를 다른 계정에 다시 연결할 수 없다. */
 export async function unlinkAccountOidcIdentity(db: DbDriver, tenantId: string, providerId: string, subject: string): Promise<boolean> {
   const r = await db.batch([
     { sql: "DELETE FROM directory_identities WHERE tenant_id = ? AND provider = ? AND external_key = ?", params: [tenantId, accountOidcProvider(providerId), subject] },

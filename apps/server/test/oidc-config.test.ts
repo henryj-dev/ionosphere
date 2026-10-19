@@ -29,3 +29,18 @@ describe("OIDC 공급자 설정", () => {
     }
   });
 });
+
+describe("같은 issuer 중복 (SSO 연결 기록 우회 방지)", () => {
+  test("같은 영역에서 같은 issuer를 두 id로 쓰면 기동을 거부한다", () => {
+    expect(() => oidcProvidersFromJson(JSON.stringify([base, { ...base, id: "corp2", issuer: "https://idp.ionosphere.test/" }]))).toThrow(/같은 IdP를 두 id로/);
+  });
+  test("영역이 다르면(관리 콘솔·셀프서비스) 같은 issuer를 허용한다", () => {
+    expect(oidcProvidersFromJson(JSON.stringify([base, { ...base, id: "corp-self", realm: "account", tenantId: "t1" }]))).toHaveLength(2);
+  });
+  test("account 영역은 테넌트가 다르면 허용한다", () => {
+    const a = { ...base, realm: "account", tenantId: "t1" };
+    expect(oidcProvidersFromJson(JSON.stringify([a, { ...a, id: "corp-t2", tenantId: "t2" }]))).toHaveLength(2);
+    expect(() => oidcProvidersFromJson(JSON.stringify([a, { ...a, id: "corp-t1b" }]))).toThrow(/같은 IdP를 두 id로/);
+  });
+});
+

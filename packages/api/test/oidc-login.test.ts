@@ -199,7 +199,15 @@ describe("OIDC 로그인 — 메일 계정 셀프서비스", () => {
     const { accountId } = await store.createAccount({ tenantId, email: "alice@acme.test" });
     const { accountId: elsewhere } = await store.createAccount({ tenantId: other, email: "alice@other.test" });
     await createCredential(db, { accountId, password: "pw-long-enough" });
-    await linkAccountOidcIdentity(db, other, "corp", "sub-alice", elsewhere); // 다른 테넌트 — 이 공급자의 범위 밖
+    // 다른 테넌트에 같은 sub 행이 있는 상황(공급자를 다른 테넌트로 옮겼던 경우) — 연결 명령으로는 이제 만들 수 없어
+    // (sub의 최초 주인 기록은 테넌트와 무관하게 하나다, 마이그레이션 029) 행을 직접 넣는다. 조회가 테넌트를 넘지 않는지만 본다.
+    await db.batch([
+      {
+        sql: `INSERT INTO directory_identities (id, tenant_id, provider, external_key, account_id, login_names, email, display_name, last_seen_at, status)
+              VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, 1)`,
+        params: ["01HZOTHERTENANTROW00000000", other, "oidc:corp", "sub-alice", elsewhere, "[]", Date.now()],
+      },
+    ]);
     const client = new OidcClient({ id: "corp", issuer: idp.issuer, clientId: "client-1", clientSecret: "s" });
     const server = new SelfServiceServer({
       db,

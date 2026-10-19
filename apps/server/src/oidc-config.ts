@@ -55,6 +55,12 @@ export function oidcProvidersFromJson(raw: string | undefined): ParsedOidcProvid
   }
   if (!Array.isArray(parsed)) throw new Error("IONOSPHERE_OIDC_PROVIDERS는 배열이어야 함");
   const seen = new Set<string>();
+  /**
+   * 같은 영역(그리고 account면 같은 테넌트)에서 같은 issuer를 두 id로 쓰지 못하게 한다. SSO 연결의 최초 주인 기록
+   * (마이그레이션 029)은 공급자 id로 sub를 묶는데, 같은 IdP를 새 id로 다시 등록하면 그 기록을 비켜 같은 sub를 다른 주체에
+   * 이을 수 있다(2026-10-19 리뷰). 영역이 다르면(관리 콘솔용·셀프서비스용 클라이언트를 같은 IdP에 따로 두는 흔한 구성) 허용한다.
+   */
+  const seenIssuer = new Map<string, string>();
   return parsed.map((item, i) => {
     if (item === null || typeof item !== "object" || Array.isArray(item)) throw new Error(`IONOSPHERE_OIDC_PROVIDERS[${i}]가 객체가 아님`);
     const o = item as Record<string, unknown>;
@@ -78,6 +84,10 @@ export function oidcProvidersFromJson(raw: string | undefined): ParsedOidcProvid
       mfaContract = { ...(acceptAcr ? { acceptAcr } : {}), ...(requireAmrAll ? { requireAmrAll } : {}), maxAgeSec: m.maxAgeSec };
     }
     const scopes = strList(o.scopes, "scopes", i);
+    const issuerKey = `${realm}|${tenantId ?? ""}|${str(o.issuer, "issuer", i).replace(/\/+$/, "")}`;
+    const dupOf = seenIssuer.get(issuerKey);
+    if (dupOf !== undefined) throw new Error(`IONOSPHERE_OIDC_PROVIDERS[${i}]: 같은 영역에서 issuer가 "${dupOf}"와 같다 — 같은 IdP를 두 id로 쓰지 말 것(연결 기록이 id로 묶인다)`);
+    seenIssuer.set(issuerKey, id);
     const config: OidcProviderConfig = {
       id,
       issuer: str(o.issuer, "issuer", i),
