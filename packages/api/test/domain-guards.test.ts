@@ -312,7 +312,7 @@ describe("도메인 해제 (L-7)", () => {
     const acc = await fetch(`${f.baseUrl}/v1/accounts`, {
       method: "POST",
       headers: { ...authHeader(apiKey), "content-type": "application/json" },
-      body: JSON.stringify({ email: "u@acct.test", password: "pw123456" }),
+      body: JSON.stringify({ email: "u@acct.test", password: "Pw123456!" }),
     });
     expect(acc.status).toBe(200);
     const { accountId } = (await acc.json()) as { accountId: string };

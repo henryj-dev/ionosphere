@@ -51,8 +51,11 @@ export function clientIp(req: IncomingMessage): string {
  */
 export const MAX_ADMIN_BODY_BYTES = 1024 * 1024;
 
-/** 요청 바디를 JSON으로 읽는다 — 빈 바디는 undefined, 파싱 실패는 400(HttpError)로 정규화. */
-export async function readBody(req: IncomingMessage): Promise<unknown> {
+/**
+ * 요청 바디를 JSON으로 읽는다 — 빈 바디는 undefined, 파싱 실패는 400(HttpError)로 정규화.
+ * `maxBytes`: 로그인·비밀번호 변경은 `MAX_LOGIN_BODY_BYTES`(64 KiB)로 더 좁힌다(core `limits.ts`).
+ */
+export async function readBody(req: IncomingMessage, maxBytes: number = MAX_ADMIN_BODY_BYTES): Promise<unknown> {
   /**
    * ★초과해도 **스트림은 끝까지 흘려보낸다.** 담기만 멈추면 메모리는 묶이고, 소켓은 건강하게
    * 유지된다. 다른 두 방법은 둘 다 실측에서 클라이언트를 매달리게 했다:
@@ -67,7 +70,7 @@ export async function readBody(req: IncomingMessage): Promise<unknown> {
   for await (const c of req) {
     const chunk = c as Buffer;
     total += chunk.length;
-    if (total > MAX_ADMIN_BODY_BYTES) {
+    if (total > maxBytes) {
       if (!tooLarge) {
         tooLarge = true;
         chunks.length = 0; // 이미 담은 것도 버린다 — 어차피 거절이다
@@ -76,7 +79,7 @@ export async function readBody(req: IncomingMessage): Promise<unknown> {
     }
     chunks.push(chunk);
   }
-  if (tooLarge) throw new HttpError(413, `request body too large (max ${MAX_ADMIN_BODY_BYTES} bytes)`);
+  if (tooLarge) throw new HttpError(413, `request body too large (max ${maxBytes} bytes)`);
   if (chunks.length === 0) return undefined;
   const raw = Buffer.concat(chunks).toString("utf8");
   if (raw.trim() === "") return undefined;

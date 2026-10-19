@@ -8,6 +8,7 @@
  * 마이그레이션 006이 인덱스로 의도를 증언하는데 정리 코드가 없던 것과 같은 모양의 구멍이다.
  */
 import { CREDENTIAL_KIND, ACCOUNT_STATUS, type DbDriver } from "@ionosphere/db";
+import { requirePasswordPolicy } from "./password-rule.ts";
 import { ACCOUNT_REALM, AUTH_SURFACES, createAppPassword, createCredential, createOAuthToken, listCredentials, resetTotpAndRevokeSessions, revokeCredential, revokeWebSessions, setPrimaryPassword } from "@ionosphere/store";
 import { CommandError, type Command, type CommandContext } from "./types.ts";
 
@@ -162,6 +163,7 @@ export const accountCommands: readonly Command[] = [
       if (await ctx.store.getAccountByEmail(email)) {
         throw new CommandError("conflict", `이미 존재하는 계정: ${email}`);
       }
+      requirePasswordPolicy(args.password ?? "");
       const { accountId } = await ctx.store.createAccount({ tenantId, email });
       await createCredential(ctx.db, { accountId, password: args.password! });
       return { data: { accountId }, message: `계정 생성됨: ${email} (${accountId})` };
@@ -251,6 +253,7 @@ export const accountCommands: readonly Command[] = [
       const password = args.password ?? "";
       // 빈 비밀번호는 어떤 프로토콜에서도 쓸 수 없다. 저장되면 "바꿨는데 아무도 못 들어오는" 계정이 된다.
       if (password.length === 0) throw new CommandError("invalid", "새 비밀번호가 비어 있습니다");
+      requirePasswordPolicy(password);
       // 확인과 쓰기 사이에 삭제가 끼면 store가 쓰지 않고 false를 준다.
       if (!(await setPrimaryPassword(ctx.db, acc.id, password))) {
         throw new CommandError("conflict", `계정 상태가 바뀌어 비밀번호를 바꾸지 못했습니다: ${acc.email}`);

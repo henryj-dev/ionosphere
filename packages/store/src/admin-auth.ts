@@ -10,7 +10,7 @@
 import { randomBytes } from "node:crypto";
 import { sha256hex, ulid } from "@ionosphere/core";
 import { ADMIN_STATUS, BatchConflictError, isAdminRole, type AdminRole, type DbDriver } from "@ionosphere/db";
-import { hashSecret, verifySecret } from "./auth.ts";
+import { hashSecret, matchSecret, verifySecret } from "./auth.ts";
 import {
   ADMIN_REALM,
   beginTotpEnrollment,
@@ -116,7 +116,20 @@ export async function verifyAdminPassword(db: DbDriver, username: string, passwo
     await verifySecret(password, await dummyAdminHash);
     return null;
   }
-  return (await verifySecret(password, hash)) ? rowToUser(row) : null;
+  const match = await matchSecret(password, hash);
+  if (!match) return null;
+  if (match.rehash) {
+    // 정규화 전 원문으로 맞았다 — 새 규칙(SASLprep)으로 다시 저장한다. 베스트에포트, 조건부 UPDATE.
+    void (async () => {
+      try {
+        const next = await hashSecret(password);
+        await db.batch([{ sql: "UPDATE admin_users SET password_hash = ? WHERE id = ? AND password_hash = ?", params: [next, String(row.id), hash] }]);
+      } catch {
+        /* 다음 로그인에 다시 시도한다 */
+      }
+    })();
+  }
+  return rowToUser(row);
 }
 
 /**

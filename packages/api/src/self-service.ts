@@ -59,7 +59,7 @@ import { ACCOUNT_SESSION_COOKIE, clearedSessionCookie, csrfMatches, originAllowe
 import { asRecord, clientIp, HttpError, readBody, sendJson } from "./http-util.ts";
 import { SELF_SERVICE_UI_HTML } from "./self-service-ui.ts";
 import type { OidcLoginFlow } from "./oidc-login.ts";
-import { OidcError } from "@ionosphere/core";
+import { checkPasswordPolicy, MAX_LOGIN_BODY_BYTES, OidcError } from "@ionosphere/core";
 import { ADMIN_UI_SECURITY_HEADERS } from "./admin-ui.ts";
 
 export interface SelfServiceDeps {
@@ -89,11 +89,10 @@ const SELF_COMMANDS = {
 } as const;
 type SelfCommand = keyof typeof SELF_COMMANDS;
 
-/** 셀프서비스 새 비밀번호 최소 길이. ⚠ 임시(공통 비밀번호 규칙 미확정, 2026-10-18). */
-const PROVISIONAL_MIN_PASSWORD_LENGTH = 10;
 
 /**
  * 동시에 처리하는 로그인 수 상한. 로그인 한 번이 scrypt를 두 번 태우는데(비밀번호 + 응답 시간 맞추기) 이 표면은 공개다.
+ * 정규화(SASLprep)로 모양이 바뀌는 입력이 틀리면 정규화 값·원문 두 번을 비교하므로 비밀번호 단계가 한 번 더 든다(최대 세 번).
  * IP 축 스로틀은 흩어진 봇넷 앞에서 약하므로, 넘치면 바로 503으로 돌려 CPU가 메일 처리 몫까지 먹지 않게 한다.
  * 계정이 없을 때 비용을 건너뛰는 방법은 쓰지 않는다 — 기존 계정의 틀린 비밀번호와 응답 시간이 달라져 계정 존재가 샌다.
  */
@@ -257,7 +256,7 @@ export class SelfServiceServer {
         return sendJson(res, 200, await this.run(s, "credential-revoke", { credentialId }));
       }
       if (method === "POST" && path === "/account/password") {
-        const body = asRecord(await readBody(req));
+        const body = asRecord(await readBody(req, MAX_LOGIN_BODY_BYTES));
         const current = typeof body.currentPassword === "string" ? body.currentPassword : "";
         const next = typeof body.newPassword === "string" ? body.newPassword : "";
         // 민감 작업 관문을 먼저 — 현재 비밀번호 확인이 step-up을 건너뛰는 길이 되면 안 된다.
@@ -267,10 +266,9 @@ export class SelfServiceServer {
           await this.throttle.recordFailure({ ip, account: s.account.email });
           throw new HttpError(401, "current password is wrong", "invalid_password");
         }
-        // 사용자가 직접 정하는 값이라 최소 길이를 둔다. ⚠ 수치는 임시다(공통 비밀번호 규칙 미확정).
-        if (next.length < PROVISIONAL_MIN_PASSWORD_LENGTH) {
-          throw new HttpError(400, `new password must be at least ${PROVISIONAL_MIN_PASSWORD_LENGTH} characters`, "weak_password");
-        }
+        // 공통 비밀번호 규칙(8자 이상, 4종 중 3종). 명령도 같은 규칙을 보지만, 화면이 사유를 보여 줄 수 있게 먼저 본다.
+        const rule = checkPasswordPolicy(next);
+        if (!rule.ok) throw new HttpError(400, rule.message, "weak_password");
         const result = await this.run(s, "account-password-set", { password: next });
         // 명령이 이 계정의 셀프서비스 세션을 전부 끊었다 — 쿠키도 지운다(다시 로그인).
         return sendJson(res, 200, result, { "Set-Cookie": clearedSessionCookie(ACCOUNT_SESSION_COOKIE) });
@@ -314,7 +312,7 @@ export class SelfServiceServer {
   /** 로그인 — 비밀번호·TOTP·복구 코드 실패를 구분하지 않는다(오라클 금지). 관리자 로그인과 같은 순서·비용. */
   private async login(req: IncomingMessage, res: ServerResponse, ip: string, audit: { accountId?: string; tenantId?: string; user?: string; detail: Record<string, string | number> }): Promise<void> {
     if (!originAllowed(req, this.origin)) throw new HttpError(403, "csrf check failed", "csrf");
-    const body = asRecord(await readBody(req));
+    const body = asRecord(await readBody(req, MAX_LOGIN_BODY_BYTES));
     const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
     const password = typeof body.password === "string" ? body.password : "";
     const totp = typeof body.totp === "string" ? body.totp : "";
@@ -432,7 +430,7 @@ export class SelfServiceServer {
   /** MFA 등록(일회용 등록 코드 필요)·확정(복구 코드 발급)·step-up. */
   private async mfa(req: IncomingMessage, res: ServerResponse, ip: string, path: string, s: ResolvedAccountSession): Promise<void> {
     if (req.method !== "POST") throw new HttpError(404, "not found");
-    const body = asRecord(await readBody(req));
+    const body = asRecord(await readBody(req, MAX_LOGIN_BODY_BYTES));
     const subject = { ip, account: s.account.email };
     const now = Date.now();
     if ((await this.throttle.retryAfterSeconds(subject, now)) > 0) throw new HttpError(429, "too many failed auth attempts");

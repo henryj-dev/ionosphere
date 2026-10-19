@@ -219,7 +219,7 @@ describe("관리 콘솔 — 스키마 구동", () => {
     const { body: t } = await call(baseUrl, "tenant-create", { name: "cycle-demo" });
     const tenantId = (t.data as { tenantId: string }).tenantId;
     await call(baseUrl, "domain-add", { tenantId, name: "cycle.test", preVerified: "true" });
-    await call(baseUrl, "account-create", { tenantId, email: "bob@cycle.test", password: "pw123456" });
+    await call(baseUrl, "account-create", { tenantId, email: "bob@cycle.test", password: "Pw123456!" });
 
     const suspended = await call(baseUrl, "account-suspend", { tenantId, account: "bob@cycle.test" });
     expect(suspended.status).toBe(200);

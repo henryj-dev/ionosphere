@@ -25,7 +25,16 @@ export {
   POP3_IDLE_TIMEOUT_MS,
   PREAUTH_DEADLINE_MS,
   MAX_RECEIVED_HOPS,
+  MAX_LOGIN_BODY_BYTES,
 } from "./limits.ts";
+export { saslprep, type SaslprepMode } from "./saslprep.ts";
+export {
+  checkPasswordPolicy,
+  PASSWORD_MIN_CLASSES,
+  PASSWORD_MIN_LENGTH,
+  type PasswordPolicyResult,
+  type PasswordPolicyViolation,
+} from "./password-policy.ts";
 export type { MaildropLock } from "./maildrop-lock.ts";
 export {
   decodeSaslBase64,
@@ -92,7 +101,6 @@ export {
 export {
   buildServerFirst,
   deriveScramKeys,
-  normalizePassword,
   parseClientFirst,
   serverNonce,
   verifyClientFinal,

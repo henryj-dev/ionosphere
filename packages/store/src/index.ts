@@ -11,7 +11,9 @@ export {
   listCredentials,
   revokeCredential,
   setPrimaryPassword,
+  matchSecret,
   verifySecret,
+  type SecretMatch,
 } from "./auth.ts";
 export {
   isBlobGcMode,

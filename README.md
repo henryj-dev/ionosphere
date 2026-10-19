@@ -512,7 +512,7 @@ export IONOSPHERE_MASTER_KEY="$(openssl rand -hex 32)"
 node apps/server/src/cli.ts help
 node apps/server/src/cli.ts help domain-add
 node apps/server/src/cli.ts domain-add example.com
-node apps/server/src/cli.ts account-create alice@example.com 'change-this-password'
+node apps/server/src/cli.ts account-create alice@example.com 'Change-this-passw0rd'
 ~~~
 
 General syntax:

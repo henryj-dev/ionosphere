@@ -191,7 +191,7 @@ describe("AdminApiServer", () => {
     const createRes = await fetch(`${f.baseUrl}/v1/accounts`, {
       method: "POST",
       headers: { ...authHeader(apiKey), "content-type": "application/json" },
-      body: JSON.stringify({ email: "user@acme.test", password: "s3cret-pw" }),
+      body: JSON.stringify({ email: "user@acme.test", password: "S3cret-pw" }),
     });
     expect(createRes.status).toBe(200);
     const { accountId } = (await createRes.json()) as { accountId: string };
@@ -203,7 +203,7 @@ describe("AdminApiServer", () => {
     expect(list[0]!.email).toBe("user@acme.test");
     expect(list[0]!.status).toBe(1);
 
-    const authResult = await authenticate(f.db, "user@acme.test", "s3cret-pw", "imap");
+    const authResult = await authenticate(f.db, "user@acme.test", "S3cret-pw", "imap");
     expect(authResult?.accountId).toBe(accountId);
 
     const wrongPw = await authenticate(f.db, "user@acme.test", "nope", "imap");
@@ -217,7 +217,7 @@ describe("AdminApiServer", () => {
     const createRes = await fetch(`${f.baseUrl}/v1/accounts`, {
       method: "POST",
       headers: { ...authHeader(apiKey), "content-type": "application/json" },
-      body: JSON.stringify({ email: "gone@acme.test", password: "pw12345" }),
+      body: JSON.stringify({ email: "gone@acme.test", password: "Pw12345!" }),
     });
     const { accountId } = (await createRes.json()) as { accountId: string };
 
@@ -246,7 +246,7 @@ describe("AdminApiServer", () => {
     const squat = await fetch(`${f.baseUrl}/v1/accounts`, {
       method: "POST",
       headers: { ...authHeader(attacker.apiKey), "content-type": "application/json" },
-      body: JSON.stringify({ email: "ceo@victim.test", password: "pw12345" }),
+      body: JSON.stringify({ email: "ceo@victim.test", password: "Pw12345!" }),
     });
     expect(squat.status).toBe(404);
 
@@ -254,7 +254,7 @@ describe("AdminApiServer", () => {
     const legit = await fetch(`${f.baseUrl}/v1/accounts`, {
       method: "POST",
       headers: { ...authHeader(victim.apiKey), "content-type": "application/json" },
-      body: JSON.stringify({ email: "ceo@victim.test", password: "pw12345" }),
+      body: JSON.stringify({ email: "ceo@victim.test", password: "Pw12345!" }),
     });
     expect(legit.status).toBe(200);
   });
@@ -272,7 +272,7 @@ describe("AdminApiServer", () => {
     const res = await fetch(`${f.baseUrl}/v1/accounts`, {
       method: "POST",
       headers: { ...authHeader(apiKey), "content-type": "application/json" },
-      body: JSON.stringify({ email: "user@pending.test", password: "pw12345" }),
+      body: JSON.stringify({ email: "user@pending.test", password: "Pw12345!" }),
     });
     expect(res.status).toBe(409);
   });
@@ -689,7 +689,7 @@ describe("AdminApiServer", () => {
   test("앱 비밀번호 — 발급 평문은 응답 1회만, 목록엔 절대 없음, 폐기하면 인증 실패", async () => {
     const f = await setup();
     const { apiKey } = await bootstrapTenant(f);
-    const accountId = await createAccount(f, apiKey, "ap@acme.test", "primary-pw");
+    const accountId = await createAccount(f, apiKey, "ap@acme.test", "Primary-pw1");
 
     const createRes = await fetch(`${f.baseUrl}/v1/accounts/${accountId}/app-passwords`, {
       method: "POST",
@@ -726,17 +726,36 @@ describe("AdminApiServer", () => {
 
     // 폐기 후에는 그 앱 비밀번호로 인증 불가, 기본 비밀번호는 그대로 살아 있어야 한다
     expect(await authenticate(f.db, "ap@acme.test", created.password, "imap")).toBeNull();
-    expect((await authenticate(f.db, "ap@acme.test", "primary-pw", "imap"))?.accountId).toBe(accountId);
+    expect((await authenticate(f.db, "ap@acme.test", "Primary-pw1", "imap"))?.accountId).toBe(accountId);
 
     const afterRes = await fetch(`${f.baseUrl}/v1/accounts/${accountId}/app-passwords`, { headers: authHeader(apiKey) });
     expect(await afterRes.json()).toEqual([]);
+  });
+
+  test("공통 비밀번호 규칙 — 계정 생성·비밀번호 변경 모두 8자·3종 미만을 거절한다", async () => {
+    const f = await setup();
+    const { apiKey } = await bootstrapTenant(f);
+    await provisionVerifiedDomain(f, apiKey, "acme.test");
+    const weak = await fetch(`${f.baseUrl}/v1/accounts`, {
+      method: "POST",
+      headers: { ...authHeader(apiKey), "content-type": "application/json" },
+      body: JSON.stringify({ email: "weak@acme.test", password: "abcdefghij" }),
+    });
+    expect(weak.status).toBe(400);
+    const accountId = await createAccount(f, apiKey, "rule@acme.test", "Rule-pw-1");
+    const res = await fetch(`${f.baseUrl}/v1/accounts/${accountId}/password`, {
+      method: "POST",
+      headers: { ...authHeader(apiKey), "content-type": "application/json" },
+      body: JSON.stringify({ password: "short1A" }),
+    });
+    expect(res.status).toBe(400);
   });
 
   test("비밀번호 변경 — 옛 비밀번호 무효, 앱 비밀번호 유지, 남의 테넌트는 404", async () => {
     const f = await setup();
     const { apiKey } = await bootstrapTenant(f);
     const { apiKey: otherKey } = await bootstrapTenant(f);
-    const accountId = await createAccount(f, apiKey, "pw@acme.test", "old-pw");
+    const accountId = await createAccount(f, apiKey, "pw@acme.test", "Old-pw-1");
     const app = (await (
       await fetch(`${f.baseUrl}/v1/accounts/${accountId}/app-passwords`, {
         method: "POST",
@@ -749,21 +768,21 @@ describe("AdminApiServer", () => {
     const foreign = await fetch(`${f.baseUrl}/v1/accounts/${accountId}/password`, {
       method: "POST",
       headers: { ...authHeader(otherKey), "content-type": "application/json" },
-      body: JSON.stringify({ password: "hijack" }),
+      body: JSON.stringify({ password: "Hijack-pw1" }),
     });
     expect(foreign.status).toBe(404);
 
     const res = await fetch(`${f.baseUrl}/v1/accounts/${accountId}/password`, {
       method: "POST",
       headers: { ...authHeader(apiKey), "content-type": "application/json" },
-      body: JSON.stringify({ password: "new-pw" }),
+      body: JSON.stringify({ password: "New-pw-1" }),
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ accountId });
 
-    expect(await authenticate(f.db, "pw@acme.test", "old-pw", "imap")).toBeNull();
-    expect(await authenticate(f.db, "pw@acme.test", "hijack", "imap")).toBeNull();
-    expect((await authenticate(f.db, "pw@acme.test", "new-pw", "imap"))?.accountId).toBe(accountId);
+    expect(await authenticate(f.db, "pw@acme.test", "Old-pw-1", "imap")).toBeNull();
+    expect(await authenticate(f.db, "pw@acme.test", "Hijack-pw1", "imap")).toBeNull();
+    expect((await authenticate(f.db, "pw@acme.test", "New-pw-1", "imap"))?.accountId).toBe(accountId);
     expect((await authenticate(f.db, "pw@acme.test", app.password, "imap"))?.accountId).toBe(accountId);
 
     // 빈 비밀번호는 저장하지 않는다.
@@ -773,14 +792,14 @@ describe("AdminApiServer", () => {
       body: JSON.stringify({ password: "" }),
     });
     expect(empty.status).toBe(400);
-    expect((await authenticate(f.db, "pw@acme.test", "new-pw", "imap"))?.accountId).toBe(accountId);
+    expect((await authenticate(f.db, "pw@acme.test", "New-pw-1", "imap"))?.accountId).toBe(accountId);
   });
 
   test("앱 비밀번호 — 테넌트 격리: 남의 계정에 발급/조회/폐기 불가(404)", async () => {
     const f = await setup();
     const { apiKey: keyA } = await bootstrapTenant(f);
     const { apiKey: keyB } = await bootstrapTenant(f);
-    const accountA = await createAccount(f, keyA, "victim@acme.test", "pw-a");
+    const accountA = await createAccount(f, keyA, "victim@acme.test", "Pw-a-test1");
 
     const madeA = await fetch(`${f.baseUrl}/v1/accounts/${accountA}/app-passwords`, {
       method: "POST",
@@ -814,7 +833,7 @@ describe("AdminApiServer", () => {
   test("DELETE /v1/credentials/:id — 기본 비밀번호(kind=0)는 폐기 거부(계정 잠금 방지)", async () => {
     const f = await setup();
     const { apiKey } = await bootstrapTenant(f);
-    const accountId = await createAccount(f, apiKey, "lock@acme.test", "primary-pw");
+    const accountId = await createAccount(f, apiKey, "lock@acme.test", "Primary-pw1");
     const { rows } = await f.db.query({
       sql: "SELECT id FROM credentials WHERE account_id = ? AND kind = 0",
       params: [accountId],
@@ -823,13 +842,13 @@ describe("AdminApiServer", () => {
 
     const res = await fetch(`${f.baseUrl}/v1/credentials/${primaryId}`, { method: "DELETE", headers: authHeader(apiKey) });
     expect(res.status).toBe(400);
-    expect((await authenticate(f.db, "lock@acme.test", "primary-pw", "imap"))?.accountId).toBe(accountId);
+    expect((await authenticate(f.db, "lock@acme.test", "Primary-pw1", "imap"))?.accountId).toBe(accountId);
   });
 
   test("목록 응답에 id 포함 — 콘솔이 행마다 계정/도메인을 지목할 수 있어야 한다", async () => {
     const f = await setup();
     const { apiKey } = await bootstrapTenant(f);
-    const accountId = await createAccount(f, apiKey, "row@acme.test", "pw");
+    const accountId = await createAccount(f, apiKey, "row@acme.test", "Passw0rd!");
     const domainRes = await fetch(`${f.baseUrl}/v1/domains`, {
       method: "POST",
       headers: { ...authHeader(apiKey), "content-type": "application/json" },
@@ -892,7 +911,7 @@ describe("AdminApiServer", () => {
     await fetch(`${f.baseUrl}/v1/accounts`, {
       method: "POST",
       headers: { ...authHeader(apiKey), "content-type": "application/json" },
-      body: JSON.stringify({ email: "u1@acme.test", password: "pw" }),
+      body: JSON.stringify({ email: "u1@acme.test", password: "Passw0rd!" }),
     });
     const res = await fetch(`${f.baseUrl}/v1/usage`, { headers: authHeader(apiKey) });
     expect(res.status).toBe(200);
@@ -924,7 +943,7 @@ describe("AdminApiServer", () => {
     const create = await fetch(`${f.baseUrl}/v1/accounts`, {
       method: "POST",
       headers: { ...authHeader(readKey), "content-type": "application/json" },
-      body: JSON.stringify({ email: "nope@acme.test", password: "pw" }),
+      body: JSON.stringify({ email: "nope@acme.test", password: "Passw0rd!" }),
     });
     expect(create.status).toBe(403);
 
@@ -947,7 +966,7 @@ describe("AdminApiServer", () => {
     const create = await fetch(`${f.baseUrl}/v1/accounts`, {
       method: "POST",
       headers: { ...authHeader(writeKey), "content-type": "application/json" },
-      body: JSON.stringify({ email: "ok@acme.test", password: "pw" }),
+      body: JSON.stringify({ email: "ok@acme.test", password: "Passw0rd!" }),
     });
     expect(create.status).toBe(200);
   });
@@ -1081,8 +1100,8 @@ describe("AdminApiServer", () => {
     const f = await setup();
     const { apiKey, tenantId } = await bootstrapTenant(f);
     await provisionVerifiedDomain(f, apiKey, "acme.test");
-    const keepId = await createAccount(f, apiKey, "keep@acme.test", "pw");
-    const goneId = await createAccount(f, apiKey, "gone@acme.test", "pw");
+    const keepId = await createAccount(f, apiKey, "keep@acme.test", "Passw0rd!");
+    const goneId = await createAccount(f, apiKey, "gone@acme.test", "Passw0rd!");
 
     const aliasRes = await fetch(`${f.baseUrl}/v1/aliases`, {
       method: "POST",
@@ -1172,7 +1191,7 @@ describe("AdminApiServer", () => {
     const f = await setup();
     const { apiKey } = await bootstrapTenant(f);
     await provisionVerifiedDomain(f, apiKey, "acme.test");
-    const goneId = await createAccount(f, apiKey, "gone2@acme.test", "pw");
+    const goneId = await createAccount(f, apiKey, "gone2@acme.test", "Passw0rd!");
     await fetch(`${f.baseUrl}/v1/accounts/${goneId}`, { method: "DELETE", headers: authHeader(apiKey) });
 
     const res = await fetch(`${f.baseUrl}/v1/aliases`, {

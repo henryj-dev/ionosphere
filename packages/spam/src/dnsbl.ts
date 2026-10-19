@@ -5,7 +5,7 @@
  * 쓸 수 있다(호출자가 zones 배열에 negative-weight 항목을 섞어 넣으면 됨 — 이 모듈은 부호를
  * 그대로 합산할 뿐 특별 취급하지 않는다).
  *
- * ⚠️ CRITICAL — 프로덕션 전제조건 (PROTOCOLS.md §7.1 필독):
+ * ⚠ CRITICAL — 프로덕션 전제조건 (PROTOCOLS.md §7.1 필독):
  * Spamhaus 등 주요 DNSBL은 **Google(8.8.8.8)/Cloudflare(1.1.1.1) 같은 퍼블릭 리졸버를 경유한
  * 조회를 차단**한다. 차단되면 응답이 조용히 "미등재"로만 나오므로(예외를 던지지 않음 —
  * DnsNotFoundError로 정상 응답과 구분이 안 됨) 겉보기엔 정상 작동하는 것처럼 보이지만
