@@ -338,7 +338,11 @@ Bearer 토큰 입력 칸은 없앴다. API 키(`api-key-create`)는 REST 자동�
   - 응답의 acr이 목록에 있거나 amr에 지정한 값이 모두 있고, `auth_time`이 N초 안이면 그 로그인을 MFA로 인정한다.
   - 요청한 값(acr_values·max_age)이 아니라 **응답의 클레임**으로만 판정한다.
   - 계약이 없거나 응답이 충족하지 못하면 로컬 TOTP를 묻는다(생략·폴백 없음).
-  - ⚠ lodestar는 지금 ID 토큰에 amr이 없고 acr에 신뢰 기기가 섞여, TOTP 계약을 적을 수 없다. 계약 없이 쓰고 로컬 TOTP를 요구한다.
+  - lodestar(관리 콘솔 SSO): `acr`이 MFA(`https://refeds.org/profile/mfa`)이고 인증 시각이 12시간(콘솔 세션 절대 수명) 안이면 인정한다 —
+    `{"acceptAcr":["https://refeds.org/profile/mfa"],"maxAgeSec":43200}`. lodestar는 **신뢰 기기 로그인도** 이 acr을 주므로,
+    그 경우에도 콘솔 6자리를 묻지 않는다(2026-10-19 사용자 결정 — 편의를 위해 신뢰 기기까지 lodestar 판단에 맡긴다).
+    TOTP 증거만 받으려면 lodestar가 amr을 싣게 된 뒤(`amr`에 `totp`, 신뢰 기기는 `trusted_device`) `requireAmrAll: ["totp"]`로 바꾼다.
+  - 계약이 있어도 민감·파괴 명령의 재확인(step-up)은 로컬 TOTP다 — 콘솔 TOTP는 등록해 둬야 한다.
 - 지원 제한: 민감 작업의 재확인(step-up)은 언제나 **로컬 TOTP**다(IdP 재인증 step-up은 없다). 그래서 관리 콘솔 관리자는
   IdP 계약을 충족해도 로컬 TOTP를 먼저 등록해야 한다. 셀프서비스는 미등록이면 목록만 볼 수 있다(D3).
 - IdP에서 사용자를 정지해도 이미 열린 세션은 그대로다(IdP 철회 신호를 받지 않는다). 세션 수명 안에서 유지되고,
