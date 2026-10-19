@@ -2,7 +2,7 @@
 
 > 상태: **동결** (v1 → 이중 리뷰 → v2 → 이중 재검증 → v2.1) · 전제: [PLAN.md](../PLAN.md) + [PROTOCOLS.md](PROTOCOLS.md) §0
 >
-> **적용된 마이그레이션(2026-10-19 기준 028까지)** — 정본은 `packages/db/src/migrations/`다.
+> **적용된 마이그레이션(2026-10-19 기준 029까지)** — 정본은 `packages/db/src/migrations/`다.
 > 코어 DDL은 001이고, 그 뒤는 아래 절에 따로 적었다:
 >
 > | # | 이름 | 어디에 |
@@ -35,6 +35,7 @@
 > | 026 | account_web | **§4-3**(같은 규칙을 메일 계정 영역에 둔 것) |
 > | 027 | oidc | **§4-3**(외부 OIDC 연결·인가 상태) |
 > | 028 | auth_failures | **§4-4** |
+> | 029 | identity_tombstones | **§4-5** |
 >
 > ⚠ 새 마이그레이션을 넣으면 **이 표와 해당 절을 같이 갱신할 것.** 009·010이 한동안 코드에만
 > 있고 이 문서에 없었다 — "동결 스키마"를 자처하는 문서가 실제 테이블을 빠뜨리면, 그것을 읽고
@@ -396,6 +397,24 @@ CREATE INDEX ix_auth_failures_last ON auth_failures(last_fail_at);
 - 차단이 확인된 버킷은 풀릴 때까지 다시 읽지 않는다(프로세스 캐시) — 공격 중인 시도마다 DB 왕복이 붙지 않게.
   JMAP은 인증 캐시를 놓친 요청에서만 이 테이블을 읽는다.
 - 오래된 행은 스로틀이 10분에 한 번 지운다(`last_fail_at`이 초기화 기준보다 오래된 것).
+
+### 4-5. SSO 연결 식별자 묘비 (마이그레이션 029)
+
+```sql
+CREATE TABLE identity_tombstones (
+  realm        VARCHAR(16) NOT NULL,   -- 'admin'(admin_identities) | 'account'(directory_identities의 oidc: 행)
+  provider     VARCHAR(64) NOT NULL,   -- 설정의 공급자 id(issuer를 고정한다). account 영역은 'oidc:<id>'
+  subject      VARCHAR(255) NOT NULL,  -- IdP sub
+  owner_id     VARCHAR(26) NOT NULL,   -- 끊기 전 주인(관리자 또는 메일 계정 id)
+  retired_at   BIGINT NOT NULL,
+  PRIMARY KEY (realm, provider, subject)
+);
+```
+
+연결을 끊으면 행을 지우면서 같은 배치에서 묘비를 남긴다. 같은 sub를 **다른 주체**에 다시 연결하는 것은 거절하고,
+원래 주인에게 다시 잇는 것은 허용한다(회원 공통 수치 결정 9 — IdP가 sub를 재활용하거나 운영자가 실수해도 예전 사람의
+로그인이 새 주체로 들어오지 않게). 개인정보가 아니라 불투명 식별자뿐이라 탈퇴 뒤에도 남긴다.
+메일 계정을 삭제해도 연결 행은 남고(계정이 활성이 아니라 로그인에 쓰이지 않는다) PK가 다른 계정으로의 연결을 막는다.
 
 ## 5. DDL — 메일 스토어 코어
 

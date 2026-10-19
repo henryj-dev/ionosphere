@@ -358,7 +358,7 @@ SPF+DKIM pass · From 도메인 정렬(SPF 또는 DKIM) · DMARC p=none 이상 �
 | 관리 주체 | 사람: `admin_users`(메일 계정과 별개, TOTP 필수, 서버 세션). 서비스: `api_keys`(read/write/admin). 정적 `rootToken`은 부트스트랩 전용(활성 owner가 생기면 경고) | `store/admin-auth.ts`, `api/server.ts` |
 | 웹 MFA | TOTP(RFC 6238, 봉인 저장), 일회용 등록 코드, 복구 코드, 연속 실패 지수 잠금 — 관리자·셀프서비스 공용 | `store/web-mfa.ts` |
 | 셀프서비스 | 기본 비밀번호로만 로그인. 민감 작업(비밀번호 변경·앱 비밀번호)은 TOTP + 최근 MFA. 기본 꺼짐 | `api/self-service.ts` |
-| 외부 OIDC | 웹 로그인. 연결된 sub만(자동 연결 없음). IdP MFA는 공급자 계약(acr·amr·auth_time)으로만 인정 | `core/oidc-client.ts`, `api/oidc-login.ts` |
+| 외부 OIDC | 웹 로그인. 연결된 sub만(자동 연결 없음). 끊은 sub는 다른 주체에 다시 연결 불가(묘비). IdP MFA는 공급자 계약(acr·amr·auth_time)으로만 인정 | `core/oidc-client.ts`, `api/oidc-login.ts` |
 | 외부 access token | 메일 클라이언트 XOAUTH2/OAUTHBEARER. 메일 전용 aud·scope·typ, sub 연결, 만료에 연결 종료. introspection 없음 | `apps/server/src/mail-oauth.ts` |
 
 ---
