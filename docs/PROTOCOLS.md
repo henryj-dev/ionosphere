@@ -345,6 +345,7 @@ SPF+DKIM pass · From 도메인 정렬(SPF 또는 DKIM) · DMARC p=none 이상 �
 | 가입 | 관리자 생성만(`account-create`, 콘솔 관리자는 `admin-user-create`). 공개 가입·초대·JIT 없음 | `admin-cmd/accounts.ts`, `admin-users.ts` |
 | 식별자 | `accounts.id`(ULID) 불변, `email` 전역 유일·소문자. 주소 변경 명령 없음 | SCHEMA §4 |
 | 저장 | scrypt(N=16384,r=8,p=1) + SCRAM-SHA-256 세그먼트 병기. 해시 전 SASLprep 정규화(정규화 전 기존 해시는 원문으로 확인 뒤 재저장) | `store/auth.ts`, `core/saslprep.ts` |
+| 앱 비밀번호 | 서버 생성 소문자 28자(≈131비트), 한 번만 노출, 여러 개·개별 철회·마지막 사용 시각. `sha256$` 저장, 로그인 때 해시로 바로 조회(scrypt 없음). 이전 16자는 계속 받음 | `store/auth.ts` |
 | 비밀번호 규칙 | 사람이 정하는 비밀번호만: 8자 이상, 4종 가운데 3종 이상, 최대 길이 없음. 로그인·변경 본문 64 KiB 상한. 기존 비밀번호는 막지 않음 | `core/password-policy.ts` |
 | 기본 비밀번호 교체 | `account-password-set` — kind=0 전부 교체, **앱 비밀번호·OAuth 토큰은 유지** | `setPrimaryPassword` |
 | 부가 자격증명 철회 | `credential-revoke` 즉시. 기본 비밀번호는 철회 불가(정지를 쓴다) | `revokeCredential` |

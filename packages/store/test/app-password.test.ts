@@ -14,9 +14,9 @@ async function setup(): Promise<{ db: DbDriver; accountId: string }> {
 }
 
 describe("generateAppPassword", () => {
-  test("4-4-4-4 소문자 형식, 매번 다름", () => {
+  test("소문자 28자(4자씩 7묶음, 약 131비트) 형식, 매번 다름", () => {
     const a = generateAppPassword();
-    expect(a).toMatch(/^[a-z]{4}-[a-z]{4}-[a-z]{4}-[a-z]{4}$/);
+    expect(a).toMatch(/^[a-z]{4}(-[a-z]{4}){6}$/);
     expect(generateAppPassword()).not.toBe(a);
   });
 });
