@@ -105,6 +105,7 @@ export { getOrLoadListing, listingCacheKey, ListingCache, LISTING_CACHE_LIMITS, 
 export { queryInChunks } from "./chunk.ts";
 
 export { runRetention, type RetentionOptions, type RetentionResult } from "./retention.ts";
+export { ACCOUNT_DRAIN_DEADLINE_MS, ACCOUNT_DRAIN_GRACE_MS, accountDrainStatus, drainAccount, listDrainingAccounts, type AccountDrainResult, type AccountDrainStatus } from "./account-drain.ts";
 export {
   claimVacationReply,
   getVacationResponse,

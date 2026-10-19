@@ -198,6 +198,16 @@ SQLite(`node:sqlite` 내장) · PostgreSQL(`pg`) · MySQL(`mysql2`) · Cloudflar
 - **감사 로그**: `IONOSPHERE_AUDIT`로 켠다. 로컬 보관 + S3 전송(`IONOSPHERE_AUDIT_S3_*`)을 지원한다.
 - **구조화 로그**: `IONOSPHERE_LOG_FORMAT=json`.
 
+- **계정 삭제 드레인**: `account-delete` 뒤 리퍼(5분 주기)가 메일·자격증명·sieve를 지우고 계정 행까지 없앤다
+  (SCHEMA §7-7). 회원 공통 기준은 **24시간 안**이다. `ionosphere_account_drain_overdue`가 0보다 크면 경보를 걸 것 —
+  마감을 넘긴 탈퇴 계정이 있다는 뜻이다. `ionosphere_account_drain_pending`은 진행 중인 수다.
+  두 값은 공유 DB에서 세므로 **서버마다 같은 값**을 낸다 — 경보는 `sum`이 아니라 `max`로 걸 것.
+  삭제 뒤 2분은 기다렸다 시작한다(열린 JMAP 세션의 늦은 쓰기가 계정 행이 사라진 뒤 고아로 남지 않게).
+  처리량은 서버당 tick마다 계정 10개 × 1,960통이다. 그보다 훨씬 큰 계정은 24시간을 넘길 수 있다 — 그게 overdue 경보다.
+  ⚠ 블롭 파일은 블롭 GC가 회수한다. `IONOSPHERE_BLOB_GC=off`면 본문 파일이 저장소에 남는다(DB 참조는 지워진다).
+- **백업 보관**: `scripts/backup.sh`가 `IONOSPHERE_BACKUP_RETAIN_DAYS`(기본 14일)보다 오래된 묶음을 지운다.
+  원격 백업 저장소에 수명 규칙을 따로 두지 않았다면 **이 삭제만이 보관 상한**이다 — 그 작업이 멈추면 백업이 계속 쌓인다.
+
 관측에서 반복되는 함정 하나: **"돌았는데 할 일이 없었다"와 "아예 안 돌았다"가 겉으로 같다**
 (블롭 GC 같은 주기 작업). 주기 작업을 믿기 전에 실행 자체를 세는 지표가 있는지 볼 것.
 

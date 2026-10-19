@@ -465,7 +465,9 @@ export class Store {
   /** 삭제(툼스톤 status=2) 대기 메일함 목록 — 2단계 리퍼가 배치로 수거. */
   async listReapableMailboxes(limit = 50): Promise<{ id: string; accountId: string }[]> {
     const { rows } = await this.db.query({
-      sql: "SELECT id, account_id FROM mailboxes WHERE status = 2 ORDER BY highestmodseq LIMIT ?",
+      // 활성 계정의 툼스톤만 — 삭제 중인 계정의 메일함은 계정 드레인이 지운다. 섞이면 reapMailbox가
+      // mustGetAccount에서 매번 실패하며 LIMIT 자리를 차지해 다른 계정의 수거를 굶긴다.
+      sql: "SELECT m.id AS id, m.account_id AS account_id FROM mailboxes m JOIN accounts a ON a.id = m.account_id WHERE m.status = 2 AND a.status = 1 ORDER BY m.highestmodseq LIMIT ?",
       params: [limit],
     });
     return rows.map((r) => ({ id: String(r.id), accountId: String(r.account_id) }));

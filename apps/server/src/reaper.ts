@@ -4,7 +4,7 @@
  * WebhookWorker/MtaWorker와 동형(interval + 재진입 가드 + 수동 tick).
  */
 import { noopLogger, type Logger } from "@ionosphere/core";
-import { runRetention, type RetentionOptions, type Store } from "@ionosphere/store";
+import { drainAccount, listDrainingAccounts, runRetention, type RetentionOptions, type Store } from "@ionosphere/store";
 import { runReports, type ReportOptions } from "./reports.ts";
 import type { DbDriver } from "@ionosphere/db";
 
@@ -39,6 +39,13 @@ export interface MailboxReaperOptions {
    * 리퍼 주기(5분)와 무관하게 정확히 한 번이다.
    */
   reports?: Omit<ReportOptions, "now">;
+  /**
+   * 계정 삭제 드레인(SCHEMA §7-7) — 지정 시 status=2 계정의 메일·자격증명·sieve를 지우고 계정 행까지 없앤다.
+   *
+   * ★리퍼에 붙이는 이유: 메일함 툼스톤 수거와 같은 「삭제의 2단계」다. 회원 공통 기준이 24시간 안 드레인이고
+   * 리퍼 주기가 5분이라 넉넉하다. 마감 초과는 `ionosphere_account_drain_overdue` 지표가 알린다.
+   */
+  accountDrain?: { db: DbDriver; perTick?: number };
 }
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
@@ -51,6 +58,7 @@ export class MailboxReaper {
   private readonly maildropLock?: { sweepExpired(now?: number, graceMs?: number): Promise<number> };
   private readonly retention?: RetentionOptions & { db: DbDriver };
   private readonly reports?: Omit<ReportOptions, "now">;
+  private readonly accountDrain?: { db: DbDriver; perTick?: number };
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
 
@@ -62,6 +70,7 @@ export class MailboxReaper {
     if (opts.maildropLock) this.maildropLock = opts.maildropLock;
     if (opts.retention) this.retention = opts.retention;
     if (opts.reports) this.reports = opts.reports;
+    if (opts.accountDrain) this.accountDrain = opts.accountDrain;
   }
 
   start(): void {
@@ -96,6 +105,7 @@ export class MailboxReaper {
           this.log.warn("reap failed", { mailboxId: t.id, error: err instanceof Error ? err.message : String(err) });
         }
       }
+      if (this.accountDrain) await this.drainAccounts(this.accountDrain);
       // 만료 락 정리 — 실패해도 메일함 수거는 이미 끝났으므로 삼킨다(부가 작업).
       if (this.maildropLock) {
         try {
@@ -137,6 +147,29 @@ export class MailboxReaper {
       return reaped;
     } finally {
       this.running = false;
+    }
+  }
+
+  /**
+   * 삭제 중인 계정을 오래된 것부터 드레인한다. 계정 하나의 실패가 다른 계정을 막지 않게 따로 잡는다.
+   * 큰 계정은 한 번에 다 못 지운다(`drainAccount`의 쪽 상한) — 다음 tick이 이어 간다.
+   */
+  private async drainAccounts(opts: { db: DbDriver; perTick?: number }): Promise<void> {
+    let ids: string[];
+    try {
+      ids = await listDrainingAccounts(opts.db, opts.perTick ?? 10);
+    } catch (err) {
+      this.log.warn("계정 드레인 목록 실패", { error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+    for (const accountId of ids) {
+      try {
+        const r = await drainAccount(opts.db, accountId);
+        if (r.done) this.log.info("계정 드레인 완료", { accountId, messages: r.messages });
+        else if (r.messages > 0) this.log.info("계정 드레인 진행", { accountId, messages: r.messages });
+      } catch (err) {
+        this.log.warn("계정 드레인 실패", { accountId, error: err instanceof Error ? err.message : String(err) });
+      }
     }
   }
 }

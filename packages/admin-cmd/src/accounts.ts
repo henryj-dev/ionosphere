@@ -193,9 +193,16 @@ export const accountCommands: readonly Command[] = [
         // 삭제 드레인은 편도다 — 정지로 되돌린 것처럼 보이게 두면 운영자가 복구됐다고 오해한다.
         throw new CommandError("conflict", `삭제 중인 계정은 정지할 수 없습니다: ${acc.email}`, "삭제는 되돌릴 수 없습니다");
       }
-      await ctx.db.batch([
-        { sql: "UPDATE accounts SET status = ? WHERE id = ? AND tenant_id = ?", params: [ACCOUNT_STATUS.suspended, acc.id, tenantId] },
+      const updated = await ctx.db.batch([
+        /**
+         * ★삭제 중(2)이 아닐 때만 — 위의 확인과 이 쓰기 사이에 account-delete가 끼면 status=2를 덮어써,
+         * 드레인이 반쯤 지운(자격증명·메일함이 없는) 계정이 "활성"으로 되살아난다(2026-10-19 리뷰).
+         */
+        { sql: `UPDATE accounts SET status = ? WHERE id = ? AND tenant_id = ? AND status != ${ACCOUNT_STATUS.deleting}`, params: [ACCOUNT_STATUS.suspended, acc.id, tenantId] },
       ]);
+      if (updated[0]!.changes === 0) {
+        throw new CommandError("conflict", `계정 상태가 바뀌어 정지하지 못했습니다: ${acc.email}`, "삭제가 시작됐을 수 있습니다 — account-list로 확인하십시오");
+      }
       return { data: { accountId: acc.id, status: ACCOUNT_STATUS.suspended }, message: `정지됨: ${acc.email} (account-activate로 해제)` };
     },
   },
@@ -214,9 +221,16 @@ export const accountCommands: readonly Command[] = [
       if (acc.status === ACCOUNT_STATUS.deleting) {
         throw new CommandError("conflict", `삭제 중인 계정은 되살릴 수 없습니다: ${acc.email}`, "리퍼가 이미 메일함·자격증명을 드레인했습니다");
       }
-      await ctx.db.batch([
-        { sql: "UPDATE accounts SET status = ? WHERE id = ? AND tenant_id = ?", params: [ACCOUNT_STATUS.active, acc.id, tenantId] },
+      const updated = await ctx.db.batch([
+        /**
+         * ★삭제 중(2)이 아닐 때만 — 위의 확인과 이 쓰기 사이에 account-delete가 끼면 status=2를 덮어써,
+         * 드레인이 반쯤 지운(자격증명·메일함이 없는) 계정이 "활성"으로 되살아난다(2026-10-19 리뷰).
+         */
+        { sql: `UPDATE accounts SET status = ? WHERE id = ? AND tenant_id = ? AND status != ${ACCOUNT_STATUS.deleting}`, params: [ACCOUNT_STATUS.active, acc.id, tenantId] },
       ]);
+      if (updated[0]!.changes === 0) {
+        throw new CommandError("conflict", `계정 상태가 바뀌어 재활성하지 못했습니다: ${acc.email}`, "삭제가 시작됐을 수 있습니다 — account-list로 확인하십시오");
+      }
       return { data: { accountId: acc.id, status: ACCOUNT_STATUS.active }, message: `활성화됨: ${acc.email}` };
     },
   },
@@ -319,7 +333,14 @@ export const accountCommands: readonly Command[] = [
        * FK 미사용 정책(SCHEMA §1-4)이라 DB가 대신 지워 주지 않는다. 한 배치라 중간 상태가 안 보인다.
        */
       const results = await ctx.db.batch([
-        { sql: "UPDATE accounts SET status = ? WHERE id = ? AND tenant_id = ?", params: [ACCOUNT_STATUS.deleting, acc.id, tenantId] },
+        /**
+         * deleting_since — 리퍼의 계정 드레인이 24시간 마감을 이 시각부터 잰다(마이그레이션 030).
+         * 이미 삭제 중이면 덮어쓰지 않는다(COALESCE) — 다시 눌러 마감을 늦추지 못하게.
+         */
+        {
+          sql: "UPDATE accounts SET status = ?, deleting_since = COALESCE(deleting_since, ?) WHERE id = ? AND tenant_id = ?",
+          params: [ACCOUNT_STATUS.deleting, Date.now(), acc.id, tenantId],
+        },
         {
           // 테넌트 사슬을 타 남의 계정 목적지를 지우지 않게 한다(accountId만으로 지우면 인가가 샌다).
           sql: `DELETE FROM address_targets WHERE account_id IN

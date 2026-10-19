@@ -352,7 +352,7 @@ SPF+DKIM pass · From 도메인 정렬(SPF 또는 DKIM) · DMARC p=none 이상 �
 | 표면 제한 | `credentials.scopes` — 인증 함수 안의 단일 관문, 모르는 이름은 fail closed | `credentialAllowsSurface` |
 | 시도 제한 | 실패만 셈, IP 프리픽스·계정 두 축(모든 메일 프로토콜·웹), 5회 뒤 1초부터 두 배·상한 15분·15분 뒤 초기화(공통 수치). 성공하면 계정 축만 지움. 서버들이 공유 DB로 함께 센다(DB 장애 시 프로세스 카운터) | `core/auth-throttle.ts`, `store/auth-failures.ts` |
 | 정지 | `account-suspend` — 새 인증·제출·수신 차단, 데이터 보존, 되돌릴 수 있음 | — |
-| 삭제 | `account-delete` — 되돌릴 수 없는 드레인, 끝날 때까지 주소 재등록 차단 | SCHEMA §7-7 |
+| 삭제 | `account-delete` — 즉시 비노출, 리퍼가 24시간 안에 메일·자격증명·sieve를 지우고 계정 행까지 없앤다(`ionosphere_account_drain_overdue`). 끝날 때까지 주소 재등록 차단 | SCHEMA §7-7 |
 | 반영 지연 | 새 인증은 즉시. **JMAP은 인증 캐시로 최대 30초**(외부 토큰은 exp를 넘지 않는다). 제출(SMTP)은 메시지마다 상태를 다시 본다. 열린 IMAP·POP3·ManageSieve 연결은 **다음 명령에서** 계정 상태를 다시 본다(G2). 외부 토큰으로 연 연결은 토큰 exp에 닫힌다(E4) | `jmap-server.ts`, `backend.ts`, `proto-*/server.ts`, `core/auth-expiry.ts` |
 | 디렉터리 로그인 | 기본 꺼짐. 로컬 실패 뒤 폴백, 관리자가 연결한 불변 키만. provider별 허용 표면(`surfaces`, 생략하면 전부) — 밖이면 bind 전에 거절 | `shared-mailbox-runtime.ts`, `directory-config.ts` |
 | 관리 주체 | 사람: `admin_users`(메일 계정과 별개, TOTP 필수, 서버 세션). 서비스: `api_keys`(read/write/admin). 정적 `rootToken`은 부트스트랩 전용(활성 owner가 생기면 경고) | `store/admin-auth.ts`, `api/server.ts` |
