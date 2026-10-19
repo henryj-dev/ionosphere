@@ -333,6 +333,56 @@ export const accountCommands: readonly Command[] = [
   },
   {
     spec: {
+      name: "mail-password-usage",
+      group: "계정",
+      label: "기본 비밀번호 메일 접속 현황",
+      summary:
+        "최근 N일 안에 기본 비밀번호로 메일(IMAP·POP3·SMTP 제출·JMAP·ManageSieve)에 접속한 계정. 앱 비밀번호로 옮겨야 할 대상을 찾는다.",
+      readOnly: true,
+      args: [{ name: "days", label: "기간(일)", type: "number", required: false, placeholder: "14" }],
+      fields: [
+        { key: "email", label: "계정" },
+        { key: "lastUsedAt", label: "기본 비밀번호 최근 사용", format: "time" },
+        { key: "appPasswords", label: "앱 비밀번호 수" },
+        { key: "appPasswordLastUsedAt", label: "앱 비밀번호 최근 사용", format: "time" },
+      ],
+    },
+    /**
+     * 회원 공통 수치 결정(2026-10-18, 이 창 결정 A): 메일 프로토콜은 앱 비밀번호로 옮기고, 기본 비밀번호로 접속하던 길은
+     * 2주 관측 뒤 계정별로 끊는다. 이 명령이 그 관측이다.
+     *
+     * 근거는 기본 비밀번호 자격증명(kind=0)의 `last_used_at`이다. 이 값은 메일 표면의 로그인(PLAIN·LOGIN·SCRAM)에서만
+     * 갱신된다 — 셀프서비스 웹 로그인은 갱신하지 않는다(`verifyAccountPrimaryPassword`). 그래서 "웹에만 쓰는 계정"은
+     * 여기 나오지 않는다. 어느 표면인지는 접근 감사 로그(`credKind: "password"`)로 본다.
+     */
+    async run(ctx, args) {
+      const tenantId = requireTenant(ctx);
+      const days = args.days === undefined || args.days === "" ? 14 : Number(args.days);
+      if (!Number.isInteger(days) || days < 1 || days > 365) throw new CommandError("invalid", "기간은 1~365일 정수입니다");
+      const since = Date.now() - days * 24 * 60 * 60 * 1000;
+      const { rows } = await ctx.db.query({
+        sql: `SELECT a.email AS email, MAX(p.last_used_at) AS last_used_at,
+                     (SELECT COUNT(*) FROM credentials x WHERE x.account_id = a.id AND x.kind = ?) AS app_passwords,
+                     (SELECT MAX(x.last_used_at) FROM credentials x WHERE x.account_id = a.id AND x.kind = ?) AS app_last_used_at
+                FROM accounts a JOIN credentials p ON p.account_id = a.id AND p.kind = ?
+               WHERE a.tenant_id = ? AND a.status = ? AND p.last_used_at >= ?
+               GROUP BY a.id, a.email
+               ORDER BY last_used_at DESC`,
+        params: [CREDENTIAL_KIND.appPassword, CREDENTIAL_KIND.appPassword, CREDENTIAL_KIND.password, tenantId, ACCOUNT_STATUS.active, since],
+      });
+      return {
+        rows: rows.map((r) => ({
+          email: String(r.email),
+          lastUsedAt: Number(r.last_used_at),
+          appPasswords: Number(r.app_passwords ?? 0),
+          appPasswordLastUsedAt: r.app_last_used_at == null ? null : Number(r.app_last_used_at),
+        })),
+        message: `최근 ${days}일 동안 기본 비밀번호로 메일에 접속한 계정 ${rows.length}개`,
+      };
+    },
+  },
+  {
+    spec: {
       name: "app-password-list",
       group: "계정",
       label: "앱 비밀번호 목록",

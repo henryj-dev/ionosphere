@@ -481,7 +481,7 @@ export async function scramKeysFor(db: DbDriver, email: string): Promise<StoredS
             FROM credentials c
             JOIN accounts a ON a.id = c.account_id
            WHERE a.email = ? AND a.status = 1 AND c.kind = ?
-           ORDER BY c.created_at ASC`,
+           ORDER BY c.created_at ASC, c.id ASC`,
     params: [email.toLowerCase(), CREDENTIAL_KIND.password],
   });
   const secret = rows[0]?.secret;
@@ -506,15 +506,26 @@ export async function scramAuthorize(db: DbDriver, email: string, surface: AuthS
    * scopes만 본다. 여러 개면 `scramKeysFor`와 같은 순서(created_at ASC)의 첫 행이다.
    */
   const { rows } = await db.query({
-    sql: `SELECT a.id AS id, c.scopes AS scopes
+    sql: `SELECT a.id AS id, c.id AS credential_id, c.scopes AS scopes
             FROM accounts a LEFT JOIN credentials c ON c.account_id = a.id AND c.kind = ?
            WHERE a.email = ? AND a.status = 1
-           ORDER BY c.created_at ASC`,
+           ORDER BY c.created_at ASC, c.id ASC`,
     params: [CREDENTIAL_KIND.password, email.toLowerCase()],
   });
   const row = rows[0];
   if (typeof row?.id !== "string") return null;
   if (!credentialAllowsSurface(row.scopes == null ? null : String(row.scopes), surface)) return null;
+  /**
+   * 마지막 사용 시각을 남긴다 — PLAIN 경로(`authenticate`)와 같다. 예전엔 SCRAM 로그인만 이 값을 갱신하지 않아서,
+   * "기본 비밀번호로 메일에 접속하는 계정" 관측(`mail-password-usage`)에서 SCRAM 클라이언트가 빠졌다. 베스트에포트.
+   */
+  if (typeof row.credential_id === "string") {
+    try {
+      await db.batch([{ sql: "UPDATE credentials SET last_used_at = ? WHERE id = ?", params: [Date.now(), row.credential_id] }]);
+    } catch {
+      /* 무시 */
+    }
+  }
   return { accountId: String(row.id) };
 }
 
