@@ -101,7 +101,6 @@ export {
 export {
   buildServerFirst,
   deriveScramKeys,
-  normalizePassword,
   parseClientFirst,
   serverNonce,
   verifyClientFinal,

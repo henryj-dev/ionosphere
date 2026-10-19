@@ -1,6 +1,6 @@
 /**
  * Sieve 렉서 (RFC 5228 §8.1). 소스를 토큰 스트림으로. 순수 함수 — I/O 없음.
- * 주석: `#`(줄 끝까지), `/* ... *​/`(블록). 문자열: quoted("...") + multi-line(text: ... .).
+ * 주석: `#`(줄 끝까지), `/* ... *\/`(블록). 문자열: quoted("...") + multi-line(text: ... .).
  */
 
 export type TokenType =

@@ -17,10 +17,10 @@
  */
 
 /** RFC 3454 C.1.2 — ASCII가 아닌 공백. SASLprep은 이것을 U+0020으로 바꾼다. */
-const NON_ASCII_SPACE = /[   -​  　]/gu;
+const NON_ASCII_SPACE = new RegExp("[\\u00A0\\u1680\\u2000-\\u200B\\u202F\\u205F\\u3000]", "gu");
 
 /** RFC 3454 B.1 — 보통 지우는 문자(제어 성격의 결합·이형 선택자 등). U+200B는 위 공백 매핑이 먼저 가져간다. */
-const MAPPED_TO_NOTHING = /[­͏᠆᠋-᠍‌‍⁠︀-️﻿]/gu;
+const MAPPED_TO_NOTHING = new RegExp("[\\u00AD\\u034F\\u1806\\u180B-\\u180D\\u200C\\u200D\\u2060\\uFE00-\\uFE0F\\uFEFF]", "gu");
 
 /**
  * 금지 문자 — RFC 3454 C.1.2(매핑 뒤엔 남지 않지만 NFKC가 다시 만들 수 있어 함께 본다), C.2.1·C.2.2(제어), C.3(사용자 정의),
@@ -44,7 +44,7 @@ const PROHIBITED = new RegExp(
 
 /** RFC 3454 D.1 — 오른쪽에서 왼쪽으로 쓰는 문자(R·AL). 표 그대로다. */
 const RAND_AL =
-  /[־׀׃א-תװ-״؛؟ء-غـ-ي٭-ٯٱ-ە۝ۥۦۺ-۾܀-܍ܐܒ-ܬހ-ޥޱ‏יִײַ-ﬨשׁ-זּטּ-לּמּנּסּףּפּצּ-ﮱﯓ-ﴽﵐ-ﶏﶒ-ﷇﷰ-﷼ﹰ-ﹴﹶ-ﻼ]/u;
+  new RegExp("[\\u05BE\\u05C0\\u05C3\\u05D0-\\u05EA\\u05F0-\\u05F4\\u061B\\u061F\\u0621-\\u063A\\u0640-\\u064A\\u066D-\\u066F\\u0671-\\u06D5\\u06DD\\u06E5\\u06E6\\u06FA-\\u06FE\\u0700-\\u070D\\u0710\\u0712-\\u072C\\u0780-\\u07A5\\u07B1\\u200F\\uFB1D\\uFB1F-\\uFB28\\uFB2A-\\uFB36\\uFB38-\\uFB3C\\uFB3E\\uFB40\\uFB41\\uFB43\\uFB44\\uFB46-\\uFBB1\\uFBD3-\\uFD3D\\uFD50-\\uFD8F\\uFD92-\\uFDC7\\uFDF0-\\uFDFC\\uFE70-\\uFE74\\uFE76-\\uFEFC]", "u");
 
 /** 근사 L(D.2): 글자(\p{L}) 가운데 RandAL이 아닌 것. */
 const LETTER = /\p{L}/u;

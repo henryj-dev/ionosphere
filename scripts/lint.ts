@@ -9,7 +9,7 @@
  *  1. 상대 import는 `.ts` 확장자 필수 (node의 .ts 직접 실행 요건)
  *  2. npm import 화이트리스트 (node: 빌트인 + pg + mysql2)
  *  3. 금지 구문 (enum / namespace — erasableSyntaxOnly 보강, 에러 메시지를 규약 언어로)
- *  4. 소스 내 리터럴 제어문자(NUL·SOH) — 이 저장소에서 반복 발생한 사고. escape로 쓸 것
+ *  4. 소스 내 리터럴 제어문자(NUL·SOH)와 보이지 않는 문자·방향 제어 문자 — 이 저장소에서 반복 발생한 사고. escape로 쓸 것
  *  5. @ionosphere/* 패키지 간 순환 의존
  *  6. 프로토콜 엔진이 바이트를 누적하면 @ionosphere/core 소유의 라인 상한을 참조할 것
  *  7. 블록 주석 안에서 별표 두 개 뒤에 슬래시가 오는 시퀀스 — 주석을 조기 종료시킨다
@@ -510,14 +510,17 @@ function check(file: string): void {
     // ── 4. 리터럴 제어문자 ────────────────────────────────────────
     // NUL(0x00)·SOH(0x01)는 SASL 등에서 자주 쓰이는데, 소스에 리터럴로 들어가면
     // diff·grep·툴 체인이 깨진다. "" escape 또는 String.fromCharCode(0)로 쓸 것.
-    const ctrl = line.match(/[\u0000\u0001]/);
+    // 보이지 않는 문자·방향 제어 문자도 같은 계열이다(2026-10-19): 정규식 리터럴에 NBSP·ZWSP·RLM 같은 문자가 그대로
+    // 들어가면 diff·터미널에서 빈칸으로 보이거나 범위가 뒤집혀 보여 리뷰어가 무엇이 들어 있는지 확인할 수 없다
+    // (SASLprep 표를 리터럴로 넣었다가 리뷰에서 걸렸다). 공백류·서식(Cf)·방향 제어·이형 선택자를 escape로 쓰게 한다.
+    const ctrl = line.match(/[\u0000\u0001\u00A0\u00AD\u034F\u1680\u180E\u2000-\u200F\u2028-\u202F\u205F-\u2064\u2066-\u206F\u3000\uFE00-\uFE0F\uFEFF]/);
     if (ctrl) {
       const code = ctrl[0].charCodeAt(0).toString(16).padStart(4, "0");
       violations.push({
         file,
         line: lineNo,
         rule: "no-literal-control-char",
-        message: `리터럴 제어문자 U+${code.toUpperCase()} — "\\u${code}" escape 또는 String.fromCharCode()로 쓸 것`,
+        message: `리터럴 제어·보이지 않는 문자 U+${code.toUpperCase()} — "\\u${code}" escape 또는 String.fromCharCode()로 쓸 것`,
       });
     }
   });

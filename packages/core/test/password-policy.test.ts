@@ -25,7 +25,7 @@ describe("checkPasswordPolicy", () => {
     expect(checkPasswordPolicy("Aa1" + "x".repeat(10_000)).ok).toBe(true);
   });
   test("길이는 정규화 뒤 코드포인트 수다(지우는 문자는 세지 않는다)", () => {
-    expect(checkPasswordPolicy("Ab1­­­­­!").ok).toBe(false);
+    expect(checkPasswordPolicy("Ab1\u00AD\u00AD\u00AD\u00AD\u00AD!").ok).toBe(false);
   });
   test("제어 문자가 섞이면 거절", () => {
     expect(checkPasswordPolicy("Abcd1234\u0007")).toMatchObject({ ok: false, reason: "invalid_characters" });

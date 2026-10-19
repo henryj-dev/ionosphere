@@ -196,7 +196,7 @@ class MysqlDriver implements DbDriver {
    * `search_index(account_id, token, field, message_id)` …) — `columns[0]`을 키로 넘겨
    * 짚으면 첫 컬럼만 같아도 삽입을 건너뛰어 **행이 조용히 사라진다.**
    *
-   * ⚠️ 대가는 남아 있다. `INSERT IGNORE`는 중복뿐 아니라 NOT NULL 위반·데이터 잘림 같은
+   * ⚠ 대가는 남아 있다. `INSERT IGNORE`는 중복뿐 아니라 NOT NULL 위반·데이터 잘림 같은
    *    **진짜 에러까지 경고로 낮춘다** — 아무것도 안 넣고 `changes=1`로 성공을 보고한다.
    *    이걸 닫으려면 `insertIgnore(table, columns, keyColumns)`로 키를 받아 다이얼렉트마다
    *    정확한 충돌 대상을 적어야 한다(PG의 `ON CONFLICT (…) DO NOTHING`도 같이 좁혀진다).

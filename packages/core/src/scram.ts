@@ -11,11 +11,12 @@
  * SCRAM 키를 함께 둔다(auth.ts) — PLAIN 검증은 계속 scrypt가 하고, SCRAM 교환에만 이 키를 쓴다.
  * 반복 횟수를 RFC 최소치(4096)보다 훨씬 높게 잡는 것도 그 보정이다.
  *
- * ⚠ **SASLprep(RFC 4013)을 완전히 구현하지 않는다.** 정규화를 NFKC로 근사한다 —
- * 비ASCII 비밀번호에서 클라이언트와 정규화가 갈리면 인증이 실패할 수 있다. 외부 의존성
- * 없이 전체 SASLprep(stringprep 테이블)을 넣는 비용이 그 위험보다 크다고 보고 명시해 둔다.
+ * 비밀번호 정규화는 SASLprep(RFC 4013)이고 정본은 `saslprep.ts`다(2026-10-18 결정 2). 예전에는 여기서 NFKC로
+ * 근사했는데, 해시 쪽(store `auth.ts`)과 정규화 소유자가 둘이 되지 않게 그 근사를 지웠다.
+ * 금지 문자가 있어 SASLprep이 실패하면 원문 그대로 쓴다 — 그런 값은 표준 클라이언트도 SCRAM에 쓰지 않는다.
  */
 import { createHash, createHmac, pbkdf2 as pbkdf2Cb, randomBytes, timingSafeEqual } from "node:crypto";
+import { saslprep } from "./saslprep.ts";
 
 /** RFC 7677 최소치는 4096이지만, PBKDF2의 약한 오프라인 내성을 반복 횟수로 보정한다. */
 export const SCRAM_DEFAULT_ITERATIONS = 100_000;
@@ -42,9 +43,9 @@ function pbkdf2(password: string, salt: Buffer, iterations: number): Promise<Buf
 const hmac = (key: Buffer, data: string | Buffer): Buffer => createHmac("sha256", key).update(data).digest();
 const sha256 = (data: Buffer): Buffer => createHash("sha256").update(data).digest();
 
-/** SASLprep 근사 — NFKC. 위 ⚠ 참조. */
-export function normalizePassword(password: string): string {
-  return password.normalize("NFKC");
+/** SCRAM 키를 만들 비밀번호 — SASLprep(저장 규칙이 아니라 질의 규칙: 미할당 코드포인트를 막지 않는다). */
+function scramPassword(password: string): string {
+  return saslprep(password, "query") ?? password;
 }
 
 /** 비밀번호 → 저장할 키들. 평문은 여기서만 만지고 밖으로 나가지 않는다. */
@@ -54,7 +55,7 @@ export async function deriveScramKeys(
 ): Promise<ScramKeys> {
   const salt = opts.salt ?? randomBytes(SALT_BYTES);
   const iterations = opts.iterations ?? SCRAM_DEFAULT_ITERATIONS;
-  const saltedPassword = await pbkdf2(normalizePassword(password), salt, iterations);
+  const saltedPassword = await pbkdf2(scramPassword(password), salt, iterations);
   const clientKey = hmac(saltedPassword, "Client Key");
   return { salt, iterations, storedKey: sha256(clientKey), serverKey: hmac(saltedPassword, "Server Key") };
 }

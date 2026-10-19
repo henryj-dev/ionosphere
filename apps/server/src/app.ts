@@ -2107,6 +2107,10 @@ export class IonosphereApp {
    * 같은 도메인의 두 번째 사용자는 **같은 테넌트**에 붙는다 — 테넌트가 도메인을 소유하는
    * 계층(서비스 → 테넌트 → 도메인 → 주소)이라 사용자마다 테넌트가 갈리면 안 된다.
    */
+  /**
+   * ⚠ 공통 비밀번호 규칙(8자·4종 중 3종)을 **보지 않는다** — 테스트·로컬 부트스트랩용 지름길이다. 운영에서 사람이 정하는
+   * 비밀번호는 명령(`account-create`, REST·CLI·콘솔 공통)으로 만들어야 규칙이 걸린다.
+   */
   async createUser(email: string, password: string): Promise<{ accountId: string }> {
     const normalized = email.toLowerCase();
     const tenantId = await this.ensureVerifiedDomain(normalized.slice(normalized.lastIndexOf("@") + 1));

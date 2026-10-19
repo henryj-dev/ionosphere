@@ -299,6 +299,12 @@ describe("보안 검토 반영(2026-10-18)", () => {
     expect((await login(f, "ops@ionosphere.test")).status).toBe(200);
   });
 
+  test("로그인 본문은 64 KiB까지만 받는다(공통 수치 — 비밀번호 길이 제한 대신)", async () => {
+    const f = await setup();
+    const r = await req(f, "POST", "/admin/session/login", { body: { username: "ops@ionosphere.test", password: "x".repeat(70 * 1024) } });
+    expect(r.status).toBe(413);
+  });
+
   test("사용자명은 화이트리스트 형식만 받는다", async () => {
     const f = await setup();
     const r = await req(f, "POST", "/v1/commands/admin-user-create", { bearer: ROOT, origin: null, body: { username: "bad name", password: "pw", role: "admin" } });

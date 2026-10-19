@@ -1098,7 +1098,7 @@ export class ImapEngine {
        *    않은 조상**을 따로 내는 이유는 그것뿐이다(§3.3 2.B, §3.5 "SHOULD ONLY return a non-matching
        *    mailbox name along with CHILDINFO if at least one matching child is not also being returned").
        * ★2026-10-09 리뷰: 처음엔 하나의 집합에 패턴 제외를 걸어 **구독한 부모의 CHILDINFO까지** 지웠다.
-       * ⚠️ RFC 예시 9의 `"*"` 응답은 구독 안 한 `baz2`도 CHILDINFO와 함께 낸다(스스로 "redundant"라 적음).
+       * ⚠ RFC 예시 9의 `"*"` 응답은 구독 안 한 `baz2`도 CHILDINFO와 함께 낸다(스스로 "redundant"라 적음).
        *    같은 예시의 `"*2"` 응답과 규범 본문(§3.5 SHOULD)은 그런 줄을 빼라고 한다 — 본문을 따른다.
        *    예시 `"*"`를 근거로 되돌리지 말 것.
        */

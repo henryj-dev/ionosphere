@@ -323,9 +323,10 @@ export const MAX_SMTP_ERRORS_PER_SESSION = 20;
 export const MAX_JMAP_UPLOAD_BYTES = 50_000_000;
 
 /**
- * 로그인·비밀번호 변경 요청 본문 상한 — 회원 공통 수치(2026-10-18 결정 1).
+ * 로그인·MFA·셀프서비스 비밀번호 변경 요청 본문 상한 — 회원 공통 수치(2026-10-18 결정 1).
  *
- * 비밀번호에 최대 길이를 두지 않는 대신, 아주 긴 값으로 해시(scrypt)를 무겁게 만드는 공격은 이 상한이 막는다.
- * 관리 API의 나머지 요청(1 MiB, `api/http-util.ts`)보다 작다 — 로그인 본문은 사용자명·비밀번호·코드뿐이다.
+ * 비밀번호에 최대 길이를 두지 않는 대신 인증 전(또는 사용자 세션) 표면의 본문을 좁힌다. scrypt·PBKDF2는 비밀번호를
+ * HMAC 키로 한 번만 해시해 길이에 따른 비용이 작다 — 실제로 막는 것은 긴 값의 정규화(NFKC)·파싱·메모리 부담이다.
+ * 관리자 인증이 필요한 REST 명령(`/v1/commands/*`, 비밀번호 설정 포함)은 1 MiB(`api/http-util.ts`) 그대로 둔다.
  */
 export const MAX_LOGIN_BODY_BYTES = 64 * 1024;
