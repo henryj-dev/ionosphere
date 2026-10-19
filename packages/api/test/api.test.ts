@@ -699,7 +699,7 @@ describe("AdminApiServer", () => {
     expect(createRes.status).toBe(200);
     const created = (await createRes.json()) as { id: string; label: string; password: string };
     expect(created.label).toBe("iPhone Mail");
-    expect(created.password).toMatch(/^[a-z]{4}-[a-z]{4}-[a-z]{4}-[a-z]{4}$/);
+    expect(created.password).toMatch(/^[a-z]{4}(-[a-z]{4}){6}$/);
 
     // 발급된 평문으로 실제 로그인이 되어야 한다(store 인증 경로까지 태운다)
     expect((await authenticate(f.db, "ap@acme.test", created.password, "imap"))?.accountId).toBe(accountId);

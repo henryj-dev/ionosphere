@@ -1,7 +1,8 @@
 /**
  * 자격증명 (SCHEMA.md §4 credentials).
  * secret은 자기서술 포맷 — Phase 0은 scrypt (node:crypto 내장, 의존성 제로 원칙).
- * 포맷: `scrypt$N$r$p$saltB64$hashB64[ scram256$i$salt$storedKey$serverKey]`.
+ * 포맷: `scrypt$N$r$p$saltB64$hashB64[ scram256$i$salt$storedKey$serverKey]`(사람이 고른 비밀번호).
+ * 서버가 만든 무작위 비밀(새 앱 비밀번호·자체 토큰)은 `sha256$<hex>` — 아래 `RANDOM_SECRET_PREFIX`.
  * 두 세그먼트를 **함께** 둔다 — SCRAM으로 갈아타면 PBKDF2가 scrypt를 대체해 오프라인
  * 대입 내성이 내려간다. 옛 행은 첫 세그먼트만 있고, 첫 로그인 때 SCRAM 키가 지연 생성된다.
  *
@@ -9,7 +10,8 @@
  * modseq 클레임 없이 단순 삽입 (§3-3 전역 불변식은 "계정 메일 데이터" 쓰기에 적용).
  */
 import { randomBytes, scrypt as scryptCb, timingSafeEqual, type ScryptOptions } from "node:crypto";
-import { ulid } from "@ionosphere/core";
+import { sha256hex, ulid } from "@ionosphere/core";
+import { queryInChunks } from "./chunk.ts";
 import { ACCOUNT_STATUS, CREDENTIAL_KIND, credentialKindName, type CredentialKind, type CredentialKindName, type DbDriver } from "@ionosphere/db";
 import { deriveScramKeys, saslprep } from "@ionosphere/core";
 
@@ -160,21 +162,49 @@ function dummySecret(): Promise<string> {
 }
 
 /**
- * 앱 비밀번호용 랜덤 문자열 — 16 소문자(4-4-4-4 그룹, Google 앱비번 스타일).
- * 편향 없는 rejection sampling(randomBytes). 약 75비트 엔트로피.
+ * 앱 비밀번호 길이(글자 수). 소문자 28자 = log2(26^28) ≈ 131.6비트 — 회원 공통 수치(2026-10-18 결정 1-2)의
+ * "128비트 이상 CSPRNG"를 넘긴다. 예전 16자(약 75비트)로 발급된 것은 계속 받는다(같은 날 이 창 결정 B).
+ */
+const APP_PASSWORD_CHARS = 28;
+/** 사람이 옮겨 적기 쉽게 4자씩 끊는다(입력할 때 하이픈·공백은 무시한다). */
+const APP_PASSWORD_GROUP = 4;
+
+/**
+ * 앱 비밀번호용 랜덤 문자열 — 소문자 28자(4자씩 7묶음). 편향 없는 rejection sampling(randomBytes).
+ * 소문자만 쓰는 이유: 휴대폰 메일 앱에 손으로 옮겨 적을 때 대소문자·비슷한 글자 혼동이 없다. 길이로 엔트로피를 채운다.
  */
 export function generateAppPassword(): string {
   const alphabet = "abcdefghijklmnopqrstuvwxyz";
   const limit = 256 - (256 % alphabet.length); // 234 — 이 이상 바이트는 버려 편향 제거
   const chars: string[] = [];
-  while (chars.length < 16) {
-    for (const b of randomBytes(32)) {
+  while (chars.length < APP_PASSWORD_CHARS) {
+    for (const b of randomBytes(64)) {
       if (b >= limit) continue;
       chars.push(alphabet[b % alphabet.length]!);
-      if (chars.length === 16) break;
+      if (chars.length === APP_PASSWORD_CHARS) break;
     }
   }
-  return `${chars.slice(0, 4).join("")}-${chars.slice(4, 8).join("")}-${chars.slice(8, 12).join("")}-${chars.slice(12, 16).join("")}`;
+  const groups: string[] = [];
+  for (let i = 0; i < chars.length; i += APP_PASSWORD_GROUP) groups.push(chars.slice(i, i + APP_PASSWORD_GROUP).join(""));
+  return groups.join("-");
+}
+
+/**
+ * 서버가 만든 무작위 비밀(앱 비밀번호·자체 발급 토큰)의 저장 형식 — `sha256$<hex>`.
+ *
+ * 왜 scrypt가 아닌가(2026-10-18 결정 1-2: "엔트로피가 충분하면 빠른 해시로 저장해도 된다"): 128비트 넘는 무작위 값은
+ * DB가 새어도 역산(대입)이 불가능하다 — 느린 해시는 사람이 고른 낮은 엔트로피 비밀을 위한 장치다. 대신 로그인할 때
+ * **해시값으로 바로 찾을 수 있어**, 자격증명마다 scrypt를 돌리던 메일 프로토콜 로그인 비용이 사라진다.
+ *
+ * 왜 서버 키(HMAC)를 쓰지 않는가: 결정은 "HMAC + 서버 키 등"을 예로 들었다. 키를 더하면 DB만 샌 경우를 한 번 더 막지만,
+ * 위와 같이 이 엔트로피에서는 더할 것이 거의 없다. 반대로 마스터 키에 묶이면 키가 없거나 바뀌는 순간 모든 앱 비밀번호가
+ * 한꺼번에 무효가 된다(메일 앱 전부가 멈춘다). 그 위험이 더 커서 키 없는 SHA-256으로 둔다.
+ * ⚠ 사람이 고른 비밀번호에는 절대 쓰지 않는다 — 그쪽은 `hashSecret`(scrypt)이다.
+ */
+const RANDOM_SECRET_PREFIX = "sha256$";
+
+function hashRandomSecret(value: string): string {
+  return RANDOM_SECRET_PREFIX + sha256hex(value);
 }
 
 /**
@@ -189,13 +219,7 @@ export async function createAppPassword(
   scopes?: string,
 ): Promise<{ id: string; password: string }> {
   const password = generateAppPassword();
-  const id = await createCredential(db, {
-    accountId,
-    password: normalizeAppPassword(password),
-    kind: CREDENTIAL_KIND.appPassword,
-    label,
-    ...(scopes ? { scopes } : {}),
-  });
+  const id = await insertRandomCredential(db, { accountId, value: normalizeAppPassword(password), kind: CREDENTIAL_KIND.appPassword, label, ...(scopes ? { scopes } : {}) });
   return { id, password };
 }
 
@@ -222,7 +246,7 @@ export async function createOAuthToken(
   scopes?: string,
 ): Promise<{ id: string; token: string }> {
   const token = generateOAuthToken();
-  const id = await createCredential(db, { accountId, password: token, kind: 2, label, ...(scopes ? { scopes } : {}) });
+  const id = await insertRandomCredential(db, { accountId, value: token, kind: CREDENTIAL_KIND.oauthToken, label, ...(scopes ? { scopes } : {}) });
   return { id, token };
 }
 
@@ -296,7 +320,23 @@ export async function setPrimaryPassword(db: DbDriver, accountId: string, passwo
   return (r[1]?.changes ?? 0) > 0;
 }
 
-/** 자격증명 생성. kind 생략 시 기본 비밀번호(CREDENTIAL_KIND.password). */
+/** 서버가 만든 무작위 비밀을 `sha256$` 형식으로 저장한다(위 `RANDOM_SECRET_PREFIX` 주석). */
+async function insertRandomCredential(
+  db: DbDriver,
+  input: { accountId: string; value: string; kind: CredentialKind; label: string; scopes?: string },
+): Promise<string> {
+  const id = ulid();
+  await db.batch([
+    {
+      sql: `INSERT INTO credentials (id, account_id, kind, label, secret, scopes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      params: [id, input.accountId, input.kind, input.label, hashRandomSecret(input.value), input.scopes ?? null, Date.now()],
+    },
+  ]);
+  return id;
+}
+
+/** 자격증명 생성(사람이 고른 비밀번호 — scrypt). kind 생략 시 기본 비밀번호(CREDENTIAL_KIND.password). */
 export async function createCredential(
   db: DbDriver,
   input: { accountId: string; password: string; kind?: CredentialKind; label?: string; scopes?: string },
@@ -374,11 +414,38 @@ export async function authenticate(
     return null;
   }
 
+  const normalizedApp = normalizeAppPassword(password);
+  /**
+   * ★서버가 만든 무작위 비밀(새 앱 비밀번호·토큰)은 해시값으로 **바로 찾는다** — scrypt를 돌지 않는다.
+   * 앱 비밀번호는 정규화(하이픈·공백 제거, 소문자)한 값, 토큰은 원문이 저장 키다. 둘 다 후보로 넣는다.
+   */
+  const randomCandidates = [...new Set([hashRandomSecret(normalizedApp), hashRandomSecret(password)])];
+  const fast = await queryInChunks(
+    db,
+    randomCandidates,
+    (ph) => `SELECT id, kind, scopes FROM credentials WHERE account_id = ? AND kind IN (${CREDENTIAL_KIND.appPassword}, ${CREDENTIAL_KIND.oauthToken}) AND secret IN (${ph})`,
+    [accountId],
+  );
+  for (const c of fast) {
+    const scopes = c.scopes == null ? null : String(c.scopes);
+    if (!credentialAllowsSurface(scopes, surface)) continue;
+    const credentialId = String(c.id);
+    try {
+      await db.batch([{ sql: "UPDATE credentials SET last_used_at = ? WHERE id = ?", params: [Date.now(), credentialId] }]);
+    } catch {
+      /* 무시 */
+    }
+    return { accountId, credentialId, credKind: credentialKindName(Number(c.kind)), scopes };
+  }
+
   const { rows: creds } = await db.query({
-    sql: "SELECT id, kind, secret, scopes FROM credentials WHERE account_id = ?",
+    // 무작위 비밀(sha256$)은 위에서 끝났다 — 아래는 scrypt로 저장된 것(기본 비밀번호·예전 앱 비밀번호·예전 토큰)만 돈다.
+    sql: `SELECT id, kind, secret, scopes FROM credentials WHERE account_id = ? AND secret NOT LIKE '${RANDOM_SECRET_PREFIX}%'`,
     params: [accountId],
   });
-  const normalizedApp = normalizeAppPassword(password);
+  // 예전 형식 자격증명이 하나도 없으면 scrypt를 한 번도 돌지 않아 "없는 계정"(더미 scrypt)보다 빨라진다 — 존재가 시간으로
+  // 새지 않게 같은 비용을 태운다(허용 목록에 든 kind만 빠른 경로가 받으므로 앞으로 생길 kind는 저절로 로그인 수단이 되지 않는다).
+  if (creds.length === 0) await verifySecret(password, await dummySecret());
   for (const c of creds) {
     // 원문 우선 검증(기본 비번·원문 저장 앱비번 하위호환). 앱 비번(kind=1)은 실패 시
     // 정규화 입력(하이픈/공백 무시)으로 한 번 더 — createAppPassword가 정규화 저장하므로.

@@ -222,6 +222,8 @@ CREATE TABLE credentials (
   label         VARCHAR(190),
   secret        TEXT NOT NULL,                      -- 자기서술 포맷: "scrypt$N$r$p$salt$hash[ scram256$iter$salt$storedKey$serverKey]" (store/auth.ts — 원안의 argon2id는 node 내장이 아니라 scrypt로 갔다)
                                                     -- SCRAM 키는 다음 PLAIN 로그인 때 지연 생성 (포맷 버전이 앞에)
+                                                    -- 서버가 만든 무작위 비밀(2026-10-18 이후 발급한 앱 비밀번호·자체 토큰)은 "sha256$<hex>" —
+                                                    -- 128비트 넘는 엔트로피라 느린 해시가 필요 없고, 로그인 때 해시값으로 바로 찾는다(store/auth.ts)
   scopes        VARCHAR(190),
   last_used_at  BIGINT,
   created_at    BIGINT NOT NULL
