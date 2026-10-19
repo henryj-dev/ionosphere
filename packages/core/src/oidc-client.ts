@@ -10,7 +10,8 @@
  *  - 요청한 `acr_values`·`prompt=login`·`max_age`만으로 충족으로 보지 않는다 — **응답의 클레임**만 본다.
  *  - `auth_time`이 계약의 최근성 안이어야 한다. refresh로 받은 토큰의 iat를 새 MFA 시각으로 보지 않는다(refresh를 쓰지 않는다).
  *  - 계약이 없거나 응답이 충족하지 못하면 **MFA 생략·자동 폴백 없이** 로컬 TOTP를 요구한다(호출자 몫 — `mfaSatisfiedAt`이 null).
- *    lodestar는 현재 ID 토큰에 amr이 없고 acr에 신뢰 기기가 섞여 계약을 충족할 수 없다(orc 경유 보고, 2026-10-18).
+ *    lodestar는 MFA(신뢰 기기 포함) 세션에 acr `https://refeds.org/profile/mfa`를 싣는다. 관리 콘솔은 이 acr을 계약으로 받는다
+ *    (2026-10-19 사용자 결정 — 신뢰 기기까지 lodestar 판단에 맡김, OPERATIONS §8). TOTP만 받으려면 amr 기반 계약을 쓴다.
  */
 import { createHash, randomBytes } from "node:crypto";
 import { decodeJwt, JwtError, verifyJwt, type Jwk, type JwtClaims } from "./jose.ts";
