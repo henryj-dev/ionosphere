@@ -2,6 +2,7 @@
 import { AuthFailureThrottle, PeerConnectionLimiter, MAX_MESSAGE_BYTES, createLogSessionReporter, noopAuditSink, noopLogger, rfc5322Date, ulid, type AuditSink, type Logger, type SessionReporter } from "@ionosphere/core";
 import { allMigrations, describeDbSpec, migrate, MTA_QUEUE_STATUS, openDatabase, type DbDriver } from "@ionosphere/db";
 import {
+  accountDrainStatus,
   authenticate,
   createCredential,
   DbAuthFailureStore,
@@ -917,6 +918,14 @@ export class IonosphereApp {
       const { rows } = await db.query({ sql: `SELECT COUNT(*) AS n FROM mta_queue WHERE status = ${MTA_QUEUE_STATUS.queued}` });
       queueDepth.set(Number(rows[0]?.n ?? 0));
     });
+    // 계정 드레인 — overdue가 0보다 크면 24시간 마감을 넘긴 탈퇴 계정이 있다(경보 기준).
+    const drainPending = this.metrics.accountDrainPending;
+    const drainOverdue = this.metrics.accountDrainOverdue;
+    this.metrics.registry.onCollect(async () => {
+      const s = await accountDrainStatus(db);
+      drainPending.set(s.pending);
+      drainOverdue.set(s.overdue);
+    });
   }
 
   /**
@@ -1557,6 +1566,8 @@ export class IonosphereApp {
          * 기본값(30일·180일·7일)은 `runRetention`이 소유한다 — 여기서 다시 적으면 갈라진다.
          */
         retention: { db: this.db },
+        // 계정 삭제 드레인(SCHEMA §7-7) — 탈퇴한 계정의 메일·자격증명·sieve를 24시간 안에 지운다(2026-10-19 P8).
+        accountDrain: { db: this.db },
         /**
          * 대외 리포트 — `rua` 조회와 외부 목적지 승인 확인이 전부 DNS라 리졸버가 필수다.
          * `ctx.resolver`는 조립층이 항상 만들어 두므로(미주입이면 NodeDnsResolver) 여기서

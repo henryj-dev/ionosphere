@@ -2,7 +2,7 @@
 
 > 상태: **동결** (v1 → 이중 리뷰 → v2 → 이중 재검증 → v2.1) · 전제: [PLAN.md](../PLAN.md) + [PROTOCOLS.md](PROTOCOLS.md) §0
 >
-> **적용된 마이그레이션(2026-10-19 기준 029까지)** — 정본은 `packages/db/src/migrations/`다.
+> **적용된 마이그레이션(2026-10-19 기준 030까지)** — 정본은 `packages/db/src/migrations/`다.
 > 코어 DDL은 001이고, 그 뒤는 아래 절에 따로 적었다:
 >
 > | # | 이름 | 어디에 |
@@ -36,6 +36,7 @@
 > | 027 | oidc | **§4-3**(외부 OIDC 연결·인가 상태) |
 > | 028 | auth_failures | **§4-4** |
 > | 029 | identity_claims | **§4-5** |
+> | 030 | account_deleting_since | **§7-7**(계정 드레인 마감) |
 >
 > ⚠ 새 마이그레이션을 넣으면 **이 표와 해당 절을 같이 갱신할 것.** 009·010이 한동안 코드에만
 > 있고 이 문서에 없었다 — "동결 스키마"를 자처하는 문서가 실제 테이블을 빠뜨리면, 그것을 읽고
@@ -726,6 +727,22 @@ SELECT 후 INSERT는 두 MRA 사이에서 항상 진다. `owner` 가드가 없�
   ★accounts.email은 비우지 않음 — 드레인 완료까지 주소 재등록 차단이 의도
   (드레인 중 신규 계정이 구 메일 수신하는 사고 방지)
 ```
+
+**계정 드레인 구현**(2026-10-19, `store/account-drain.ts`). 위 약속이 오래 코드에 없었다 — 리퍼는 메일함 툼스톤만
+수거했고 status=2 계정의 데이터는 영구히 남았다. 지금은 리퍼가 tick마다 삭제 중인 계정을 오래된 것부터 지운다:
+
+- 삭제 뒤 2분 유예(`ACCOUNT_DRAIN_GRACE_MS`)가 지난 계정만 고른다 — JMAP 인증 캐시(30초) 동안 열린 세션의 vacation·push·sieve 쓰기가
+  계정 행이 사라진 뒤 들어와 고아가 되지 않게.
+- 메시지는 98통씩 한 배치(쪽)로 지운다. 메시지에 매달린 행(membership·키워드·주소·헤더 투영·본문 텍스트·검색 색인·
+  message_auth·blob_refs)을 함께. 쪽이 멱등한 DELETE라 중간에 죽어도 다음 tick이 이어 간다.
+- 메시지가 비면 계정 단위 정리 한 배치: 메일함·ACL·change_log·자격증명(기본·앱 비밀번호·OAuth)·웹 세션·MFA·sieve·
+  vacation·identity·제출·큐·webhook·bayes·principal·디렉터리 연결·주소 연결, **마지막에 accounts 행**.
+- change_log를 남기지 않는다. 계정이 이미 보이지 않아 알릴 상대가 없다(그래서 `reapMailbox`를 쓰지 않는다).
+- 발송 중(리스 유효) 큐 행이 있으면 accounts 행과 그 행의 블롭 참조를 남기고 다음 tick에 다시 본다. 리스가 만료된 행은 지운다.
+- `account-suspend`·`account-activate`는 status=2를 덮어쓰지 않는다(조건부 UPDATE) — 반쯤 지운 계정이 되살아나지 않게.
+- 남기는 것: `identity_claims`(§4-5), `addresses` 행(알리아스 소유 — 계정 연결은 `address_targets`), 블롭 파일(GC 소관).
+- 마감 24시간은 `accounts.deleting_since`(030)부터 잰다. `account-delete`가 처음 한 번만 쓴다(COALESCE).
+  030 이전에 이미 status=2였던 계정은 `created_at`으로 채워 곧바로 마감 초과로 보인다(늦게 잡히는 것보다 낫다).
 
 **읽기 가시성 계약**: 모든 읽기 경로(IMAP LIST/SELECT/STATUS, JMAP Mailbox/get·Email/query,
 POP3)는 `status=1`만 노출. status=2는 즉시 notFound/부재 — 드레인은 관측 불가여야 함.

@@ -69,6 +69,10 @@ export interface IonosphereMetrics {
    * (2026-10-01). `result="bad"`와 command가 함께 있어야 "어떤 명령이 BAD로 도는가"에 답한다.
    */
   imapCommands: Counter;
+  /** 삭제 드레인 중인 계정 수. */
+  accountDrainPending: Gauge;
+  /** 24시간 마감을 넘긴 드레인 계정 수(경보 기준). */
+  accountDrainOverdue: Gauge;
 }
 
 export function createIonosphereMetrics(registry: Registry = new Registry()): IonosphereMetrics {
@@ -89,6 +93,8 @@ export function createIonosphereMetrics(registry: Registry = new Registry()): Io
     auditShipPending: registry.gauge("ionosphere_audit_ship_pending", "아직 이관되지 않은 지난 날짜 감사 로그 파일 수"),
     sessions: registry.counter("ionosphere_sessions_total", "닫힌 연결 세션 수(surface, reason=closed|idle|preauth)"),
     peerLimitRejections: registry.counter("ionosphere_peer_limit_rejections_total", "IP 프리픽스 동시 연결 상한으로 거절된 연결 수"),
+    accountDrainPending: registry.gauge("ionosphere_account_drain_pending", "삭제 드레인 중인 계정 수(status=2)"),
+    accountDrainOverdue: registry.gauge("ionosphere_account_drain_overdue", "삭제 드레인이 24시간 마감을 넘긴 계정 수 — 0보다 크면 경보"),
     imapCommands: registry.counter("ionosphere_imap_commands_total", "IMAP 명령 완료 수(command, result=ok|no|bad)"),
   };
 }
