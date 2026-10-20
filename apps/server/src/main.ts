@@ -309,6 +309,8 @@ const TLS_LISTENER_ENV: ReadonlyArray<readonly [TlsListenerName, string]> = [
   ["manageSieve", "MANAGESIEVE"],
   ["httpsFront", "HTTPS_FRONT"],
   ["adminTls", "ADMIN_TLS"],
+  // 443 웹 이름(IONOSPHERE_HOST_WEB) 전용 — 캐시 하위 디렉터리는 `webTls`, 감시는 소스별로 자동이다.
+  ["webTls", "WEB_TLS"],
 ];
 
 function listenerCertSources(hostname: string): Partial<Record<TlsListenerName, CertSource>> {
@@ -553,6 +555,8 @@ const app = new IonosphereApp({
    * 대문자로 적으면 **아무것도 매칭되지 않는 채 조용히 켜진 것처럼 보인다**.
    */
   serviceHosts: serviceHostsFromEnv(),
+  // 웹 이름(IONOSPHERE_HOST_WEB) → 이 URL로 301. 짝 검증은 IonosphereApp 생성자가 한다(fail closed).
+  ...(process.env.IONOSPHERE_WEB_REDIRECT_URL !== undefined ? { webRedirectUrl: process.env.IONOSPHERE_WEB_REDIRECT_URL } : {}),
   // 클라이언트 자동설정 — 포트 지정 시에만 리슨(평문 HTTP, TLS 프록시 뒤 권장)
   ...namedPort("autoconfigPort", process.env.IONOSPHERE_AUTOCONFIG_PORT),
   ...(process.env.IONOSPHERE_AUTOCONFIG_BRAND ? { autoconfigBrand: process.env.IONOSPHERE_AUTOCONFIG_BRAND } : {}),

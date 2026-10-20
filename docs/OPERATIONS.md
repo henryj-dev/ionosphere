@@ -327,6 +327,47 @@ Bearer 토큰 입력 칸은 없앴다. API 키(`api-key-create`)는 REST 자동�
 - 새 비밀번호는 공통 규칙을 따른다(아래 "비밀번호 규칙"). 동시 로그인은 8개까지 처리하고 넘치면 503을 돌려준다(공개 표면의 CPU 보호).
 - 감사 로그 표면은 `selfservice`다. 세션 수명·step-up·잠금 수치는 관리 콘솔과 같다(공통 수치).
 
+### 웹 이름 → 셀프서비스 리다이렉트
+
+제품 사이트 이름(맨 도메인·`www.` 등)으로 443에 오면 **프록시하지 않고** 셀프서비스 주소로 301을 돌려준다.
+기본으로 꺼져 있다. 두 env는 짝이다 — 하나만 있으면 기동이 실패한다.
+
+```
+IONOSPHERE_HOST_WEB=ionosphere.test,www.ionosphere.test         # 콤마 목록, 소문자로 정규화
+IONOSPHERE_WEB_REDIRECT_URL=https://account.ionosphere.test/     # 이 값 그대로 Location
+# 웹 이름 전용 인증서(메일 인증서와 별개 발급물) — adminTls와 같은 방식
+IONOSPHERE_TLS_WEB_TLS_MODE=url
+IONOSPHERE_TLS_WEB_TLS_URL_CERT=https://<cert-api>/…/fullchain.pem
+IONOSPHERE_TLS_WEB_TLS_URL_KEY=https://<cert-api>/…/privkey.pem
+IONOSPHERE_TLS_WEB_TLS_CN=ionosphere.test
+IONOSPHERE_TLS_WEB_TLS_SANS=ionosphere.test,www.ionosphere.test
+```
+
+- 요청 경로·쿼리는 붙이지 않는다. 옛 사이트 경로를 셀프서비스에 옮기면 거의 404이고, 요청 값을 Location에
+  섞지 않아야 `//evil` 같은 권한부 혼동·CRLF 주입이 생기지 않는다. 메서드와 무관하게 301, HEAD는 본문 없음,
+  `Cache-Control: public, max-age=3600`(대상을 옮겨도 브라우저가 한 시간 안에 따라온다).
+- URL 검증(기동 시): `https:` 절대 URL만, 자격증명·프래그먼트·공백·제어문자 거부, 대상이 웹 이름 자신이면 거부.
+  웹 이름이 다른 서비스(`IONOSPHERE_HOST_*`) 이름과 겹쳐도 거부한다.
+- 인증서: `IONOSPHERE_TLS_WEB_TLS_*`는 웹 이름에만 SNI로 제시된다. url 소스는 6시간마다 다시 받아 오고,
+  바뀌면 웹 이름 라우트 전부를 무중단으로 갈아끼운다(admin·기본 인증서는 그대로). 받아 온 인증서는
+  `CN`·`SANS`(expectedHosts) 중 **하나 이상**과 대조해 전혀 다른 인증서는 설치하지 않는다. 모든 웹 이름이 SAN에
+  들어갔는지는 아래 와이어 확인으로 판정한다 — 그래서 `CN`·`SANS`를 실제 이름 전부로 준다.
+  캐시는 `IONOSPHERE_TLS_DIR/webTls`에 따로 둔다. 전용 소스를 줬는데 기동 때 확보에 실패하면 잠시 443 기본 인증서를
+  제시해 이름 불일치가 날 수 있다. 라우트는 남겨 두므로 다음 6시간 폴링 성공 때 재시작 없이 전용 인증서가 붙는다.
+  전용 소스를 안 주면 443 기본 인증서를 쓴다.
+- 확인(배포 뒤):
+
+```bash
+# 웹 이름에 전용 인증서가 나오는지(SAN 확인)
+openssl s_client -connect <서버>:443 -servername www.ionosphere.test </dev/null 2>/dev/null \
+  | openssl x509 -noout -subject -ext subjectAltName
+curl -sI https://www.ionosphere.test/ | grep -iE '^(HTTP|location)'   # 301 + Location
+# 기존 이름의 인증서가 바뀌지 않았는지
+for n in mx.ionosphere.test mta-sts.ionosphere.test admin.ionosphere.test; do
+  openssl s_client -connect <서버>:443 -servername "$n" </dev/null 2>/dev/null | openssl x509 -noout -subject
+done
+```
+
 ### 외부 OIDC 로그인 (E3)
 
 관리 콘솔과 셀프서비스에 "IdP로 로그인" 버튼을 얹는다. 기본으로 꺼져 있다.
