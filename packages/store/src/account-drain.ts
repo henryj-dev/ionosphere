@@ -18,11 +18,13 @@
  * - 서버 세 대의 리퍼가 같은 계정을 함께 지울 수 있다. 문장이 전부 멱등해 결과는 같다.
  *
  * 지우지 않는 것:
- * - `identity_claims`(SSO sub의 최초 주인) — 같은 sub를 다른 계정에 다시 잇지 못하게 하는 기록이라
- *   계정이 사라져도 남겨야 한다(마이그레이션 029). 값은 IdP의 불투명 식별자다.
+ * - `identity_claims`(SSO sub·디렉터리 외부 키의 최초 주인) — 같은 식별자를 다른 계정에 다시 잇지 못하게 하는
+ *   묘비라 계정이 사라져도 남긴다(마이그레이션 029). 디렉터리 외부 키는 SHA-256만 적는다.
  * - 블롭 파일 — `blob_refs`를 지우면 블롭 GC가 참조 0으로 보고 회수한다. GC가 `off`면 파일은 남는다.
  */
 import { ACCOUNT_STATUS, MTA_QUEUE_STATUS, REF_KIND, type DbDriver, type Statement } from "@ionosphere/db";
+import { chunk } from "./chunk.ts";
+import { directoryClaimStatement } from "./directory-claims.ts";
 
 /** 계정 드레인 마감 — 회원 공통 기준(2026-10-19 P8). 넘기면 지표가 overdue로 센다. */
 export const ACCOUNT_DRAIN_DEADLINE_MS = 24 * 60 * 60 * 1000;
@@ -100,7 +102,23 @@ export async function drainAccount(db: DbDriver, accountId: string, opts: { maxP
    * 배달 결과를 쓸 곳이 사라진다. 리스는 짧아서 다음 tick이면 풀린다. 남아 있으면 accounts 행을 지우지 않는다.
    * 리스가 **만료된** 발송 중 행은 지운다 — 그대로 두면 워커가 회수해 탈퇴한 계정의 메일을 다시 보내려 한다.
    */
-  const results = await db.batch([...accountStatements(accountId, opts.now ?? Date.now()), finalDeleteStatement(accountId)]);
+  const { rows: directoryLinks } = await db.query({
+    sql: "SELECT tenant_id, provider, external_key FROM directory_identities WHERE account_id = ? AND provider NOT LIKE 'oidc:%'",
+    params: [accountId],
+  });
+  const now = opts.now ?? Date.now();
+  /**
+   * D1은 배치당 문장 1000개가 상한이다. 묘비를 900개씩 먼저 남긴다 — 계정은 이미 삭제 중이고
+   * 되살릴 수 없으므로 중간에 죽어도 다음 tick이 같은 INSERT IGNORE를 다시 하며 수렴한다.
+   */
+  for (const part of chunk(directoryLinks, 900)) {
+    await db.batch(
+      part.map((row) =>
+        directoryClaimStatement(db, String(row.tenant_id), String(row.provider), String(row.external_key), accountId, now),
+      ),
+    );
+  }
+  const results = await db.batch([...accountStatements(accountId, now), finalDeleteStatement(accountId)]);
   return { messages, done: (results[results.length - 1]?.changes ?? 0) > 0 };
 }
 

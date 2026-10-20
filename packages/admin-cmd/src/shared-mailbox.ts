@@ -1,7 +1,5 @@
 import { CommandError, type Command, type CommandContext } from "./types.ts";
-import { ulid } from "@ionosphere/core";
-import { BatchConflictError } from "@ionosphere/db";
-import { directoryMembershipSource } from "@ionosphere/store";
+import { linkDirectoryIdentityWithClaim, unlinkDirectoryIdentityWithClaim } from "@ionosphere/store";
 
 function tenantId(ctx: CommandContext): string {
   if (!ctx.tenantId) throw new CommandError("invalid", "tenantId가 필요합니다");
@@ -51,20 +49,18 @@ export const sharedMailboxCommands: readonly Command[] = [
       if (otherLink.rows.length > 0) throw new CommandError("conflict", "이 account는 같은 provider의 다른 identity에 연결되어 있습니다");
       const linked = identity.rows[0]?.account_id;
       if (linked != null && String(linked) !== args.accountId) throw new CommandError("conflict", "directory identity가 다른 account에 연결되어 있습니다");
-      const now = Date.now();
-      try {
-        await ctx.db.batch([
-          { sql: "UPDATE directory_identities SET account_id = ? WHERE tenant_id = ? AND provider = ? AND external_key = ?", params: [args.accountId, scope, args.provider, args.externalKey] },
-          { sql: ctx.db.insertIgnore("principals", ["id", "tenant_id", "kind", "account_id", "provider", "external_key", "display_name", "created_at"]), params: [ulid(), scope, 0, args.accountId, args.provider, args.externalKey, identity.rows[0]?.display_name ?? null, now] },
-          { sql: "UPDATE principals SET account_id = ?, display_name = ? WHERE tenant_id = ? AND kind = 0 AND provider = ? AND external_key = ?", params: [args.accountId, identity.rows[0]?.display_name ?? null, scope, args.provider, args.externalKey] },
-          { sql: "UPDATE accounts SET permissions_version = permissions_version + 1 WHERE id = ? AND tenant_id = ?", params: [args.accountId, scope] },
-        ]);
-      } catch (error) {
-        // 사전 조회는 안내용일 뿐 동시 요청의 잠금이 아니다. 최종 승인은 DB UNIQUE 제약이 한다.
-        if (error instanceof BatchConflictError) {
-          throw new CommandError("conflict", "이 account는 같은 provider의 다른 identity에 연결되어 있습니다");
-        }
-        throw error;
+      const result = await linkDirectoryIdentityWithClaim(ctx.db, {
+        tenantId: scope,
+        provider: args.provider!,
+        externalKey: args.externalKey!,
+        accountId: args.accountId!,
+        displayName: identity.rows[0]?.display_name == null ? null : String(identity.rows[0].display_name),
+      });
+      if (result === "retired") {
+        throw new CommandError("conflict", "이 directory identity는 예전에 다른 account에 연결된 적이 있어 다시 이을 수 없습니다");
+      }
+      if (result === "conflict") {
+        throw new CommandError("conflict", "이 account는 같은 provider의 다른 identity에 연결되어 있거나, identity가 다른 account에 연결되어 있습니다");
       }
       return { data: { provider: args.provider, externalKey: args.externalKey, accountId: args.accountId }, message: "directory identity 연결 완료 — group membership 반영을 위해 다시 동기화하세요" };
     },
@@ -75,15 +71,12 @@ export const sharedMailboxCommands: readonly Command[] = [
       // OIDC 연결 행(`oidc:` 접두)은 OIDC 명령만 다룬다 — 여기서 바꾸면 그 명령의 공급자·충돌 검사를 우회한다(2026-10-18 검토).
       if ((args.provider ?? "").startsWith("oidc:")) throw new CommandError("invalid", "oidc: 공급자는 oidc-identity-link/unlink로 다루십시오");
       const scope = tenantId(ctx);
-      const identity = await ctx.db.query({ sql: "SELECT account_id FROM directory_identities WHERE tenant_id = ? AND provider = ? AND external_key = ?", params: [scope, args.provider, args.externalKey] });
-      const accountId = identity.rows[0]?.account_id == null ? null : String(identity.rows[0]?.account_id);
-      if (!accountId) throw new CommandError("notFound", "연결된 directory identity를 찾을 수 없습니다");
-      await ctx.db.batch([
-        { sql: "DELETE FROM account_memberships WHERE account_id = ? AND source = ?", params: [accountId, directoryMembershipSource(args.provider!)] },
-        { sql: "UPDATE principals SET account_id = NULL WHERE tenant_id = ? AND kind = 0 AND provider = ? AND external_key = ?", params: [scope, args.provider, args.externalKey] },
-        { sql: "UPDATE directory_identities SET account_id = NULL WHERE tenant_id = ? AND provider = ? AND external_key = ?", params: [scope, args.provider, args.externalKey] },
-        { sql: "UPDATE accounts SET permissions_version = permissions_version + 1 WHERE id = ? AND tenant_id = ?", params: [accountId, scope] },
-      ]);
+      const result = await unlinkDirectoryIdentityWithClaim(ctx.db, {
+        tenantId: scope,
+        provider: args.provider!,
+        externalKey: args.externalKey!,
+      });
+      if (result === "notFound") throw new CommandError("notFound", "연결된 directory identity를 찾을 수 없습니다");
       return { data: { provider: args.provider, externalKey: args.externalKey }, message: "directory identity 연결 해제 완료" };
     },
   },
