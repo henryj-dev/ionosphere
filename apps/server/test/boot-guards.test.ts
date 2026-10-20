@@ -184,3 +184,46 @@ describe("80 포트 충돌 가드", () => {
     expect(r.stderr).not.toContain("IONOSPHERE_HTTP_REDIRECT_PORT=80가 ACME");
   });
 });
+
+/**
+ * 웹 리다이렉트 env 짝 — 이름만·URL만 있으면 **기동 실패**다(경고로 두면 드리프트가 남는다).
+ * 소문자 정규화는 serviceHostsFromEnv가 한다: 대문자로 적어도 같은 검증을 탄다.
+ */
+describe("웹 리다이렉트 env 짝 (IONOSPHERE_HOST_WEB · IONOSPHERE_WEB_REDIRECT_URL)", () => {
+  const BASE = { IONOSPHERE_MASTER_KEY: "k" };
+
+  test("HOST_WEB만 있으면 기동 거부", () => {
+    const r = boot({ ...BASE, IONOSPHERE_HOST_WEB: "Ionosphere.test,www.ionosphere.test" });
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("IONOSPHERE_WEB_REDIRECT_URL이 없다");
+  });
+
+  test("WEB_REDIRECT_URL만 있으면 기동 거부", () => {
+    const r = boot({ ...BASE, IONOSPHERE_WEB_REDIRECT_URL: "https://account.ionosphere.test/" });
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("IONOSPHERE_HOST_WEB이 없다");
+  });
+
+  test("http: 대상은 기동 거부", () => {
+    const r = boot({
+      ...BASE,
+      IONOSPHERE_HOST_WEB: "ionosphere.test",
+      IONOSPHERE_WEB_REDIRECT_URL: "http://account.ionosphere.test/",
+    });
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("https:만 허용");
+  });
+
+  test("짝이 맞으면 이 게이트를 지나간다(다음 단계에서 멈춘다)", () => {
+    const r = boot({
+      ...BASE,
+      IONOSPHERE_BLOB_GC: "bogus",
+      IONOSPHERE_HTTPS_FRONT_PORT: "443",
+      IONOSPHERE_HOST_WEB: "ionosphere.test",
+      IONOSPHERE_WEB_REDIRECT_URL: "https://account.ionosphere.test/",
+    });
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("IONOSPHERE_BLOB_GC");
+    expect(r.stderr).not.toContain("IONOSPHERE_WEB_REDIRECT_URL");
+  });
+});

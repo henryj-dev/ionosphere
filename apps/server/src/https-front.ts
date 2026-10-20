@@ -116,7 +116,7 @@ export const ROUTE_EXPOSURE = {
 } as const;
 export type RouteExposure = (typeof ROUTE_EXPOSURE)[keyof typeof ROUTE_EXPOSURE];
 
-export interface HttpsFrontRoute {
+interface HttpsFrontRouteBase {
   /**
    * 이 upstream이 받을 **정확한** Host 목록(소문자). 접두사가 아니라 완전 일치다.
    *
@@ -143,6 +143,19 @@ export interface HttpsFrontRoute {
    * 나누지 않는 한 피할 수 없다.
    */
   exposure: RouteExposure;
+  /**
+   * 이 라우트의 이름으로 올 때 제시할 **전용 인증서**(미지정 시 기본 자료).
+   *
+   * ★왜 라우트에 붙이는가: 이름과 인증서는 반드시 같이 바뀐다. 따로 두면 라우트만 추가하고
+   * 인증서를 빠뜨려 그 이름이 **엉뚱한 인증서**를 제시하는 상태가 조용히 생긴다 — 브라우저는
+   * 이름 불일치로 거부하지만 서버 로그에는 아무것도 남지 않아 원인을 짚기 어렵다.
+   * (이 저장소가 반복해 겪은 "한쪽만 고쳐서 깨지는" 부류라 소유를 한 곳으로 묶는다.)
+   */
+  tls?: TlsMaterial;
+}
+
+/** upstream으로 리버스 프록시하는 라우트(기존 라우트 전부). */
+interface HttpsFrontProxyRoute extends HttpsFrontRouteBase {
   /** upstream 로컬 포트. */
   port: number;
   /**
@@ -154,16 +167,63 @@ export interface HttpsFrontRoute {
    * 라이브에서 autoconfig·autodiscover·MTA-STS가 전부 그렇게 죽어 있었다.
    */
   host?: string;
-  /**
-   * 이 라우트의 이름으로 올 때 제시할 **전용 인증서**(미지정 시 기본 자료).
-   *
-   * ★왜 라우트에 붙이는가: 이름과 인증서는 반드시 같이 바뀐다. 따로 두면 라우트만 추가하고
-   * 인증서를 빠뜨려 그 이름이 **엉뚱한 인증서**를 제시하는 상태가 조용히 생긴다 — 브라우저는
-   * 이름 불일치로 거부하지만 서버 로그에는 아무것도 남지 않아 원인을 짚기 어렵다.
-   * (이 저장소가 반복해 겪은 "한쪽만 고쳐서 깨지는" 부류라 소유를 한 곳으로 묶는다.)
-   */
-  tls?: TlsMaterial;
+  redirect?: undefined;
 }
+
+/**
+ * 프록시하지 않고 **443에서 바로 301을 돌려주는** 라우트(웹 이름 → 계정 셀프서비스).
+ *
+ * ★대상을 upstream 주소로 넘기지 않는 이유: 프록시 경로에 외부 URL을 실으면 "설정값이 곧
+ * 우리 서버가 접속할 곳"이 되어 SSRF와 같은 모양이 된다. 리다이렉트는 **클라이언트에게
+ * 주소만 알려 줄 뿐** 우리 쪽에서 아무 데도 접속하지 않는다.
+ *
+ * `redirect`는 `parseRedirectTarget`을 통과한 절대 https URL이다. 요청 경로·쿼리는 붙이지
+ * 않는다 — 웹 이름의 옛 경로를 셀프서비스에 그대로 옮기면 거의 전부 404이고, 요청에서 온
+ * 값을 Location에 섞지 않으면 `//evil` 권한부 혼동이나 CRLF 주입 여지가 원천적으로 없다.
+ */
+interface HttpsFrontRedirectRoute extends HttpsFrontRouteBase {
+  redirect: string;
+  port?: undefined;
+  host?: undefined;
+}
+
+export type HttpsFrontRoute = HttpsFrontProxyRoute | HttpsFrontRedirectRoute;
+
+/**
+ * 리다이렉트 대상 URL을 검증·정규화한다 — 기동 시점에 한 번. 실패하면 throw(fail closed).
+ *
+ * - `https:` 절대 URL만 받는다. 평문 http로 보내면 HSTS 없는 첫 방문이 평문 구간을 탄다.
+ * - 자격증명(`user:pass@`)·프래그먼트는 거부한다. 앞의 것은 피싱 링크 모양이고(사용자가
+ *   보는 이름과 실제 이름이 갈린다), 뒤의 것은 운영자가 의도했을 리 없는 값이라 드리프트다.
+ * - 공백·제어문자는 **URL 파서에 넘기기 전에** 거부한다. WHATWG 파서는 탭·개행을 조용히
+ *   지우므로, 파서 뒤에서 보면 이미 사라져 오타가 정상 값처럼 통과한다.
+ * - 반환값은 파서의 `href`다(호스트 소문자화·빈 경로는 `/`). 쿼리는 운영자가 적었을 때만 남는다.
+ */
+export function parseRedirectTarget(raw: string): string {
+  // 제어문자(0x00-0x1f, 0x7f)와 공백 — 리터럴 제어문자 금지 규약이라 escape로 적는다.
+  if (/[\u0000- \u007f]/.test(raw)) throw new Error("리다이렉트 URL에 공백·제어문자가 있다");
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`리다이렉트 URL이 절대 URL이 아니다: ${raw}`);
+  }
+  if (url.protocol !== "https:") throw new Error(`리다이렉트 URL은 https:만 허용한다: ${raw}`);
+  if (url.username !== "" || url.password !== "") throw new Error("리다이렉트 URL에 자격증명을 넣을 수 없다");
+  // `#`만 있고 내용이 빈 경우 url.hash는 ""라서 원문으로 본다.
+  if (raw.includes("#")) throw new Error("리다이렉트 URL에 프래그먼트를 넣을 수 없다");
+  if (url.hostname === "") throw new Error(`리다이렉트 URL에 호스트가 없다: ${raw}`);
+  return url.href;
+}
+
+/**
+ * 리다이렉트 응답의 캐시 수명(초).
+ *
+ * ★301은 브라우저가 **무기한** 기억할 수 있다. 셀프서비스 주소를 나중에 옮기면 이미 방문한
+ * 사용자는 옛 주소로 계속 간다. 한 시간으로 묶어 두면 설정을 고친 뒤 하루 안에 따라온다.
+ */
+const REDIRECT_CACHE_MAX_AGE_S = 3600;
+const REDIRECT_BODY = "moved permanently\n";
 
 /**
  * Host 헤더에서 포트를 떼고 소문자로 — 이름 판정의 **유일한 정규화**다.
@@ -234,9 +294,33 @@ export class HttpsFrontServer {
    * 예전에는 여기서 기본 upstream으로 흘려보냈다. 그래서 아무 Host나 붙여도 JMAP이 응답했고,
    * "우리가 서빙하는 이름"이라는 목록이 코드 어디에도 없었다.
    */
-  private routeTarget(host: string | undefined): { port: number; host: string; exposure: RouteExposure } | undefined {
+  private routeTarget(
+    host: string | undefined,
+  ): { kind: "proxy"; port: number; host: string; exposure: RouteExposure } | { kind: "redirect"; location: string; exposure: RouteExposure } | undefined {
     const r = matchRouteByHost(this.opts.routes, host);
-    return r ? { port: r.port, host: r.host ?? this.upstreamHost, exposure: r.exposure } : undefined;
+    if (!r) return undefined;
+    if (r.redirect !== undefined) return { kind: "redirect", location: r.redirect, exposure: r.exposure };
+    return { kind: "proxy", port: r.port, host: r.host ?? this.upstreamHost, exposure: r.exposure };
+  }
+
+  /**
+   * 로컬 301 — 본문을 읽지 않고 연결을 닫는다.
+   *
+   * ★`connection: close`인 이유: 요청 본문을 소비하지 않고 답하므로, 연결을 재사용하면 남은
+   * 본문 바이트가 다음 요청으로 읽힌다(reject와 같은 규율). 리다이렉트는 한 번으로 끝난다.
+   * 메서드와 무관하게 301이다(요구사항). HEAD에는 같은 헤더에 본문만 뺀다(RFC 9110 §9.3.2).
+   */
+  private redirect(req: IncomingMessage, res: ServerResponse, location: string): void {
+    res.writeHead(301, {
+      location,
+      "content-type": "text/plain; charset=utf-8",
+      "content-length": String(Buffer.byteLength(REDIRECT_BODY)),
+      "cache-control": `public, max-age=${REDIRECT_CACHE_MAX_AGE_S}`,
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "no-referrer",
+      connection: "close",
+    });
+    res.end(req.method === "HEAD" ? undefined : REDIRECT_BODY);
   }
 
   /**
@@ -260,12 +344,11 @@ export class HttpsFrontServer {
      * MTA-STS 정책 서빙이 깨지면 enforce 모드에서 **수신이 막히므로** 기본 자료는 건드리지 않고
      * admin만 SNI로 갈라낸다(fail closed: SNI를 안 보내는 클라이언트는 기본 인증서를 받는다).
      */
-    const hasPerRouteTls = this.opts.routes.some((r) => r.tls !== undefined);
-    if (!hasPerRouteTls) {
-      return https.createServer({ key: this.currentTls.key, cert: this.currentTls.cert }, (req, res) =>
-        this.proxy(req, res),
-      );
-    }
+    /**
+     * SNI 콜백은 전용 자료가 지금 없어도 **항상** 설치한다. url 인증서 소스가 기동 뒤 회복해
+     * `reloadRouteTls`로 라우트에 자료를 붙였을 때, 서버를 다시 만들지 않고 다음 핸드셰이크부터
+     * 쓸 수 있어야 한다. 자료가 없는 이름은 아래에서 기본 컨텍스트로 넘겨 기존 동작과 같다.
+     */
     return https.createServer(
       {
         key: this.currentTls.key,
@@ -354,6 +437,10 @@ export class HttpsFrontServer {
         localAddress: req.socket.localAddress ?? "unknown",
       });
       this.reject(res, 404, "not found");
+      return;
+    }
+    if (target.kind === "redirect") {
+      this.redirect(req, res, target.location);
       return;
     }
     // 홉바이홉 헤더는 제거하고 원본 Host는 유지한다.
@@ -455,6 +542,9 @@ export class HttpsFrontServer {
    * 인증서를 계속 제시한다. 143·110이 재적재 목록에서 빠져 그 두 포트만 만료 인증서를
    * 제시했던 사고와 **같은 부류**다(app.ts tlsListeners 주석).
    *
+   * 전용 인증서가 아직 없는 라우트도 이름이 맞으면 붙인다. cert-api가 기동 때 잠깐 실패해 기본 인증서로
+   * 시작했더라도 다음 url 소스 폴링 성공 때 재시작 없이 복구해야 한다(2026-10-19 리뷰).
+   *
    * SNICallback이 매 핸드셰이크마다 `opts.routes`를 다시 읽으므로 리스너 재생성이 필요 없다.
    * 대상이 없으면 false — 호출부가 "조용히 아무것도 안 됨"을 구분할 수 있게 한다.
    */
@@ -462,7 +552,7 @@ export class HttpsFrontServer {
     const bare = bareHost(host);
     let hit = false;
     for (const r of this.opts.routes) {
-      if (r.tls && r.hosts.includes(bare)) {
+      if (r.hosts.includes(bare)) {
         r.tls = material;
         hit = true;
       }

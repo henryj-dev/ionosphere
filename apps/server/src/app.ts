@@ -26,7 +26,7 @@ import { Pop3Server } from "@ionosphere/proto-pop3";
 import { ImapServer } from "@ionosphere/proto-imap";
 import { IonosphereImapBackend } from "./imap-backend.ts";
 import { JmapServer } from "./jmap-server.ts";
-import { HttpsFrontServer, ROUTE_EXPOSURE, type HttpsFrontRoute } from "./https-front.ts";
+import { HttpsFrontServer, parseRedirectTarget, ROUTE_EXPOSURE, type HttpsFrontRoute } from "./https-front.ts";
 import { HttpRedirectServer } from "./http-redirect.ts";
 import { ManageSieveServer } from "@ionosphere/proto-managesieve";
 import { IonosphereManageSieveBackend } from "./managesieve-backend.ts";
@@ -89,6 +89,10 @@ const TLS_LISTENER_NAMES = [
   //   그대로 쓰이기 때문이다 — 이름을 바꾸면 3대의 env를 동시에 고쳐야 하고, 그 사이
   //   자료 적재가 실패하면 admin vhost가 통째로 내려간다.
   "adminTls",
+  // ★이것도 리스너가 아니라 인증서 소스 이름이다 — 443의 웹 이름(`web` 서비스) vhost가 SNI로
+  //   제시할 자료. 웹 이름은 메일 인증서(mx/mta-sts)와 별개 발급물이라 기본 자료에 섞으면
+  //   한 장이 바뀔 때 다른 쪽 이름이 함께 흔들린다. adminTls와 같은 모양으로 둔다.
+  "webTls",
 ] as const;
 
 export type TlsListenerName = (typeof TLS_LISTENER_NAMES)[number];
@@ -126,6 +130,11 @@ export const HTTP_SERVICES = {
   account: { defaultHost: "account.localhost", env: "ACCOUNT" },
   jmap: { defaultHost: "jmap.localhost", env: "JMAP" },
   metrics: { defaultHost: "metrics.localhost", env: "METRICS" },
+  /**
+   * 웹 이름(예: 제품 사이트의 맨 도메인·`www.`). 443이 프록시하지 않고 `webRedirectUrl`로 301을
+   * 돌려준다. 사람이 브라우저로 오는 이름이라 공개 라우트다. `webRedirectUrl`과 **짝으로만** 쓴다.
+   */
+  web: { defaultHost: "web.localhost", env: "WEB" },
 } as const;
 
 export type HttpServiceName = keyof typeof HTTP_SERVICES;
@@ -137,6 +146,46 @@ export type ServiceHosts = Partial<Record<HttpServiceName, readonly string[]>>;
 export function hostsFor(serviceHosts: ServiceHosts | undefined, name: HttpServiceName): string[] {
   const given = serviceHosts?.[name];
   return given && given.length > 0 ? [...given] : [HTTP_SERVICES[name].defaultHost];
+}
+
+/** 검증을 통과한 웹 리다이렉트 설정 — 이름(소문자)과 Location 값. */
+export interface WebRedirectConfig {
+  hosts: string[];
+  location: string;
+}
+
+/**
+ * 웹 리다이렉트 설정을 기동 시점에 검증한다. 둘 다 없으면 undefined, 어긋나면 throw.
+ *
+ * ★짝이 안 맞으면 경고가 아니라 **기동 실패**인 이유:
+ * - 이름만 있고 URL이 없으면 그 이름이 조용히 404가 된다(운영자는 켰다고 믿는다).
+ * - URL만 있고 이름이 없으면 `web.localhost`만 리다이렉트한다 — 실제로는 아무것도 안 하는데
+ *   env에는 켜진 것처럼 남아, 다음 사람이 그 값을 믿고 다른 설정을 고친다(드리프트).
+ * 어느 쪽이든 env를 고치기 전에는 고쳐지지 않으므로 기동 시점에 드러내는 편이 싸다.
+ *
+ * ★다른 서비스와 이름이 겹치면 거부한다. 라우트 선택은 "처음 맞는 것"이라 겹치면 순서가
+ * 승자를 정한다 — `account.`를 실수로 웹 목록에 넣으면 셀프서비스가 자기 자신으로 가는
+ * 리다이렉트 루프가 되거나, 반대로 웹 이름이 조용히 다른 upstream으로 간다.
+ */
+export function webRedirectConfig(serviceHosts: ServiceHosts | undefined, redirectUrl: string | undefined): WebRedirectConfig | undefined {
+  const given = serviceHosts?.web;
+  const hasHosts = given !== undefined && given.length > 0;
+  if (!hasHosts && redirectUrl === undefined) return undefined;
+  if (!hasHosts) throw new Error("IONOSPHERE_WEB_REDIRECT_URL이 있는데 IONOSPHERE_HOST_WEB이 없다 — 리다이렉트할 이름을 지정할 것");
+  if (redirectUrl === undefined) throw new Error("IONOSPHERE_HOST_WEB이 있는데 IONOSPHERE_WEB_REDIRECT_URL이 없다 — 그 이름이 전부 404가 된다");
+  const location = parseRedirectTarget(redirectUrl);
+  const hosts = [...new Set(given.map((h) => h.trim().toLowerCase()).filter((h) => h.length > 0))];
+  if (hosts.length === 0) throw new Error("IONOSPHERE_HOST_WEB 값이 비었다");
+  for (const name of Object.keys(HTTP_SERVICES) as HttpServiceName[]) {
+    if (name === "web") continue;
+    const others = new Set(hostsFor(serviceHosts, name).map((h) => h.toLowerCase()));
+    const clash = hosts.find((h) => others.has(h));
+    if (clash) throw new Error(`IONOSPHERE_HOST_WEB의 ${clash}가 ${HTTP_SERVICES[name].env} 서비스 이름과 겹친다`);
+  }
+  // 대상이 웹 이름 자신이면 브라우저가 무한 리다이렉트에 빠진다.
+  const targetHost = new URL(location).hostname;
+  if (hosts.includes(targetHost)) throw new Error(`IONOSPHERE_WEB_REDIRECT_URL이 웹 이름(${targetHost}) 자신을 가리킨다`);
+  return { hosts, location };
 }
 
 /**
@@ -489,6 +538,12 @@ export interface IonosphereAppOptions {
    */
   httpRedirectPort?: number;
   /**
+   * 웹 이름(`serviceHosts.web`)을 443에서 301로 보낼 절대 https URL. IONOSPHERE_WEB_REDIRECT_URL.
+   * 요청 경로는 붙이지 않고 **이 값 그대로** Location에 싣는다(https-front.ts 리다이렉트 라우트 주석).
+   * `serviceHosts.web`과 짝이 안 맞으면 생성자가 throw한다(`webRedirectConfig`).
+   */
+  webRedirectUrl?: string;
+  /**
    * MTA-STS 정책 서빙 모드(RFC 8461) — 지정 시 autoconfig 서버가 /.well-known/mta-sts.txt
    * 응답(mx=hostname). IONOSPHERE_MTA_STS_MODE. autoconfigPort 필요. 미지정 시 비활성.
    */
@@ -654,6 +709,9 @@ export class IonosphereApp {
   jmapHost?: string;
   manageSievePort = 0;
 
+  /** 검증된 웹 리다이렉트 설정 — 라우트 생성과 인증서 재적재가 **같은 이름 목록**을 본다. */
+  private readonly webRedirect: WebRedirectConfig | undefined;
+
   constructor(opts: IonosphereAppOptions) {
     /**
      * 신뢰 릴레이 CIDR을 **여기서 한 번 검증한다**(결과는 버리고 백엔드가 다시 만든다).
@@ -664,6 +722,11 @@ export class IonosphereApp {
      * 특히 그렇다. 목록이 짧아 두 번 파싱하는 비용은 없다시피 하다.
      */
     parseCidrList(opts.trustedRelays ?? []);
+    // 같은 규율: 웹 리다이렉트 설정 실수는 리스너가 뜨기 전에 터져야 한다.
+    this.webRedirect = webRedirectConfig(opts.serviceHosts, opts.webRedirectUrl);
+    if (this.webRedirect && opts.httpsFrontPort === undefined) {
+      throw new Error("IONOSPHERE_HOST_WEB을 쓰려면 IONOSPHERE_HTTPS_FRONT_PORT가 필요합니다");
+    }
     this.opts = opts;
     this.authThrottle = new AuthFailureThrottle({ ...(opts.logger ? { logger: opts.logger } : {}) });
     this.peerLimit = new PeerConnectionLimiter({
@@ -1655,6 +1718,8 @@ export class IonosphereApp {
       // 8443 종단을 걷어내 리스너가 없다. 이름은 인증서 소스로만 남아 있고,
       // 그 자료의 실제 반영은 아래 reloadTlsFor의 443 라우트 갱신이 담당한다.
       adminTls: undefined,
+      // 웹 이름도 전용 리스너가 없다 — 반영은 reloadTlsFor의 443 라우트 갱신이 담당한다.
+      webTls: undefined,
     };
   }
 
@@ -1689,6 +1754,11 @@ export class IonosphereApp {
         // admin 이름이 여럿일 수 있다(멀티테넌트·별칭). 전부 갈아끼운다 — 하나라도 빠지면
         // 그 이름만 만료 인증서를 제시한다.
         for (const h of hostsFor(this.opts.serviceHosts, "admin")) this.httpsFront.reloadRouteTls(h, m);
+      }
+      // ★webTls도 같은 부류다. 웹 이름의 인증서는 url 소스가 6시간마다 다시 받아 오는데,
+      //   여기서 라우트 사본을 갈지 않으면 받아 놓고도 만료된 인증서를 계속 제시한다.
+      if (name === "webTls" && this.httpsFront && this.webRedirect) {
+        for (const h of this.webRedirect.hosts) this.httpsFront.reloadRouteTls(h, m);
       }
     }
   }
@@ -1958,6 +2028,40 @@ export class IonosphereApp {
         });
         ctx.log.info("관리 콘솔을 443에 얹음 — 내부 인터페이스 전용 + 토큰 인증", {
           hosts: adminHosts.join(","),
+        });
+      }
+      /**
+       * 웹 이름 → 계정 셀프서비스 301. **프록시가 아니라 로컬 응답**이라 upstream이 없다.
+       *
+       * ★인증서는 webTls 소스의 것을 SNI로 제시한다. admin과 같은 이유다 — 웹 이름은 메일
+       * 인증서와 별개 발급물이고, 443 기본 자료를 바꾸면 MTA-STS 정책 서빙이 흔들린다.
+       * 전용 소스 확보에 실패해도 라우트는 넣는다. 그 순간에는 443 기본 인증서를 제시해 이름 불일치가
+       * 날 수 있지만, url 소스가 다음 폴링에서 회복하면 `reloadRouteTls`가 이 라우트에 자료를 붙여
+       * 재시작 없이 복구한다. 라우트를 빼면 갱신 콜백이 붙일 대상이 없어 영구히 복구되지 않는다(2026-10-19 리뷰).
+       */
+      /*
+       * ⚠ 전용 소스가 **없으면** 라우트에 자료를 붙이지 않는다(기본 자료를 SNI 없이 제시).
+       * `tlsFor`는 소스가 없을 때 기본 자료를 돌려주는데, 그 사본을 라우트에 붙이면 기본 소스
+       * 갱신은 `reloadTls`(기본 컨텍스트)만 바꾸고 라우트 사본은 옛것으로 남는다.
+       */
+      const webHasOwnSource = this.opts.certSources?.webTls !== undefined;
+      const webFrontTls = webHasOwnSource ? ctx.tlsFor("webTls") : null;
+      if (this.webRedirect) {
+        routes.push({
+          hosts: this.webRedirect.hosts,
+          redirect: this.webRedirect.location,
+          ...(webFrontTls ? { tls: webFrontTls } : {}),
+          // 사람이 인터넷에서 브라우저로 오는 이름이다.
+          exposure: ROUTE_EXPOSURE.public,
+        });
+        if (webHasOwnSource && !webFrontTls) {
+          ctx.log.error("웹 전용 인증서를 확보하지 못해 443 기본 인증서로 시작 — 다음 인증서 폴링에서 자동 복구", {
+            hosts: this.webRedirect.hosts.join(","),
+          });
+        }
+        ctx.log.info("웹 이름을 443에서 301로 보냄", {
+          hosts: this.webRedirect.hosts.join(","),
+          location: this.webRedirect.location,
         });
       }
       /**
