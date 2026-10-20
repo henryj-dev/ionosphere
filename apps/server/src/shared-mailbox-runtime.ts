@@ -70,7 +70,7 @@ export class SharedMailboxRuntime implements SharedMailboxAdminPort {
     const source = this.opts.directorySources?.[provider];
     if (!source) throw new CommandError("unavailable", `directory provider가 구성되지 않았습니다: ${provider}`);
     const snapshot = await source.read(tenantId);
-    const input = await directorySyncInputFromSnapshot(this.opts.db, { tenantId, provider, now: Date.now(), snapshot });
+    const input = directorySyncInputFromSnapshot({ tenantId, provider, now: Date.now(), snapshot });
     await syncDirectorySnapshot(this.opts.db, input);
     return { data: { provider, identities: snapshot.identities.length, groups: snapshot.groups.length }, message: "directory snapshot 동기화 완료" };
   }

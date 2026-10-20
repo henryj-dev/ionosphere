@@ -95,6 +95,7 @@ export { scramSegment, buildScramSegment, scramKeysFor, scramAuthorize, type Sto
 export { AUTH_SURFACES, credentialAllowsSurface, type AuthSurface } from "./auth.ts";
 export { createBayesStore } from "./bayes-store.ts";
 export { directoryMembershipSource, directorySyncInputFromSnapshot, syncDirectorySnapshot, type DirectoryGroupSync, type DirectoryIdentitySync, type DirectorySyncInput } from "./directory-sync.ts";
+export { DIRECTORY_CLAIM_REALM, directoryClaimStatement, linkDirectoryIdentityWithClaim, unlinkDirectoryIdentityWithClaim, type DirectoryLinkResult } from "./directory-claims.ts";
 export { backfillHeaderProjection, projectHeaders, HEADER_PROJECTION_LIMITS, HEADER_PROJECTION_NAMES, type HeaderBackfillOptions, type HeaderProjection, type HeaderProjectionKind, type HeaderProjectionName } from "./header-projection.ts";
 export { getOrLoadListing, listingCacheKey, ListingCache, LISTING_CACHE_LIMITS, type ListingCacheKeyParts, type ListingCacheOptions } from "./listing-cache.ts";
 
